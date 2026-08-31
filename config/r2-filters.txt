@@ -6,4 +6,21 @@
 - /raw/**/*.jsonl
 # производный индекс copilot, 85 МБ, гонять между устройствами незачем (§1)
 - /.obsidian/copilot-index-*.json
+# Залипшие объекты R2: GET/LIST отдают их, PUT и DELETE — HTTP 500 InternalError
+# (проверено 2026-09-01, на свежесозданном ключе delete в том же бакете работает).
+# Всё это остатки реструктуризации §3: содержимое живёт в волте под новым путём
+# либо в истории git. Исключены, чтобы bisync не тянул их обратно в волт.
+# Убрать эти строки, когда Cloudflare отпустит ключи — см. scripts/r2-retry-orphans.sh
+- /_возобновление клода.md
+- /atman/benchmarks/BENCHMARKS.md
+- /atman/development/ROADMAP.md
+- /atman/development/work-packages/06-reality-and-affect.md
+- /atman/features/reflection-engine/README.md
+- /atman/Форма подачи на подачки.md
+- /kb/notes/возобновление клода.md
+- /stickerz/Инструкция_автодеплой.md
+- /Без названия.md
+- /Умный дом/iot stack/MQTT_TOPICS.md
+- /возобновление клода.md
+- /комиксы/proekt_zametki-1.md
 + **

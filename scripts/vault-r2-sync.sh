@@ -37,7 +37,7 @@ if [ ! -d "$STATE" ] || ! ls "$STATE"/*.lst >/dev/null 2>&1; then
   # кириллице расходится с тем, чем сортировали, — сыплет "not in sorted order"
   # и врёт результатом.
   stale=$(LC_ALL=C; export LC_ALL
-          comm -23 <("$RCLONE" lsf -R --files-only "$REMOTE" | sort) \
+          comm -23 <("$RCLONE" lsf -R --files-only --filter-from "$FILTERS" "$REMOTE" | sort) \
                    <(cd "$VAULT" && find . -type f -not -path "./.git/*" -printf "%P\n" | sort))
   if [ -n "$stale" ]; then
     echo "resync отменён: в R2 есть файлы, которых нет в волте." >&2

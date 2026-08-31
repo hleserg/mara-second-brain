@@ -1,0 +1,12 @@
+_возобновление клода.md
+atman/benchmarks/BENCHMARKS.md
+atman/development/ROADMAP.md
+atman/development/work-packages/06-reality-and-affect.md
+atman/features/reflection-engine/README.md
+atman/Форма подачи на подачки.md
+kb/notes/возобновление клода.md
+stickerz/Инструкция_автодеплой.md
+Без названия.md
+Умный дом/iot stack/MQTT_TOPICS.md
+возобновление клода.md
+комиксы/proekt_zametki-1.md
