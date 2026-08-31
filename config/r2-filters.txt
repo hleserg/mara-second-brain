@@ -1,0 +1,9 @@
+# Исключения синка R2 (ТЗ §2.1). Порядок важен: rclone берёт первое совпадение.
+- /.git/**
+- /.smart-env/**
+- /.basic-memory/**
+- /.obsidian/workspace*.json
+- /raw/**/*.jsonl
+# производный индекс copilot, 85 МБ, гонять между устройствами незачем (§1)
+- /.obsidian/copilot-index-*.json
++ **
