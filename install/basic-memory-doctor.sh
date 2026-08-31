@@ -46,7 +46,11 @@ systemctl is-active --quiet basic-memory-mcp.service || {
 pid=$(systemctl show -p MainPID --value basic-memory-mcp.service)
 sock=$(sudo ss -ltnp | grep "pid=$pid," || true)
 [ -n "$sock" ] || { echo "ОШИБКА: сервис жив, но не слушает" >&2; exit 1; }
-grep -qE '(0\.0\.0\.0|\[::\]):' <<<"$sock" && {
-  echo "ОШИБКА: MCP слушает наружу — нарушение ТЗ §11" >&2; echo "$sock" >&2; exit 1; }
+# 4-я колонка ss — локальный адрес. 5-я это peer, там всегда 0.0.0.0:* — не она.
+local_addr=$(awk '{print $4}' <<<"$sock")
+case "$local_addr" in
+  127.0.0.1:*|\[::1\]:*) ;;
+  *) echo "ОШИБКА: MCP слушает $local_addr — нарушение ТЗ §11" >&2; exit 1 ;;
+esac
 echo "$sock"
 echo "ок: MCP только на loopback, порт $PORT"
