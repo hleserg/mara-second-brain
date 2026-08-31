@@ -3,6 +3,7 @@
 - /.smart-env/**
 - /.basic-memory/**
 - /.obsidian/workspace*.json
+- **/.DS_Store
 - /raw/**/*.jsonl
 # производный индекс copilot, 85 МБ, гонять между устройствами незачем (§1)
 - /.obsidian/copilot-index-*.json
