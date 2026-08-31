@@ -42,7 +42,10 @@ args=(bisync "$VAULT" "$REMOTE"
 # .lst-old остаётся от прерванного прогона: базовая линия жива, её поднимет
 # --recover. Без этой проверки любой убитый bisync выглядел бы как «синка
 # никогда не было» и тянул за собой лишний --resync.
-if ! ls "$STATE"/*.lst "$STATE"/*.lst-old 2>/dev/null | grep -q .; then
+shopt -s nullglob
+have_state=("$STATE"/*.lst "$STATE"/*.lst-old)   # через ls нельзя: pipefail
+shopt -u nullglob                                # ловит несовпавший глоб
+if [ ${#have_state[@]} -eq 0 ]; then
   # LC_ALL=C нужен и comm тоже: он сверяет порядок своей локалью, и при
   # кириллице расходится с тем, чем сортировали, — сыплет "not in sorted order"
   # и врёт результатом.
