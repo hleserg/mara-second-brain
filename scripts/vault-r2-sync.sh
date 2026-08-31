@@ -20,7 +20,10 @@ args=(bisync "$VAULT" "$REMOTE"
   --filters-file "$FILTERS"
   --conflict-resolve newer
   --max-delete 25
-  --resilient --recover)
+  --resilient --recover
+  # R2 периодически отвечает 500 InternalError на PutObject. Без этого
+  # bisync падает с одной попытки и требует --resync для восстановления.
+  --retries 3 --low-level-retries 10)
 
 # Первый прогон обязан быть --resync. path1 (волт на doctor) — надмножество R2,
 # так что ничего из бакета не теряется.
