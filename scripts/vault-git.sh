@@ -20,6 +20,9 @@ case "$1" in
     git add -A
     git diff --cached --quiet && exit 0   # нечего коммитить — тихо выходим
     git commit -q -m "auto: $(date -Iseconds)"
+    # raw/ — растущие jsonl, каждый досинк кладёт новый блоб целиком.
+    # gc --auto сам решает, когда паковать в дельты; без него репозиторий пухнет.
+    git gc --auto -q
     ;;
   push)
     git push -q --mirror "$MIRROR"
