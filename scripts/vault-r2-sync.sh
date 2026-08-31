@@ -33,8 +33,12 @@ args=(bisync "$VAULT" "$REMOTE"
 # воскрешает по новой порции. Поэтому перед resync проверяем, что в R2 нет
 # ничего лишнего, и отказываемся работать, если есть.
 if [ ! -d "$STATE" ] || ! ls "$STATE"/*.lst >/dev/null 2>&1; then
-  stale=$("$RCLONE" lsf -R --files-only "$REMOTE" | LC_ALL=C sort | comm -23 - \
-          <(cd "$VAULT" && find . -type f -not -path "./.git/*" -printf "%P\n" | LC_ALL=C sort))
+  # LC_ALL=C нужен и comm тоже: он сверяет порядок своей локалью, и при
+  # кириллице расходится с тем, чем сортировали, — сыплет "not in sorted order"
+  # и врёт результатом.
+  stale=$(LC_ALL=C; export LC_ALL
+          comm -23 <("$RCLONE" lsf -R --files-only "$REMOTE" | sort) \
+                   <(cd "$VAULT" && find . -type f -not -path "./.git/*" -printf "%P\n" | sort))
   if [ -n "$stale" ]; then
     echo "resync отменён: в R2 есть файлы, которых нет в волте." >&2
     echo "resync затащил бы их обратно. Удалить их из бакета или вернуть в волт:" >&2
