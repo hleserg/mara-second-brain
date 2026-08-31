@@ -25,6 +25,8 @@ cat > .gitignore <<'IGN'
 .smart-env/
 .basic-memory/
 .obsidian/workspace*.json
+# производный индекс плагина copilot, 85 МБ, восстановим (ТЗ §1)
+.obsidian/copilot-index-*.json
 *.tmp
 .DS_Store
 IGN
