@@ -52,10 +52,11 @@ say "bare-зеркало $MIRROR"
 git -C "$MIRROR" symbolic-ref HEAD refs/heads/main
 git push -q --mirror "$MIRROR"
 
-say "крон: коммит /15 мин, пуш /час"
+say "крон: синк R2 /5 мин, коммит /15 мин, пуш /час"
 tmp=$(mktemp)
 crontab -l 2>/dev/null | grep -v '# mara-second-brain$' > "$tmp" || true
 cat >> "$tmp" <<CRON
+*/5 * * * *  $REPO/scripts/vault-r2-sync.sh # mara-second-brain
 */15 * * * * $REPO/scripts/vault-git.sh commit # mara-second-brain
 0 * * * *    $REPO/scripts/vault-git.sh push   # mara-second-brain
 CRON
