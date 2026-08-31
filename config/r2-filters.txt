@@ -29,4 +29,22 @@
 - /комиксы/proekt_zametki-1.md
 - /_selftest-1788210698.md
 - /_probe2.txt
+# Испорченные объекты, которые ЕСТЬ в волте: R2 отдаёт по ним 500 на PUT/DELETE
+# детерминированно (два независимых прогона — один и тот же список из 14).
+# Исключены, чтобы bisync не падал на них и синкал остальные 170 файлов.
+# Волт остаётся источником истины (§1); в R2 по ним лежит устаревшая копия.
+- /archive/scraps/Открытки.md
+- /copilot/copilot-custom-prompts/Fix grammar and spelling.md
+- /entities/projects/.gitkeep
+- /kb/howto/atman/architecture/DATADOG-LLM-OBSERVABILITY.md
+- /kb/howto/atman/development/TEST_COVERAGE_PLAN.md
+- /kb/howto/atman/ENDPOINTS.md
+- /kb/howto/atman/research/agent-ui-research.md
+- /kb/howto/smart-home/HANDOFF.md
+- /kb/notes/diary-2026/Баофенги учет.md
+- /kb/notes/diary-2027/01-карта-клиента.md
+- /.obsidian/community-plugins.json
+- /.obsidian/plugins/calendar/manifest.json
+- /.obsidian/plugins/pdf-plus/main.js
+- /views/Когда я узнал.base
 + **
