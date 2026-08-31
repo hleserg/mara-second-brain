@@ -13,8 +13,8 @@ PORT="${PORT:-8765}"
 BM_VERSION="${BM_VERSION:-0.22.1}"
 BIN="$HOME/.local/bin"
 
-command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$BIN:$PATH"
+command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv tool install "basic-memory==$BM_VERSION"
 basic-memory project add vault "$VAULT" 2>/dev/null || true
