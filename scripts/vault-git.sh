@@ -5,7 +5,7 @@ set -euo pipefail
 
 VAULT="${VAULT:-/srv/vault}"
 MIRROR="${MIRROR:-/srv/backup/vault.git}"
-LOCK="${LOCK:-/run/lock/vault-git.lock}"
+LOCK="${LOCK:-$VAULT/.git/vault-git.lock}"   # общий с vault-r2-sync.sh: §13.8
 
 usage() { echo "usage: $0 {commit|push}" >&2; exit 2; }
 [ $# -eq 1 ] || usage
