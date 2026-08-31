@@ -48,7 +48,8 @@ git add -A
 git diff --cached --quiet || git commit -q -m "vault: структура из ТЗ §3"
 
 say "bare-зеркало $MIRROR"
-[ -d "$MIRROR" ] || git init -q --bare "$MIRROR"
+[ -d "$MIRROR" ] || git init -q --bare -b main "$MIRROR"
+git -C "$MIRROR" symbolic-ref HEAD refs/heads/main
 git push -q --mirror "$MIRROR"
 
 say "крон: коммит /15 мин, пуш /час"
