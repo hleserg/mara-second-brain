@@ -21,6 +21,13 @@ args=(bisync "$VAULT" "$REMOTE"
   --conflict-resolve newer
   --max-delete 25
   --resilient --recover
+  # Свой lock-файл bisync ставит без срока годности (до 2226 года): один
+  # прибитый прогон — и все следующие падают с "prior lock file found".
+  # 15 минут живой прогон продлевает сам, зависший — отпускает.
+  --max-lock 15m
+  # R2 умеет висеть на соединении молча. Без этих двух прогон стоял 15 минут
+  # с нулевым CPU, держа общий с vault-git.sh флок.
+  --contimeout 20s --timeout 60s
   # R2 периодически отвечает 500 InternalError на PutObject. Без этого
   # bisync падает с одной попытки и требует --resync для восстановления.
   --retries 3 --low-level-retries 10)
@@ -48,4 +55,6 @@ if [ ! -d "$STATE" ] || ! ls "$STATE"/*.lst >/dev/null 2>&1; then
   args+=(--resync --resync-mode path1)
 fi
 
-"$RCLONE" "${args[@]}"
+# Жёсткий потолок: крон ходит каждые 5 минут, а флок общий с автокоммитом.
+# Прогон, не уложившийся в 4 минуты, лучше убить — следующий доделает.
+exec timeout -k 10s 4m "$RCLONE" "${args[@]}"
