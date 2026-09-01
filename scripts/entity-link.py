@@ -153,8 +153,14 @@ def main(argv=None):
     canon = canon_map(a.vault)
     made, review = create(a.vault, harvest(a.vault), canon, a.min)
     if a.dry_run:
-        for _, _, name, n in made: print("завёл бы: %s (%d)" % (name, n))
-        print("кандидатов в review: %d" % len(review))
+        for _, _, name, n in made: print("завёл бы: %s (%d упом.)" % (name, n))
+        files = links = 0
+        for p, _, text in cards(a.vault):
+            new, n = relink(text, canon)
+            links += n
+            files += new != text
+        print("entity-link (вхолостую): сущностей %d, карточек переписал бы %d, "
+              "ссылок %d, кандидатов в review %d" % (len(made), files, links, len(review)))
         return 0
 
     with locked(a.vault):
