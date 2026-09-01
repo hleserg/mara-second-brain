@@ -14,7 +14,7 @@ OpenRouter → переписывает тело карточки и стави�
 Запускать питоном из venv с presidio:
   ~/.local/share/mara/venv/bin/python scripts/queue-worker.py
 """
-import json, os, re, sys, argparse, urllib.request, urllib.error
+import json, os, re, sys, fcntl, argparse, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import redact
 from session_note_compat import messages   # см. ниже
@@ -22,6 +22,20 @@ from session_note_compat import messages   # см. ниже
 API = "https://openrouter.ai/api/v1/chat/completions"
 MAX_CHARS = 100_000     # ~25k токенов; вход дешёвый, но лишний хвост только шумит
 MAX_ATTEMPTS = 3
+
+def only_one():
+    """Второй воркер платил бы за те же задачи второй раз и снимал бы из-под
+    первого файл задачи. Крон стоит на *:40, а ручной разбор длинной очереди
+    идёт дольше часа — они пересекаются. Файл не в волте: волт уезжает в R2,
+    а замок машинный. Держит его открытый дескриптор, до конца процесса."""
+    d = os.path.expanduser("~/.local/state/mara")
+    if not os.path.isdir(d): os.makedirs(d)
+    fh = open(os.path.join(d, "queue-worker.lock"), "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    return fh
 
 def load_env(path):
     """~/.config/mara/env: KEY=value. Секреты в волте не держим (§11)."""
@@ -121,6 +135,10 @@ def main():
                     help="показать, что именно уехало бы в облако, и не отправлять")
     a = ap.parse_args()
 
+    lock = only_one()
+    if lock is None:
+        print("queue-worker: уже работает другой, пропускаю"); return 0
+
     load_env("~/.config/mara/env")
     key = os.environ.get("OPENROUTER_API_KEY")
     model = os.environ.get("MARA_DISTILL_MODEL", "deepseek/deepseek-v4-flash")
@@ -205,6 +223,9 @@ def self_check():
     open(raw, "w", encoding="utf-8").write("abc1234 С\nпочинил синк\n")
     assert payload(raw, "git").startswith("abc1234")
     assert PROMPTS["git"] != PROMPTS["distill"]
+    # замок берётся и не даётся второй раз в том же процессе
+    l1 = only_one(); assert l1 is not None and only_one() is None
+    l1.close(); assert only_one() is not None
     print("queue-worker: самопроверка ок")
     return 0
 
