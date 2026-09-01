@@ -12,7 +12,7 @@
     python3 scripts/git-ingest.py --vault /srv/vault            # за вчера
     python3 scripts/git-ingest.py --date 2026-08-31 --dry-run
 """
-import os, re, sys, json, argparse, subprocess
+import os, re, sys, json, fcntl, argparse, subprocess, contextlib
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -94,6 +94,18 @@ def write(path, text):
     with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
     os.replace(tmp, path)
 
+@contextlib.contextmanager
+def locked(vault):
+    """Общий с автокоммитом и bisync флок (§13.8). Берём его только вокруг
+    записи в волт: качать зеркала под ним — значит держать синк все те минуты,
+    что идёт clone."""
+    fh = open(os.path.join(vault, ".git/vault-git.lock"), "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        fh.close()
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
@@ -124,13 +136,14 @@ def main(argv=None):
         raw_rel = "raw/git/%s/%s.txt" % (name, day)
         if a.dry_run:
             print("=" * 60, "\n%s %s\n" % (name, day), text[:1500]); made += 1; continue
-        write(os.path.join(a.vault, raw_rel), text + "\n")
-        write(cardp, card(name, day, text, canon, raw_rel))
-        write(os.path.join(a.vault, "_system/queue", "git-%s-%s.json" % (name, day)),
-              json.dumps({"kind": "git", "source": "git", "source_id": "%s@%s" % (name, day),
-                          "note": os.path.relpath(cardp, a.vault), "raw": raw_rel,
-                          "queued": datetime.now().astimezone().isoformat(timespec="seconds")},
-                         ensure_ascii=False, indent=2) + "\n")
+        with locked(a.vault):
+            write(os.path.join(a.vault, raw_rel), text + "\n")
+            write(cardp, card(name, day, text, canon, raw_rel))
+            write(os.path.join(a.vault, "_system/queue", "git-%s-%s.json" % (name, day)),
+                  json.dumps({"kind": "git", "source": "git", "source_id": "%s@%s" % (name, day),
+                              "note": os.path.relpath(cardp, a.vault), "raw": raw_rel,
+                              "queued": datetime.now().astimezone().isoformat(timespec="seconds")},
+                             ensure_ascii=False, indent=2) + "\n")
         made += 1
     print("git-ingest %s: заметок %d, уже было %d" % (day, made, skipped))
     if unreachable:
