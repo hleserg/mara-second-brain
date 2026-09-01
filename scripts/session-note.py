@@ -134,6 +134,21 @@ def _local(iso):
 def _now():
     return datetime.now(TZ)
 
+# Домашний каталог и временные — не проект, а «запустил откуда попало».
+# По шаблону, а не через expanduser: подбор карточек крутится на doctor, а
+# сессии приезжают с чужих машин, где домашний каталог другой. На doctor
+# expanduser давал /home/sergey и пропускал beta-pi'шный /home/hleserg.
+JUNK_CWD = re.compile(r"""\A(?: /tmp | /var/tmp | /private/var/folders/.*
+                            | (?:/home|/Users)/[^/]+
+                            | /root )\Z""", re.X)
+
+def _project(cwd):
+    cwd = (cwd or "").rstrip("/")
+    if not cwd or JUNK_CWD.match(cwd): return None
+    name = os.path.basename(cwd)
+    # .claude, .config и прочие служебные каталоги проектами не бывают.
+    return None if name.startswith(".") else name
+
 def _scrub(s):
     """Реплика человека попадает в карточку как есть, а карточка синкается.
     Сергей регулярно вставляет ключи прямо в запрос — вот тут они и уехали бы."""
@@ -156,10 +171,7 @@ def render(f, sid, raw_rel):
     end = _local(ts[-1]) if ts else start
     prompt = _scrub(re.sub(r"\s+", " ", (f["prompt"] or "").strip()))
     title = _scrub(f["title"] or "") or _clip(prompt, 80) or "Сессия %s" % sid[:8]
-    # /tmp и домашний каталог — не проект, а «запустил откуда попало».
-    cwd = (f["cwd"] or "").rstrip("/")
-    project = os.path.basename(cwd) if cwd and cwd not in ("", "/tmp", "/var/tmp",
-                                                           os.path.expanduser("~")) else None
+    project = _project(f["cwd"])
 
     fm = ["---",
           "title: " + _yaml_str(title),
@@ -260,6 +272,9 @@ def self_check():
         assert "distilled: false" in first
         assert "raw/claude-code/-home-x-proj/S1.jsonl" in first
         assert "project: \"[[proj]]\"" in first
+        assert [_project(c) for c in ("/home/hleserg", "/Users/serg", "/tmp",
+                                      "/home/x/.claude", "/srv/vault", None)] \
+               == [None, None, None, None, "vault", None]
         assert "Почини синк" in first and "tool_result" not in first
         main([tp, "--vault", v])                        # идемпотентность §6.1
         assert os.listdir(os.path.join(v, "kb/sessions")) == ["S1.md"]
