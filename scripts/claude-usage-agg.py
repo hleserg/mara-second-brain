@@ -13,7 +13,7 @@ statusline (`Claude Usage/_data/<хост>/ticks-*.jsonl`) и транскрип
     python3 scripts/claude-usage-agg.py                 # пересобрать и записать
     python3 scripts/claude-usage-agg.py --dry-run       # посчитать и показать
 """
-import os, re, sys, json, glob, math, bisect, argparse, importlib.util, collections
+import os, re, sys, json, glob, math, time, fcntl, bisect, argparse, importlib.util, collections
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -827,8 +827,21 @@ def main(argv=None):
     if a.dry_run:
         n = emit(m, dry=True)
     else:
-        with vault_common.locked(a.vault):         # флок общий с автокоммитом и bisync
-            n = emit(m)
+        # Флок общий с автокоммитом и bisync (§13.8). Ждём его недолго и не
+        # блокирующе: прогон раз в пять минут, а resync bisync держит лок до
+        # десяти минут — очередь из ждущих процессов тут не нужна никому,
+        # следующий прогон посчитает то же самое.
+        fh = open(os.path.join(a.vault, ".git/vault-git.lock"), "w")
+        for _ in range(30):
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError: time.sleep(2)
+        else:
+            print("claude-usage-agg: волт занят, пропускаю прогон")
+            return 0
+        try: n = emit(m)
+        finally: fh.close()
     print("claude-usage-agg: тиков %d, шагов недели %d, сессий %d, ходов %d, "
           "файлов %s %d" % (len(m["ticks"]), len(m["st7"]), len(m["sessions"]),
                             len(m["turns"]), "изменилось бы" if a.dry_run else "обновлено", n))
