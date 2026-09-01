@@ -112,7 +112,9 @@ def main():
         raw = os.path.join(a.vault, job.get("raw", ""))
         if not os.path.exists(card) or not os.path.exists(raw):
             print("queue-worker: нет карточки или сырья, снимаю", name); os.unlink(jp); continue
-        head = open(card, encoding="utf-8").read()
+        # Только фронтматтер: карточка про работу с фронтматтером легко
+        # содержит строку "sensitive: true" в теле, и задача висела бы вечно.
+        head = open(card, encoding="utf-8").read().split("\n---", 2)[0]
         if re.search(r"(?m)^sensitive:\s*['\"]?true", head):
             held += 1; continue                        # §8.3.3 — облако не трогает
         if re.search(r"(?m)^distilled:\s*['\"]?true", head):

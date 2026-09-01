@@ -13,6 +13,12 @@ import json, os, re, sys, argparse
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Слой 1 из §8.3 — чистые регэкспы, presidio не тянет, работает где угодно.
+# Импорт намеренно жёсткий: лучше не собрать карточку вовсе, чем записать в
+# волт ключ. Волт уезжает в R2 и коммитится — §11, «секреты не в волте, никогда».
+from redact import SECRETS
+
 # Codex вклеивает AGENTS.md и окружение первым же user-сообщением. Это не то,
 # «с чего началось» — настоящий запрос идёт следующим.
 CODEX_INJECTED = ("# AGENTS.md instructions", "<environment_context>", "<user_instructions>")
@@ -128,6 +134,12 @@ def _local(iso):
 def _now():
     return datetime.now(TZ)
 
+def _scrub(s):
+    """Реплика человека попадает в карточку как есть, а карточка синкается.
+    Сергей регулярно вставляет ключи прямо в запрос — вот тут они и уехали бы."""
+    for rx, repl in SECRETS: s = rx.sub(repl, s)
+    return s
+
 def _clip(s, n):
     """Обрезка по границе слова: заголовок, разорванный посередине, потом
     попадает в эмбеддинги и в графы — пусть хотя бы читается."""
@@ -142,8 +154,8 @@ def render(f, sid, raw_rel):
     ts = sorted(f["ts"])
     start = _local(ts[0]) if ts else _now()
     end = _local(ts[-1]) if ts else start
-    prompt = re.sub(r"\s+", " ", (f["prompt"] or "").strip())
-    title = f["title"] or _clip(prompt, 80) or "Сессия %s" % sid[:8]
+    prompt = _scrub(re.sub(r"\s+", " ", (f["prompt"] or "").strip()))
+    title = _scrub(f["title"] or "") or _clip(prompt, 80) or "Сессия %s" % sid[:8]
     # /tmp и домашний каталог — не проект, а «запустил откуда попало».
     cwd = (f["cwd"] or "").rstrip("/")
     project = os.path.basename(cwd) if cwd and cwd not in ("", "/tmp", "/var/tmp",
@@ -281,6 +293,10 @@ def self_check():
         assert _clip("раз два три четыре", 12) == "раз два три…"
         assert _clip("короткое", 40) == "короткое"
 
+        # секрет в первой же реплике не должен доехать до волта
+        assert "<API_KEY>" in render(
+            {**_blank(), "prompt": "вот ключ sk-or-v1-abcdefghijklmnopqrstuvwx, вставь"},
+            "S9", "raw/x.jsonl")
         m = list(messages(tp))
         assert m == [("user", "Почини синк")], m        # tool_result и thinking мимо
         mc = list(messages(cp))
