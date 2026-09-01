@@ -45,13 +45,21 @@ def write(path, text):
     with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
     os.replace(tmp, path)
 
-def lint(known):
+def lint(idx):
     """§5.6: [[X]] без файла X. Ссылка на несуществующую заметку хуже, чем её
     отсутствие — граф в Obsidian копит фантомные узлы."""
-    # Целью ссылки может быть любая заметка волта, не только сущность.
-    notes = {os.path.splitext(os.path.basename(p))[0]
+    # Цель резолвится по ИМЕНИ ФАЙЛА и без учёта регистра, целью может быть
+    # любая заметка волта, не только сущность (канонические имена — тоже
+    # имена файлов, отдельно их добавлять не надо).
+    notes = {os.path.splitext(os.path.basename(p))[0].lower()
              for p in glob.glob(os.path.join(VAULT, "**", "*.md"), recursive=True)}
-    broken = {}
+    # А вот алиас из фронтматтера голой ссылкой `[[алиас]]` Obsidian НЕ
+    # резолвит: выбрав алиас в автодополнении, он вставляет
+    # `[[Каноническое|алиас]]` — «rather than just using the alias as the link
+    # destination», docs/aliases. Значит `[[алиас]]` — такой же фантом, просто
+    # незаметнее, и молчать про него нельзя.
+    alias_of = {a.lower(): e["canonical"] for e in idx for a in e["aliases"]}
+    broken, aliased = {}, {}
     for p in glob.glob(os.path.join(VAULT, "**", "*.md"), recursive=True):
         # prompts — инструкции модели, там [[wikilinks]] упоминаются как слово.
         # broken-links.md — свой же прошлый отчёт: без этого линтер
@@ -60,21 +68,27 @@ def lint(known):
                                 "/_system/broken-links.md")): continue
         for t in LINK.findall(open(p, encoding="utf-8", errors="replace").read()):
             t = t.strip()
-            if t and t not in notes and t not in known:
-                broken.setdefault(t, []).append(os.path.relpath(p, VAULT))
+            if not t or t.lower() in notes: continue
+            (aliased if t.lower() in alias_of else broken).setdefault(t, []).append(
+                os.path.relpath(p, VAULT))
+    def table(d, head, fix):
+        if not d: return []
+        rows = [head, "", "| Цель | Упоминаний | Где | Чинить |", "|---|---:|---|---|"]
+        for t, files in sorted(d.items(), key=lambda kv: -len(kv[1])):
+            rows.append("| `[[%s]]` | %d | %s | %s |" % (t, len(files), ", ".join(
+                "`%s`" % f for f in sorted(set(files))[:3]), fix(t)))
+        return rows + [""]
     out = ["# Битые ссылки", "",
            "Автоотчёт `scripts/entity-index.py --lint` (ТЗ §5.6). Правится либо",
            "созданием сущности в `entities/`, либо снятием ссылки.", ""]
-    if not broken:
+    out += table(broken, "## Цели нет вовсе", lambda t: "завести `entities/…/%s.md`" % t)
+    out += table(aliased, "## Линкуется по алиасу — Obsidian не резолвит",
+                 lambda t: "заменить на `[[%s\\|%s]]`" % (alias_of[t.lower()], t))
+    if not broken and not aliased:
         out.append("Битых ссылок нет.")
-    else:
-        out.append("| Цель | Упоминаний | Где |")
-        out.append("|---|---:|---|")
-        for t, files in sorted(broken.items(), key=lambda kv: -len(kv[1])):
-            out.append("| `[[%s]]` | %d | %s |" % (t, len(files), ", ".join(
-                "`%s`" % f for f in sorted(set(files))[:3])))
     write(os.path.join(VAULT, "_system", "broken-links.md"), "\n".join(out) + "\n")
-    return sum(len(v) for v in broken.values()), len(broken)
+    return sum(len(v) for v in broken.values()) + sum(len(v) for v in aliased.values()), \
+           len(broken) + len(aliased)
 
 def main():
     idx = list(entities())
@@ -82,8 +96,7 @@ def main():
           json.dumps(idx, ensure_ascii=False, indent=1) + "\n")
     print("сущностей: %d, алиасов: %d" % (idx.__len__(), sum(len(e["aliases"]) for e in idx)))
     if "--lint" in sys.argv:
-        known = {e["canonical"] for e in idx} | {a for e in idx for a in e["aliases"]}
-        n, uniq = lint(known)
+        n, uniq = lint(idx)
         print("битых ссылок: %d упоминаний, %d разных целей" % (n, uniq))
 
 if __name__ == "__main__":

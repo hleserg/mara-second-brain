@@ -33,15 +33,20 @@ def load_env(path):
             k, v = l.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
-def entity_block(vault):
+def index(vault):
+    """Реестр сущностей. Нет файла — пустой список: и промпт останется с
+    запретом на любые ссылки, и links от модели отфильтруются в ноль."""
+    try:
+        return json.load(open(os.path.join(vault, "_system/entity-index.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+def entity_block(idx):
     """§5.3: реестр сущностей приезжает в промпт перед каждой дистилляцией.
     Без него модель линкует на выдуманные заметки — фантомный узел в графе
     хуже, чем отсутствие ссылки. Индекс собирает scripts/entity-index.py,
     крон дёргает его за пять минут до нас."""
-    try:
-        idx = json.load(open(os.path.join(vault, "_system/entity-index.json"), encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""     # нет индекса — промпт остаётся с запретом на любые ссылки
+    if not idx: return ""
     lines = ["\n\nРеестр сущностей. Линковать `[[имя]]` можно ТОЛЬКО на канонические",
              "имена из этого списка; алиасы приведены, чтобы ты узнал сущность в тексте.",
              "Встретил новую значимую сущность — не линкуй, перечисли в `people`",
@@ -77,7 +82,7 @@ def call_llm(prompt, text, model, key):
         d = json.loads(r.read())
     return json.loads(d["choices"][0]["message"]["content"])
 
-def rewrite_card(path, out):
+def rewrite_card(path, out, canon=()):
     """Меняем тело под фронтматтером и один флаг. Фронтматтер целиком не
     перегенерируем: Basic Memory нормализует YAML по-своему и дописывает
     permalink — переписав, мы бы каждый раз воевали с ним."""
@@ -93,6 +98,10 @@ def rewrite_card(path, out):
     for key, head in (("people", "Люди"), ("projects", "Проекты")):
         items = [str(i).strip() for i in (out.get(key) or []) if str(i).strip()]
         if items: body.append("%s: %s" % (head, ", ".join(items)))
+    # §5.3: в links модель кладёт и то, чего в реестре нет. Пропустив выдумку
+    # в тело, мы бы своими руками наполняли отчёт линтера (§5.6).
+    links = [x for x in (str(i).strip() for i in (out.get("links") or [])) if x in canon]
+    if links: body.append("Связи: " + " · ".join("[[%s]]" % x for x in links))
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh: fh.write(fm + "\n".join(body).rstrip() + "\n")
     os.replace(tmp, path)     # атомарно: рядом крутятся автокоммит и bisync
@@ -117,8 +126,10 @@ def main():
         print("queue-worker: редакция §8.3 неполная (%s: %s), в облако не шлём, "
               "очередь держим" % (type(e).__name__, e)); return 0
 
+    idx = index(a.vault)
+    canon = {e["canonical"] for e in idx}
     prompt = open(os.path.join(a.vault, "_system/prompts/session-distill.md"),
-                  encoding="utf-8").read() + entity_block(a.vault)
+                  encoding="utf-8").read() + entity_block(idx)
     qdir = os.path.join(a.vault, "_system/queue")
     jobs = sorted(f for f in os.listdir(qdir) if f.endswith(".json"))
     done = held = 0
@@ -155,12 +166,30 @@ def main():
             with open(jp, "w", encoding="utf-8") as fh: json.dump(job, fh, ensure_ascii=False, indent=2)
             print("queue-worker: %s — %s (попытка %d)" % (name, job["last_error"], job["attempts"]))
             continue
-        if rewrite_card(card, out):
+        if rewrite_card(card, out, canon):
             os.unlink(jp); done += 1
             print("queue-worker: дистиллировано %s (вычищено: %s)" % (job.get("source_id"), stats or "ничего"))
     print("queue-worker: обработано %d, придержано %d, в очереди осталось %d"
           % (done, held, len(os.listdir(qdir)) - 1))
     return 0
 
+def self_check():
+    import tempfile
+    card = os.path.join(tempfile.mkdtemp(), "s.md")
+    open(card, "w", encoding="utf-8").write(
+        "---\ntitle: x\ndistilled: false\n---\n\nстарое тело\n")
+    assert rewrite_card(card, {"title": "Т", "summary": "с", "facts": ["ф"],
+                               "links": ["mara", "выдуманная-сущность"]}, {"mara"})
+    got = open(card, encoding="utf-8").read()
+    assert "distilled: true" in got and "старое тело" not in got
+    # выдумка модели отсеяна, иначе линтер §5.6 ловил бы наши же ссылки
+    assert "Связи: [[mara]]\n" in got + "\n", got
+    assert "выдуманная" not in got
+    # без реестра ссылок не бывает вовсе, а не «все подряд»
+    assert entity_block([]) == "" and rewrite_card(card, {"links": ["mara"]}) \
+           and "Связи" not in open(card, encoding="utf-8").read()
+    print("queue-worker: самопроверка ок")
+    return 0
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(self_check() if "--self-check" in sys.argv else main())
