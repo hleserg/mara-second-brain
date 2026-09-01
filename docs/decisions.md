@@ -379,3 +379,22 @@ mcp_servers:
 записанный кусок, и шлюз записал `Plugin message injection dispatched:
 plugin=mask-ear` и следом `inbound message: user=Сергей msg='Слышите?'`. Мара
 ответила. Так что оговорка про непроверенный последний прыжок снята — работает.
+
+**Поправка в 13:35, обе вчерашние оговорки были неверны.**
+
+Про ленивую загрузку я наврал. `discover_plugins()` вызывается в
+`gateway/run.py` внутри `GatewayRunner.start()`, то есть сторож встаёт вместе
+со шлюзом. Строку «слежу за …» я искал в `gateway.log`, а она уходит в
+`agent.log` под логгером `hermes_plugins.mask_ear` — в 13:07:23 она там и
+лежала, за одиннадцать минут до моего прогона. Писать Маре перед тем, как
+говорить в маску, не нужно.
+
+Про launchd: `launchctl bootstrap gui/$(id -u) …` падал с «125: Domain does
+not support specified action», потому что графической сессии на маке нет —
+`/dev/console` принадлежит root, `launchctl managername` отвечает `Background`,
+домена `gui/501` не существует. Правильный домен `user/$(id -u)`, и в плист
+добавлен `LimitLoadToSessionType` = Aqua+Background: без него агент считается
+Aqua-только и не поднимается вообще, в том числе после перезагрузки. И то и
+другое списано с твоего `ai.hermes.gateway.plist`. Приёмник теперь под launchd
+(PID 27352), прогон через него проверен: звук → текст → `inbound message:
+user=Сергей msg='Слышите?'`.
