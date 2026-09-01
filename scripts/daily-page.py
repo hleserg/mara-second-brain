@@ -11,7 +11,13 @@
 между маркерами и в самом верху: всё, что снаружи, переписывается как есть, а
 её `append` всегда падает ниже.
 
+Крон гоняет `--all`, а не «за вчера»: карточки приезжают задним числом —
+сессия за 27 июля разобралась 1 сентября, — а дистилляция очереди в 3:40 может
+не успеть до 3:55, и день застыл бы с механическим заголовком. Пересборка всех
+363 дней занимает секунду и ничего не переписывает, если ничего не менялось.
+
     python3 scripts/daily-page.py --vault /srv/vault              # за вчера
+    python3 scripts/daily-page.py --all                           # все дни
     python3 scripts/daily-page.py --since 2024-01-01 --date 2026-09-01
 """
 import os, re, sys, argparse
@@ -105,9 +111,13 @@ def head(day):
 
 
 def put(body, blk):
-    """Блок — сразу после заголовка дня, остальное не трогаем."""
+    """Блок — сразу после заголовка дня, остальное не трогаем.
+
+    Заголовок только первого уровня: секции дневника Мары — это `## 22:14`
+    (§7.2), и вставить блок между её заголовком и её же текстом значило бы
+    разорвать запись пополам."""
     if AUTO.search(body): return AUTO.sub(lambda _: blk + "\n", body, count=1)
-    m = re.match(r"\s*#[^\n]*\n+", body)
+    m = re.match(r"\s*#[ \t][^\n]*\n+", body)
     i = m.end() if m else 0
     return body[:i] + blk + "\n\n" + body[i:]
 
@@ -213,9 +223,18 @@ def self_check():
     open(p, "w", encoding="utf-8").write(cut)
     assert not write(v, "2026-08-31", scan(v)["2026-08-31"], CANON)
 
+    # файл, который Мара завела первой: её секция начинается с `##`, и блок
+    # должен встать над ней целиком, а не влезть между заголовком и текстом
+    d3 = os.path.join(v, "daily/2026-08-30.md")
+    open(d3, "w", encoding="utf-8").write("## 09:12\nвыспался наконец\n")
+    assert write(v, "2026-08-30", scan(v)["2026-08-30"], CANON)
+    got = read(d3)
+    assert got.index("mara:auto") < got.index("## 09:12"), got
+    assert "## 09:12\nвыспался наконец" in got, got
+
     # --all забирает и день, которого нет в диапазоне
     assert main(["--vault", v, "--all"]) == 0
-    assert os.path.exists(os.path.join(v, "daily/2026-08-30.md"))
+    assert "[[old|Старое]]" in read(d3)
     # пустой день страницы не заводит
     assert not os.path.exists(os.path.join(v, "daily/2026-08-29.md"))
 
