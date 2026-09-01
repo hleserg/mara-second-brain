@@ -116,8 +116,11 @@ def write(vault, day, items):
     m = FM.match(old)
     fm, body = (old[:m.start(2)], m.group(2)) if m else \
                (head(day), old or "# %s\n\n" % human(day))
-    new = fm + put(body, block(items))
-    if new == old: return False
+    new = (fm + put(body, block(items))).rstrip("\n") + "\n"
+    # Basic Memory переписывает файл следом за нами и срезает последний перевод
+    # строки. Сравнивать байт в байт значит переписывать все 363 страницы каждый
+    # прогон и драться с ним за один байт (§13.8).
+    if new.rstrip("\n") == old.rstrip("\n"): return False
     d = os.path.dirname(path)
     if not os.path.isdir(d): os.makedirs(d)
     tmp = path + ".tmp"                       # рядом крутятся автокоммит и bisync
@@ -192,6 +195,11 @@ def self_check():
     assert "[[s2|Ещё сессия]]" in got
     assert got.count("<!-- mara:auto -->") == 1 and got.count("## Код") == 1
     assert got.index("mara:auto") < got.index("заебался")
+
+    # хвостовой перевод строки, срезанный Basic Memory, — не повод переписывать
+    cut = read(p).rstrip("\n")
+    open(p, "w", encoding="utf-8").write(cut)
+    assert not write(v, "2026-08-31", scan(v)["2026-08-31"])
 
     # --all забирает и день, которого нет в диапазоне
     assert main(["--vault", v, "--all"]) == 0
