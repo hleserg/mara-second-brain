@@ -16,17 +16,28 @@ from datetime import datetime, timezone, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
+# Разговоры с человеком, а не машинная болтовня. У сессии есть колонка
+# source: telegram (Серёга пишет), cli (кто-то зашёл на мак руками), cron
+# (Мара сама себе по расписанию), subagent (делегирование). Чёрный список, а
+# не белый: заведёт он вотсап — тот подхватится сам. Без этого каждое
+# напоминание становилось карточкой и лезло в дневную сводку.
+SKIP = os.environ.get("MARA_SKIP_SOURCES", "cron,subagent,cli").split(",")
 # Без `active = 1`: компрессия контекста гасит старые сообщения, и живая
 # сессия со временем «худела» бы прямо в сырье. Синтетические выжимки
 # компрессии (_compressed_summary) наоборот не берём — это не то, что говорили.
-Q = ('select session_id,role,content,timestamp from messages '
-     "where role in ('user','assistant') and content is not null and content <> '' "
-     'and _compressed_summary = 0 order by session_id, id')
+def query(skip=None):
+    skip = SKIP if skip is None else skip
+    return ('select m.session_id,m.role,m.content,m.timestamp from messages m '
+            'join sessions s on s.id = m.session_id '
+            "where m.role in ('user','assistant') and m.content is not null "
+            "and m.content <> '' and m._compressed_summary = 0 "
+            'and s.source not in (%s) order by m.session_id, m.id'
+            % ",".join("'%s'" % x.strip() for x in skip))
 
 def fetch(mac, db):
     """Сообщения с мака. sqlite3 -json есть в macOS начиная с Sonoma."""
     out = subprocess.run(["ssh", "-o", "BatchMode=yes", mac,
-                          "sqlite3 -json %s %s" % (db, json_arg(Q))],
+                          "sqlite3 -json %s %s" % (db, json_arg(query()))],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     if out.returncode:
         raise RuntimeError(out.stderr.decode("utf-8", "replace").strip()[:200])
@@ -117,6 +128,10 @@ def self_check():
     assert not shrank("z" * 5000)     # дописали — пишем
     # кавычка в запросе не разваливает шелл
     assert json_arg("select 'a'") == """'select '\\''a'\\'''"""
+    # машинные сессии отсекаются в самом запросе, а не потом по тексту
+    q = query(["cron", "subagent"])
+    assert "s.source not in ('cron','subagent')" in q, q
+    assert "join sessions s on s.id = m.session_id" in q
     print("hermes-ingest: самопроверка ок")
     return 0
 
