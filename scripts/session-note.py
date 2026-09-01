@@ -149,6 +149,19 @@ def _project(cwd):
     # .claude, .config и прочие служебные каталоги проектами не бывают.
     return None if name.startswith(".") else name
 
+def _canon_map(vault):
+    """Алиас или каноническое имя → каноническое (§5.2). Проект — это имя
+    каталога, и линковать его можно, только если такая сущность заведена:
+    `[[что-попало]]` вешает в граф фантомный узел. На клиентском спуле индекса
+    нет — проект уедет обычным текстом, и это ровно то, что надо."""
+    try:
+        idx = json.load(open(os.path.join(vault or "", "_system/entity-index.json"),
+                             encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return {n.lower(): e["canonical"] for e in idx
+            for n in [e["canonical"]] + list(e.get("aliases") or [])}
+
 def _scrub(s):
     """Реплика человека попадает в карточку как есть, а карточка синкается.
     Сергей регулярно вставляет ключи прямо в запрос — вот тут они и уехали бы."""
@@ -165,7 +178,7 @@ def _clip(s, n):
 def _yaml_str(s):
     return '"%s"' % s.replace("\\", "\\\\").replace('"', '\\"')
 
-def render(f, sid, raw_rel):
+def render(f, sid, raw_rel, canon=None):
     ts = sorted(f["ts"])
     start = _local(ts[0]) if ts else _now()
     end = _local(ts[-1]) if ts else start
@@ -180,7 +193,11 @@ def render(f, sid, raw_rel):
           "source_id: " + sid,
           "created: " + _now().isoformat(timespec="seconds"),
           "occurred: " + start.date().isoformat()]
-    if project: fm.append("project: " + _yaml_str("[[%s]]" % project))
+    if project:
+        # Голый `[[алиас]]` Obsidian не резолвит — вставляет `[[Каноническое|алиас]]`,
+        # так что имя каталога приводим к каноническому, а незнакомое пишем текстом.
+        c = (canon or {}).get(project.lower())
+        fm.append("project: " + _yaml_str("[[%s]]" % c if c else project))
     fm += ["tags: [session, %s]" % f["source"],
            "sensitive: false",
            "distilled: false",
@@ -228,7 +245,7 @@ def main(argv=None):
     sid = a.session_id or f["sid"] or os.path.splitext(os.path.basename(a.transcript))[0]
     raw_rel = a.raw_rel or "raw/claude-code/%s/%s.jsonl" % (
         os.path.basename(os.path.dirname(os.path.abspath(a.transcript))), sid)
-    note = render(f, sid, raw_rel)
+    note = render(f, sid, raw_rel, _canon_map(a.vault))
     if not a.vault:
         sys.stdout.write(note); return 0
     if a.skip_existing and os.path.exists(os.path.join(a.vault, "kb/sessions", sid + ".md")):
@@ -271,7 +288,10 @@ def self_check():
         assert "occurred: 2026-08-30" in first          # дата события, не сегодня
         assert "distilled: false" in first
         assert "raw/claude-code/-home-x-proj/S1.jsonl" in first
-        assert "project: \"[[proj]]\"" in first
+        assert 'project: "proj"' in first        # не в реестре — текстом, без ссылки
+        assert 'project: "[[mara]]"' in render(
+            {**_blank(), "cwd": "/x/Mara-Second-Brain"}, "S8", "raw/x.jsonl",
+            {"mara-second-brain": "mara"})   # алиас и регистр приводим к канону
         assert [_project(c) for c in ("/home/hleserg", "/Users/serg", "/tmp",
                                       "/home/x/.claude", "/srv/vault", None)] \
                == [None, None, None, None, "vault", None]
