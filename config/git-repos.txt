@@ -4,10 +4,14 @@
 #   gh repo list hleserg --limit 200 --json name,isFork,diskUsage \
 #     -q '.[]|select(.diskUsage < 500000)|[.name,(if .isFork then "fork" else "own" end)]|@tsv' \
 #     | sort > config/git-repos.txt.new
+# Регенерация затирает третью колонку — вернуть руками.
 #
 # Отсечка 500 МБ выкидывает Momentum-Apps (1,2 ГБ) и all-the-plugins (570 МБ) —
 # это апстримные сборники прошивок Flipper, своих коммитов там нет, а зеркалить
 # два гигабайта чужой истории незачем.
+#
+# sensitive (третья колонка) — рабочий репозиторий: карточка и сырьё делаются,
+# но в облако к дистиллятору не уходят (§8.3.3), выжимки не будет.
 #
 # own — берём все коммиты: в своём репозитории и чужой коммит часть истории проекта.
 # fork — только свои: иначе в заметки поедет чужой апстрим.
@@ -29,7 +33,7 @@ ha-mqtt-sensor-hub	own
 illustrious-2.0-study	own
 diary_mesh_map	own
 insonmia	own
-intronet-front-lab	own
+intronet-front-lab	own	sensitive
 make-char-dataset	own
 make-style-dataset	own
 mara-second-brain	own

@@ -27,12 +27,15 @@ FMT = "%h %an%n%s%n%b"
 MAX_CHARS = 60000          # лог за сутки столько не занимает даже в худший день
 
 def repos(path=CONF):
+    """(имя, own|fork, секретный ли). Третья колонка `sensitive` — репозиторий,
+    который не отправляем дистиллятору в облако (§8.3.3): карточка и сырьё
+    остаются, выжимки не будет."""
     out = []
     for line in open(path, encoding="utf-8"):
         line = line.split("#", 1)[0].strip()
         if not line: continue
-        name, _, kind = line.partition("\t")
-        out.append((name.strip(), (kind or "own").strip()))
+        cols = [c.strip() for c in line.split("\t") if c.strip()]
+        out.append((cols[0], (cols[1:2] or ["own"])[0], "sensitive" in cols[2:]))
     return out
 
 # Без этого git на приватном репозитории садится спрашивать логин, и ночной
@@ -83,7 +86,7 @@ def log(path, day, kind, author):
     if rc: raise RuntimeError(err.strip()[:200])
     return out.strip()
 
-def card(name, day, text, canon, raw_rel):
+def card(name, day, text, canon, raw_rel, sensitive=False):
     n = len(re.findall(r"(?m)^[0-9a-f]{7,} ", text))
     fm = ["---",
           "title: " + yaml_str("%s: %d коммит%s за %s" % (
@@ -96,10 +99,12 @@ def card(name, day, text, canon, raw_rel):
           "occurred: " + day.isoformat(),
           "project: " + yaml_str(link(name, canon)),
           "tags: [git, %s]" % name.lower(),
-          "sensitive: false",
+          "sensitive: %s" % ("true" if sensitive else "false"),
           "distilled: false",
           "---", "",
           "# %s — %s" % (name, day.isoformat()), "",
+          ("Рабочий репозиторий: в облако не отправляется (§8.3.3), выжимки не "
+           "будет. Сырьё — `%s`." % raw_rel) if sensitive else
           "Ждёт дистилляции, сырьё — `%s`." % raw_rel, ""]
     return "\n".join(fm)
 
@@ -143,7 +148,7 @@ def main(argv=None):
     canon = canon_map(a.vault)
     made = skipped = 0
     unreachable = []
-    for day, (name, kind) in ((d, r) for d in days(start, end) for r in repos()):
+    for day, (name, kind, sens) in ((d, r) for d in days(start, end) for r in repos()):
         cardp = os.path.join(a.vault, "kb/notes", "git-%s-%s.md" % (name, day))
         if os.path.exists(cardp): skipped += 1; continue    # идемпотентность
         path, why = mirror(name, a.mirrors)
@@ -159,7 +164,10 @@ def main(argv=None):
             print("=" * 60, "\n%s %s\n" % (name, day), text[:1500]); made += 1; continue
         with locked(a.vault):
             write(os.path.join(a.vault, raw_rel), text + "\n")
-            write(cardp, card(name, day, text, canon, raw_rel))
+            write(cardp, card(name, day, text, canon, raw_rel, sens))
+            # Секретный репозиторий не ставим в очередь вовсе: воркер всё равно
+            # придержал бы задачу навсегда, и она бы вечно висела в отчёте.
+            if sens: made += 1; continue
             write(os.path.join(a.vault, "_system/queue", "git-%s-%s.json" % (name, day)),
                   json.dumps({"kind": "git", "source": "git", "source_id": "%s@%s" % (name, day),
                               "note": os.path.relpath(cardp, a.vault), "raw": raw_rel,
@@ -176,8 +184,12 @@ def self_check():
     import tempfile
     d = tempfile.mkdtemp()
     conf = os.path.join(d, "repos.txt")
-    open(conf, "w").write("# коммент\n\nAttadipa\town\nazimut\tfork\n")
-    assert repos(conf) == [("Attadipa", "own"), ("azimut", "fork")]
+    open(conf, "w").write("# коммент\n\nAttadipa\town\nazimut\tfork\nwork\town\tsensitive\n")
+    assert repos(conf) == [("Attadipa", "own", False), ("azimut", "fork", False),
+                           ("work", "own", True)]
+    # секретный репозиторий помечен и в теле сказано, что выжимки не будет
+    sc = card("work", datetime(2026, 8, 31).date(), "abc1234 С\nраз\n", {}, "r", True)
+    assert "sensitive: true" in sc and "в облако не отправляется" in sc
     # заголовок склоняется, проект приводится к канону, ключ из сообщения коммита
     # не доезжает до карточки
     txt = "abc1234 Сергей\nчинил синк\n\ndef5678 Сергей\nещё раз\n"
