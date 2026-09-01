@@ -52,6 +52,13 @@ def require_chain():
                        {"lang_code": "en", "model_name": "en_core_web_sm"}],
         }).create_engine()
         _engine = AnalyzerEngine(nlp_engine=nlp, supported_languages=["ru", "en"])
+        # Из коробки телефоны распознаются как US: +7 916 123-45-67 проходит
+        # насквозь. Подменяем распознаватель на региональный.
+        from presidio_analyzer.predefined_recognizers import PhoneRecognizer
+        for lang in ("ru", "en"):
+            _engine.registry.remove_recognizer("PhoneRecognizer")
+            _engine.registry.add_recognizer(
+                PhoneRecognizer(supported_language=lang, supported_regions=("RU", "US")))
     return _engine
 
 def redact(text, lang="ru"):
