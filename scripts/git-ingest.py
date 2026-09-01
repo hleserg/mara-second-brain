@@ -120,8 +120,11 @@ def main(argv=None):
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
     ap.add_argument("--mirrors", default=os.environ.get("MARA_MIRRORS", "/srv/git-mirrors"))
     ap.add_argument("--date", help="день в ISO; по умолчанию вчерашний")
-    ap.add_argument("--author", default=os.environ.get("MARA_GIT_AUTHOR", "hleserg@gmail.com"),
-                    help="чьи коммиты брать в форках")
+    # Подстрока, а не адрес целиком: --author у git — регэксп по «Имя <почта>»,
+    # а коммиты, сделанные через веб-морду GitHub, подписаны
+    # hleserg@users.noreply.github.com. По полному адресу они бы потерялись.
+    ap.add_argument("--author", default=os.environ.get("MARA_GIT_AUTHOR", "hleserg"),
+                    help="чьи коммиты брать в форках (подстрока автора)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
 
