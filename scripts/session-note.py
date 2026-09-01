@@ -98,6 +98,30 @@ def parse_claude(path):
 # и та же сессия попадала бы в разные сутки в зависимости от того, где хук.
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
 
+def messages(path):
+    """(роль, текст) по сессии — для дистиллятора (§8.1). Только человек и
+    финальный текст ассистента: вывод инструментов это и есть транскрипт,
+    в kb/ он не едет (§13.10), а в промпт от него один шум и цена.
+    Encrypted thinking не трогаем вовсе (§6.1)."""
+    for d in _lines(path):
+        t = d.get("type")
+        if t == "response_item":                       # codex
+            p_ = d.get("payload") or {}
+            if p_.get("type") != "message": continue
+            role = p_.get("role")
+            if role not in ("user", "assistant"): continue
+            text = " ".join(b.get("text", "") for b in p_.get("content") or []).strip()
+            if role == "user" and text.startswith(CODEX_INJECTED): continue
+            if text: yield role, text
+        elif t == "user":                              # claude code
+            c = (d.get("message") or {}).get("content")
+            if isinstance(c, str) and not d.get("isMeta") and not d.get("isSidechain"):
+                yield "user", c
+        elif t == "assistant":
+            text = "\n".join(b.get("text", "") for b in (d.get("message") or {}).get("content") or []
+                              if b.get("type") == "text").strip()
+            if text: yield "assistant", text
+
 def _local(iso):
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TZ)
 
@@ -256,6 +280,11 @@ def self_check():
         assert "raw/codex/pi/rollout-x.jsonl" in cn and "AGENTS.md" not in cn
         assert _clip("раз два три четыре", 12) == "раз два три…"
         assert _clip("короткое", 40) == "короткое"
+
+        m = list(messages(tp))
+        assert m == [("user", "Почини синк")], m        # tool_result и thinking мимо
+        mc = list(messages(cp))
+        assert mc == [("user", "Собери прошивку"), ("assistant", "готово")], mc
     print("session-note self-check ok")
 
 if __name__ == "__main__":
