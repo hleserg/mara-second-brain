@@ -28,6 +28,7 @@ from vault_common import canon_map, linkify, unlink
 
 FM = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 KINDS = {"Люди": "people", "Проекты": "projects"}
+TYPE = {"people": "person", "projects": "project"}   # папка → type: во фронтматтере
 LINE = re.compile(r"(?m)^(%s):[ \t]*(.+)$" % "|".join(KINDS))
 # Гит-коммиты подписаны ботами, и дистиллятор честно перечисляет их в людях.
 # dependabot[bot] — не человек, карточка ему не нужна ни в каком виде.
@@ -72,8 +73,8 @@ def harvest(vault):
 def card_text(name, kind, c, vault):
     first_day, first_path = c["first"]
     forms = [f for f, _ in c["forms"].most_common() if f != name]
-    fm = ["---", "title: " + name, "type: " + kind[:-1],
-          "source: auto", "source_id: %s-%s" % (kind[:-1], stem(name)),
+    fm = ["---", "title: " + name, "type: " + TYPE[kind],
+          "source: auto", "source_id: %s-%s" % (TYPE[kind], stem(name)),
           "created: " + datetime.now().astimezone().isoformat(timespec="seconds"),
           "occurred: " + (first_day if first_day[0] != "9" else
                           datetime.now().date().isoformat())]
@@ -128,7 +129,7 @@ def review_text(review, canon, min_n):
         near = difflib.get_close_matches(norm(name), [norm(k) for k in canon], 1, 0.8)
         near = next((k for k in canon if norm(k) == near[0]), "") if near else ""
         rows.append("| %s | %s | %d | `%s` | %s | %s |" % (
-            name, kind[:-1], c["n"], c["first"][0], why,
+            name, TYPE[kind], c["n"], c["first"][0], why,
             "`%s`?" % near if near else ""))
     out += rows if review else ["Кандидатов нет."]
     return "\n".join(out) + "\n"
@@ -226,7 +227,7 @@ def self_check():
     assert ("Сергей", "человек — заводим только руками") in [(r[1], r[3]) for r in review]
     assert ("Ponytail", "упоминаний 1, порог 2") in [(r[1], r[3]) for r in review]
     # у заведённой сущности алиас второй формы и ссылка на первое упоминание
-    assert "aliases:\n- Attadipa" in made[0][1] and "[[b]], 2026-08-01" in made[0][1]
+    assert "type: project" in made[0][1] and "aliases:\n- Attadipa" in made[0][1] and "[[b]], 2026-08-01" in made[0][1]
     # опечатка предлагается, а не сливается молча
     rt = review_text([("projects", "atttadipa", h["projects"]["ponytail"], "упоминаний 1")],
                      {"attadipa": "attadipa"}, 3)
