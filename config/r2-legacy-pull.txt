@@ -51,4 +51,53 @@
 - /.obsidian/plugins/calendar/manifest.json
 - /.obsidian/plugins/pdf-plus/main.js
 - /views/Когда я узнал.base
+# Копии репозиториев, удалённые из волта (docs/vault-cleanup-step3.md).
+# Старый бакет их ещё помнит, а `copy --update` видит, что локально файла
+# нет, и кладёт обратно — каждые пять минут, вечно.
+- /kb/howto/atman/GITHUB_AUTOMATIONS.md
+- /kb/howto/atman/MANIFEST-ru.md
+- /kb/howto/atman/MANIFEST.md
+- /kb/howto/atman/architecture/DATADOG-LLM-OBSERVABILITY.md
+- /kb/howto/atman/deploy/atman-deploy/deploy/README.md
+- /kb/howto/atman/development/README_FACTUAL_MEMORY.md
+- /kb/howto/atman/development/TEST_COVERAGE_PLAN.md
+- /kb/howto/atman/development/work-packages/01-factual-memory-adapter.md
+- /kb/howto/atman/development/work-packages/02-experience-store.md
+- /kb/howto/atman/development/work-packages/03-identity-and-narrative.md
+- /kb/howto/atman/development/work-packages/04-reflection-engine.md
+- /kb/howto/atman/development/work-packages/05-session-manager.md
+- /kb/howto/atman/development/work-packages/06-reality-and-affect.md
+- /kb/howto/atman/development/work-packages/07-ambient-and-proactive.md
+- /kb/howto/atman/development/work-packages/08-skill-manager.md
+- /kb/howto/atman/development/work-packages/09-background-agent.md
+- /kb/howto/atman/development/work-packages/ISSUE_BACKLOG.md
+- /kb/howto/atman/features/full-corpus-demo/README-ru.md
+- /kb/howto/atman/features/full-corpus-demo/README.md
+- /kb/howto/atman/features/web-dashboard/README-ru.md
+- /kb/howto/atman/features/web-dashboard/README.md
+- /kb/howto/atman/research/ATMAN_INTEGRATION_RESEARCH.md
+- /kb/howto/atman/research/RESEARCH_FACTUAL_MEMORY.md
+- /kb/howto/atman/research/agent-thinking-comparison-ru.md
+- /kb/howto/atman/research/agent-thinking-comparison.md
+- /kb/howto/atman/research/agent-ui-research.md
+- /kb/howto/atman/research/dashboard-research.md
+- /kb/howto/smart-home/iot stack/BACKUP_RESTORE.md
+- /kb/howto/atman/README-ru.md
+- /kb/howto/atman/README.md
+- /kb/howto/atman/architecture/SYSTEM-ru.md
+- /kb/howto/atman/architecture/SYSTEM.md
+- /kb/howto/atman/architecture/SYSTEM_MAP-ru.md
+- /kb/howto/atman/architecture/SYSTEM_MAP.md
+- /kb/howto/atman/development/DEVELOPMENT_STANDARD.md
+- /kb/howto/atman/features/experience-store/README-ru.md
+- /kb/howto/atman/features/experience-store/README.md
+- /kb/howto/atman/features/factual-memory/README-ru.md
+- /kb/howto/atman/features/factual-memory/README.md
+- /kb/howto/atman/features/identity-store/README-ru.md
+- /kb/howto/atman/features/identity-store/README.md
+- /kb/howto/atman/features/reflection-engine/README-ru.md
+- /kb/howto/atman/features/reflection-engine/README.md
+- /kb/howto/atman/features/session-manager/README-ru.md
+- /kb/howto/atman/features/session-manager/README.md
+
 + **
