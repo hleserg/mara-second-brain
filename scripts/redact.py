@@ -55,8 +55,8 @@ def require_chain():
         # Из коробки телефоны распознаются как US: +7 916 123-45-67 проходит
         # насквозь. Подменяем распознаватель на региональный.
         from presidio_analyzer.predefined_recognizers import PhoneRecognizer
+        _engine.registry.remove_recognizer("PhoneRecognizer")   # один раз: снимает все
         for lang in ("ru", "en"):
-            _engine.registry.remove_recognizer("PhoneRecognizer")
             _engine.registry.add_recognizer(
                 PhoneRecognizer(supported_language=lang, supported_regions=("RU", "US")))
     return _engine
@@ -72,8 +72,11 @@ def redact(text, lang="ru"):
     # Presidio режет длинный вход по памяти spacy: идём кусками по абзацам.
     out = []
     for chunk in _chunks(text, 40000):
+        # 0.4, а не 0.5: телефон через phonenumbers приходит ровно с 0.4, и на
+        # пороге 0.5 российские номера уезжали в облако целиком. Ложное
+        # срабатывание здесь стоит одного затёртого числа, пропуск — номера.
         res = [r for r in engine.analyze(text=chunk, language=lang, entities=PII_ENTITIES)
-               if r.score >= 0.5]
+               if r.score >= 0.4]
         for r in sorted(res, key=lambda r: r.start, reverse=True):
             chunk = chunk[:r.start] + "<%s>" % r.entity_type + chunk[r.end:]
             stats[r.entity_type] = stats.get(r.entity_type, 0) + 1
