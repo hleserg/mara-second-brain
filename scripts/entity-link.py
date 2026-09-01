@@ -24,15 +24,19 @@ from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from vault_common import canon_map, linkify, unlink
+from vault_common import canon_map, linkify, unlink, yaml_str
 
 FM = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 KINDS = {"Люди": "people", "Проекты": "projects"}
 TYPE = {"people": "person", "projects": "project"}   # папка → type: во фронтматтере
 LINE = re.compile(r"(?m)^(%s):[ \t]*(.+)$" % "|".join(KINDS))
+# Поле шапки, куда git-ingest кладёт проект. Старые карточки писались до того,
+# как завелись сущности, и держат его текстом — их и догоняем.
+PROJ = re.compile(r"(?m)^project:[ \t]*(.+)$")
 # Гит-коммиты подписаны ботами, и дистиллятор честно перечисляет их в людях.
 # dependabot[bot] — не человек, карточка ему не нужна ни в каком виде.
-DENY = re.compile(r"\[bot\]$|^(unknown|n/a|-|—|none|нет|не указан\w*)$", re.I)
+DENY = re.compile(r"\[bot\]$|^(unknown|n/a|-|—|none|нет|не указан\w*"
+                  r"|dependabot|renovate|github-actions|blocks task runner)$", re.I)
 
 def norm(s):
     """Ключ склейки: регистр, ё и разделители. attadipa/Attadipa и
@@ -115,7 +119,13 @@ def relink(text, canon):
         items = linkify(mo.group(2).split(","), canon)
         n[0] += sum(1 for i in items if i.startswith("[["))
         return "%s: %s" % (mo.group(1), ", ".join(items))
-    return head + LINE.sub(one, body), n[0]
+    def proj(mo):
+        v = unlink(mo.group(1).strip().strip("'\""))
+        c = canon.get(v.lower())
+        if not c: return mo.group(0)
+        n[0] += 1
+        return "project: " + yaml_str("[[%s]]" % c)
+    return PROJ.sub(proj, head) + LINE.sub(one, body), n[0]
 
 def review_text(review, canon, min_n):
     """§5.5: похожее — в очередь на подтверждение, а не сливать молча."""
@@ -195,6 +205,7 @@ def self_check():
     # бот и «неизвестно» отсекаются, живое имя — нет
     assert DENY.search("dependabot[bot]") and DENY.search("unknown")
     assert not DENY.search("Сергей") and not DENY.search("Robot Framework")
+    assert DENY.search("dependabot") and DENY.search("Blocks Task Runner")
     canon = {"сергей": "sergey", "sergey khlebnikov": "sergey", "sergey": "sergey",
              "attadipa": "attadipa", "meshcore": "meshcore"}
     # ссылка всегда на канон: голый [[алиас]] Obsidian не резолвит
@@ -203,13 +214,16 @@ def self_check():
     # готовую ссылку из дистиллятора не оборачиваем второй раз
     assert linkify(["[[meshcore]]", "[[sergey|Сергей]]"], canon) == \
            ["[[meshcore]]", "[[sergey|Сергей]]"]
-    txt = ("---\ntitle: x\noccurred: 2026-08-31\n---\n\n# Т\n\nЛюди: Сергей, dependabot[bot]\n"
+    txt = ("---\ntitle: x\noccurred: 2026-08-31\nproject: \'attadipa\'\n---\n"
+           "\n# Т\n\nЛюди: Сергей, dependabot[bot]\n"
            "Проекты: attadipa\n")
     new, n = relink(txt, canon)
     assert "Люди: [[sergey|Сергей]], dependabot[bot]" in new, new
-    assert "Проекты: [[attadipa]]" in new and n == 2
+    assert "Проекты: [[attadipa]]" in new and n == 3, (new, n)
+    # шапку догоняем тоже: старые карточки писались до того, как завелись сущности
+    assert 'project: "[[attadipa]]"' in new, new
     # фронтматтер не тронут, и повторный прогон ничего не меняет
-    assert new.startswith("---\ntitle: x\noccurred: 2026-08-31\n---\n")
+    assert new.startswith("---\ntitle: x\noccurred: 2026-08-31\n")
     assert relink(new, canon)[0] == new, "проход не идемпотентен"
     # harvest: склейка регистра, счёт, первое упоминание — по самой ранней дате
     v = tempfile.mkdtemp(); os.makedirs(os.path.join(v, "kb"))
