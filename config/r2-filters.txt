@@ -4,7 +4,9 @@
 - /.basic-memory/**
 - /.obsidian/workspace*.json
 - **/.DS_Store
-- /raw/**/*.jsonl
+# Сырьё не покидает doctor (§6): исключаем каталог целиком, а не по
+# расширению. По *.jsonl уезжали бы и git-логи, и любой будущий формат.
+- /raw/**
 # производный индекс copilot, 85 МБ, гонять между устройствами незачем (§1)
 - /.obsidian/copilot-index-*.json
 # В data.json плагинов лежат живые API-ключи (Copilot: OpenAI/Anthropic/OpenRouter).
