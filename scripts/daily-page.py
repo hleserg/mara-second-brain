@@ -18,7 +18,7 @@ import os, re, sys, argparse
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vault_common import locked, unlink
+from vault_common import canon_map, linkify, locked, unlink
 
 FM = re.compile(r"\A---\n(.*?)\n---\n(.*)", re.S)
 AUTO = re.compile(r"[ \t]*<!-- mara:auto -->.*?<!-- /mara:auto -->[ \t]*\n?", re.S)
@@ -72,7 +72,7 @@ def scan(vault):
     return days
 
 
-def block(items):
+def block(items, canon):
     out = ["<!-- mara:auto -->",
            "*Собрано само: правки внутри блока пропадут, пиши ниже.*", ""]
     for i, sec in enumerate(SECTIONS):
@@ -80,8 +80,12 @@ def block(items):
         if not rows: continue
         out.append("## " + sec)
         for _, fn, title, proj in rows:
-            p = "[[%s]] — " % proj if proj else ""
-            out.append("- %s[[%s|%s]]" % (p, fn, title.translate(BAD)))
+            # Проект линкуем только через реестр: в карточках он сплошь и рядом
+            # текст, которому сущности нет («workspace» у Claude Code — это
+            # каталог, а не проект), и голая `[[…]]` плодила бы фантомы (§5.6).
+            p = (linkify([proj], canon) or [""])[0]
+            out.append("- %s[[%s|%s]]" % (p + " — " if p else "", fn,
+                                          title.translate(BAD)))
         out.append("")
     out.append("<!-- /mara:auto -->")
     return "\n".join(out)
@@ -108,7 +112,7 @@ def put(body, blk):
     return body[:i] + blk + "\n\n" + body[i:]
 
 
-def write(vault, day, items):
+def write(vault, day, items, canon):
     """True, если файл изменился. Шапку заводим один раз: `sensitive` в ней
     могла стать true из-за дневника (§7.2), и затирать это нельзя."""
     path = os.path.join(vault, "daily", day + ".md")
@@ -116,7 +120,7 @@ def write(vault, day, items):
     m = FM.match(old)
     fm, body = (old[:m.start(2)], m.group(2)) if m else \
                (head(day), old or "# %s\n\n" % human(day))
-    new = (fm + put(body, block(items))).rstrip("\n") + "\n"
+    new = (fm + put(body, block(items, canon))).rstrip("\n") + "\n"
     # Basic Memory переписывает файл следом за нами и срезает последний перевод
     # строки. Сравнивать байт в байт значит переписывать все 363 страницы каждый
     # прогон и драться с ним за один байт (§13.8).
@@ -141,10 +145,11 @@ def main(argv=None):
     days = scan(a.vault)
     want = sorted(days) if a.all else \
         [d for d in sorted(days) if (a.since or end) <= d <= end]
+    canon = canon_map(a.vault)
     n = 0
     with locked(a.vault):
         for day in want:
-            n += write(a.vault, day, days[day])
+            n += write(a.vault, day, days[day], canon)
     print("daily-page: дней %d, переписано %d" % (len(want), n))
     return 0
 
@@ -167,7 +172,11 @@ def self_check():
     open(os.path.join(v, "kb/notes/old.md"), "w", encoding="utf-8").write(
         "---\ntitle: другой день\noccurred: 2026-08-30\n---\n\n# Старое\n")
 
+    os.makedirs(os.path.join(v, "_system"))
+    open(os.path.join(v, "_system/entity-index.json"), "w", encoding="utf-8").write(
+        '[{"canonical": "atman", "title": "atman", "aliases": []}]')
     assert main(["--vault", v, "--date", "2026-08-31"]) == 0
+    CANON = canon_map(v)
     p = os.path.join(v, "daily/2026-08-31.md")
     got = read(p)
     assert "title: \"31 августа 2026\"" in got and "occurred: 2026-08-31" in got
@@ -175,13 +184,16 @@ def self_check():
     # недистиллированная берёт заголовок из шапки, а не механический из тела
     assert "[[git-mara-2026-08-31|mara: 1 коммит за 2026-08-31]]" in got
     assert "## Разговоры" in got and "## Заметки" in got
+    # проекта mara в реестре нет — ссылку на него не рисуем, это был бы фантом
+    assert "- mara — [[git-mara-2026-08-31|" in got and "[[mara]]" not in got, got
+    assert "[[workspace]]" not in got
     # скобки и палка в заголовке не ломают ссылку
     assert "[[s1|Разбирал (очередь/всю)]]" in got, got
     # заметка без occurred попала по дате создания
     assert "[[manual|без occurred]]" in got
     assert "Старое" not in got
     # идемпотентность
-    assert not write(v, "2026-08-31", scan(v)["2026-08-31"])
+    assert not write(v, "2026-08-31", scan(v)["2026-08-31"], CANON)
 
     # дневник Мары дописан снизу — переживает пересборку, шапку не трогаем
     open(p, "a", encoding="utf-8").write("\n## 22:14\nзаебался с усилителем\n")
@@ -189,7 +201,7 @@ def self_check():
     open(p, "w", encoding="utf-8").write(txt)
     open(os.path.join(v, "kb/sessions/s2.md"), "w", encoding="utf-8").write(
         "---\ntype: session\noccurred: 2026-08-31\n---\n\n# Ещё сессия\n")
-    assert write(v, "2026-08-31", scan(v)["2026-08-31"])
+    assert write(v, "2026-08-31", scan(v)["2026-08-31"], CANON)
     got = read(p)
     assert "заебался с усилителем" in got and "sensitive: true" in got, got
     assert "[[s2|Ещё сессия]]" in got
@@ -199,7 +211,7 @@ def self_check():
     # хвостовой перевод строки, срезанный Basic Memory, — не повод переписывать
     cut = read(p).rstrip("\n")
     open(p, "w", encoding="utf-8").write(cut)
-    assert not write(v, "2026-08-31", scan(v)["2026-08-31"])
+    assert not write(v, "2026-08-31", scan(v)["2026-08-31"], CANON)
 
     # --all забирает и день, которого нет в диапазоне
     assert main(["--vault", v, "--all"]) == 0
