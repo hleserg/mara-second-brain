@@ -19,7 +19,9 @@ flock -w 300 9 || { echo "vault-r2-sync: занято, пропускаю" >&2; 
 args=(bisync "$VAULT" "$REMOTE"
   --filters-file "$FILTERS"
   --conflict-resolve newer
-  --max-delete 25
+  # Потолок от «волт внезапно опустел». Разовая большая чистка проходит
+  # надзорным прогоном: MAX_DELETE=100 scripts/vault-r2-sync.sh
+  --max-delete "${MAX_DELETE:-25}"
   --resilient --recover
   # Свой lock-файл bisync ставит без срока годности (до 2226 года): один
   # прибитый прогон — и все следующие падают с "prior lock file found".
