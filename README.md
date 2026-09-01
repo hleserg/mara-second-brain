@@ -51,6 +51,7 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 | Транскрипты Мары | крон `25 * * * *`, `scripts/hermes-ingest.py` (`state.db` с мака по ssh) |
 | Сторож тикера Мары | крон `*/10`, `scripts/mara-watchdog.sh` |
 | Туннель к Маре | systemd `mara-mac-tunnel.service` — обратный форвард 8787 на мак |
+| Расход лимитов Claude Code | крон `3-58/5`, `scripts/claude-usage-agg.py` — отчёты в `Claude Usage/` |
 | Бэкап волта | крон `0 4 * * 1`, `scripts/vault-backup.sh` — зашифрованный бандл на два носителя |
 | Тест восстановления | крон `0 5 1 1,4,7,10 *`, `scripts/vault-restore-test.sh` |
 
@@ -76,6 +77,7 @@ Codex ────────крон *:10───────┘        (он
 | Машина | Что поставить |
 |---|---|
 | любая с Claude Code | `hooks/claude-session-end.sh` в `SessionEnd` в `~/.claude/settings.json` |
+| любая с Claude Code | одна строка в statusline и `scripts/claude-usage-ship.py` кроном `*/5` — учёт лимитов, [`docs/claude-usage.md`](docs/claude-usage.md) |
 | любая с Codex | `scripts/codex-mirror.sh` по расписанию (у Codex хуков нет) |
 | beta-pi, мак | systemd/launchd туннель `ssh -L 127.0.0.1:8787:127.0.0.1:8787 doctor` для MCP |
 
