@@ -6,6 +6,7 @@
 # bare-зеркало пересоздаётся с нуля, а не пушится поверх.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
 VAULT="${VAULT:-/srv/vault}"
 MIRROR="${MIRROR:-/srv/backup/vault.git}"
 REMOTE="${REMOTE:-r2:obsidian-vault}"
@@ -40,6 +41,15 @@ rm -rf "$MIRROR"
 git init -q --bare -b main "$MIRROR"
 git push -q --mirror "$MIRROR"
 git -C "$MIRROR" symbolic-ref HEAD refs/heads/main
+
+# Бандл — снимок всей истории. Пока старые бандлы лежат на носителях, секрет
+# из истории никуда не делся: он там, просто под шифром. Сносим и делаем новый.
+echo "== сношу старые бандлы"
+for t in ${BUNDLES:-/mnt/backup/mara /mnt/win-backups/mara}; do
+  [ -d "$t" ] || continue
+  rm -f "$t"/vault-*.bundle.gpg && echo "  $t"
+done
+"$HERE/vault-backup.sh" || echo "  новый бандл не собрался, соберите руками" >&2
 
 echo "== проверка"
 fail=0
