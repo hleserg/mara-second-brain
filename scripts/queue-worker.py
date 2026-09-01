@@ -33,6 +33,24 @@ def load_env(path):
             k, v = l.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
+def entity_block(vault):
+    """§5.3: реестр сущностей приезжает в промпт перед каждой дистилляцией.
+    Без него модель линкует на выдуманные заметки — фантомный узел в графе
+    хуже, чем отсутствие ссылки. Индекс собирает scripts/entity-index.py,
+    крон дёргает его за пять минут до нас."""
+    try:
+        idx = json.load(open(os.path.join(vault, "_system/entity-index.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""     # нет индекса — промпт остаётся с запретом на любые ссылки
+    lines = ["\n\nРеестр сущностей. Линковать `[[имя]]` можно ТОЛЬКО на канонические",
+             "имена из этого списка; алиасы приведены, чтобы ты узнал сущность в тексте.",
+             "Встретил новую значимую сущность — не линкуй, перечисли в `people`",
+             "или `projects`.", ""]
+    for e in idx:
+        al = " (он же: %s)" % ", ".join(e["aliases"]) if e.get("aliases") else ""
+        lines.append("- [[%s]] — %s%s" % (e["canonical"], e.get("type", "?"), al))
+    return "\n".join(lines)
+
 def payload(raw_path):
     parts, total = [], 0
     for role, text in messages(raw_path):
@@ -99,7 +117,8 @@ def main():
         print("queue-worker: редакция §8.3 неполная (%s: %s), в облако не шлём, "
               "очередь держим" % (type(e).__name__, e)); return 0
 
-    prompt = open(os.path.join(a.vault, "_system/prompts/session-distill.md"), encoding="utf-8").read()
+    prompt = open(os.path.join(a.vault, "_system/prompts/session-distill.md"),
+                  encoding="utf-8").read() + entity_block(a.vault)
     qdir = os.path.join(a.vault, "_system/queue")
     jobs = sorted(f for f in os.listdir(qdir) if f.endswith(".json"))
     done = held = 0
