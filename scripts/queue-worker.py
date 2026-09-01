@@ -23,16 +23,20 @@ API = "https://openrouter.ai/api/v1/chat/completions"
 MAX_CHARS = 100_000     # ~25k токенов; вход дешёвый, но лишний хвост только шумит
 MAX_ATTEMPTS = 3
 
-def only_one():
+def only_one(wait=False):
     """Второй воркер платил бы за те же задачи второй раз и снимал бы из-под
     первого файл задачи. Крон стоит на *:40, а ручной разбор длинной очереди
     идёт дольше часа — они пересекаются. Файл не в волте: волт уезжает в R2,
-    а замок машинный. Держит его открытый дескриптор, до конца процесса."""
+    а замок машинный. Держит его открытый дескриптор, до конца процесса.
+
+    --wait — для ручного слива очереди: без него цикл `пока очередь не пуста`
+    прокручивал сорок пустых итераций за секунду, пока настоящий воркер ещё
+    работал, и заканчивался, не разобрав ничего. Крон ждать не должен."""
     d = os.path.expanduser("~/.local/state/mara")
     if not os.path.isdir(d): os.makedirs(d)
     fh = open(os.path.join(d, "queue-worker.lock"), "w")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fh, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return None
     return fh
@@ -133,9 +137,11 @@ def main():
     ap.add_argument("--limit", type=int, default=5)
     ap.add_argument("--dry-run", action="store_true",
                     help="показать, что именно уехало бы в облако, и не отправлять")
+    ap.add_argument("--wait", action="store_true",
+                    help="дождаться чужого воркера, а не пропустить прогон")
     a = ap.parse_args()
 
-    lock = only_one()
+    lock = only_one(a.wait)
     if lock is None:
         print("queue-worker: уже работает другой, пропускаю"); return 0
 
