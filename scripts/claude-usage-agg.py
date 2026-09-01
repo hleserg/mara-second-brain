@@ -13,8 +13,8 @@ statusline (`Claude Usage/_data/<хост>/ticks-*.jsonl`) и транскрип
     python3 scripts/claude-usage-agg.py                 # пересобрать и записать
     python3 scripts/claude-usage-agg.py --dry-run       # посчитать и показать
 """
-import os, re, sys, json, glob, math, time, fcntl, bisect, argparse, importlib.util, collections
-from datetime import datetime, timezone, timedelta
+import os, sys, json, glob, math, time, fcntl, bisect, argparse, importlib.util, collections
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vault_common
