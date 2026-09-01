@@ -189,6 +189,17 @@ def attribute(step_list, turns, keys, coef, week_of):
             for f in ("in", "out", "cw", "cr"): a[f] += t[f]
             a["weighted_units"] += units(t, scale_for(coef, w, t["model"]))
             a["attributed_pct"] += t["pct"]
+        act = [{"session_id": sid, "model_id": mm,
+                "tokens_by_type": {f: a[f] for f in ("in", "out", "cw", "cr")},
+                "weighted_units": round(a["weighted_units"], 1),
+                "attributed_pct": round(a["attributed_pct"], 4)}
+               for (sid, mm), a in sorted(by.items(),
+                                          key=lambda kv: (-kv[1]["attributed_pct"], kv[0]))]
+        # Округление одиннадцати долей до четырёх знаков даёт сумму 5.0001 при
+        # шаге 5.00. Остаток кладём самой крупной доле: §11 требует, чтобы
+        # сумма оценок равнялась глобальному Δ, а не почти равнялась.
+        if act: act[0]["attributed_pct"] = round(
+            act[0]["attributed_pct"] + st["delta"] - sum(x["attributed_pct"] for x in act), 4)
         intervals.append({
             "schema_version": SCHEMA, "week_id": w,
             "t_from": iso(st["t_from"]), "t_to": iso(st["t_to"]),
@@ -196,12 +207,7 @@ def attribute(step_list, turns, keys, coef, week_of):
             "estimated": True, "confidence": conf,
             "data_quality": "window-baseline" if st["baseline"] else
                             ("no-tokens" if not tot else "ok"),
-            "active_sessions": [
-                {"session_id": sid, "model_id": m,
-                 "tokens_by_type": {f: a[f] for f in ("in", "out", "cw", "cr")},
-                 "weighted_units": round(a["weighted_units"], 1),
-                 "attributed_pct": round(a["attributed_pct"], 4)}
-                for (sid, m), a in sorted(by.items(), key=lambda kv: -kv[1]["attributed_pct"])]})
+            "active_sessions": act})
     return intervals
 
 
@@ -884,7 +890,7 @@ def self_check():
     # сумма оценок по сессиям равна глобальному шагу (§11)
     for i in m["intervals"]:
         got = sum(a["attributed_pct"] for a in i["active_sessions"])
-        assert not i["active_sessions"] or abs(got - i["seven_day_delta_pct"]) < 1e-6, i
+        assert not i["active_sessions"] or got == i["seven_day_delta_pct"], i
     # интервал, где работала одна сессия, — прямое измерение
     step2 = [i for i in m["intervals"] if i["confidence"] == "high"]
     assert step2 and step2[0]["is_clean"], m["intervals"]
