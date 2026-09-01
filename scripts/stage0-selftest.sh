@@ -5,7 +5,7 @@
 set -euo pipefail
 
 VAULT="${VAULT:-/srv/vault}"
-REMOTE="${REMOTE:-r2:obsidian-vault}"
+REMOTE="${REMOTE:-r2:mara-vault}"
 RCLONE="${RCLONE:-/opt/rclone/rclone}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME="_selftest-$(date +%s).md"

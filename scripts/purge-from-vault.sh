@@ -9,7 +9,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VAULT="${VAULT:-/srv/vault}"
 MIRROR="${MIRROR:-/srv/backup/vault.git}"
-REMOTE="${REMOTE:-r2:obsidian-vault}"
+REMOTE="${REMOTE:-r2:mara-vault}"
 RCLONE="${RCLONE:-/opt/rclone/rclone}"
 FR="${FR:-$HOME/.local/bin/git-filter-repo}"
 
