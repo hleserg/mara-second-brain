@@ -85,12 +85,15 @@ def main(argv=None):
         os.makedirs(os.path.dirname(raw), exist_ok=True)
         # Короче прежнего — значит что-то съело историю на той стороне.
         # Затирать длинное коротким не будем: сырьё восстановить неоткуда.
-        if os.path.exists(raw) and len(text) < os.path.getsize(raw) * 0.9:
+        # Сравниваем байты с байтами: кириллица в utf-8 по два байта на букву,
+        # и len(str) против getsize() срабатывал на любом живом файле подряд.
+        size = len(text.encode("utf-8"))
+        if os.path.exists(raw) and size < os.path.getsize(raw) * 0.9:
             # Молча замереть на полугодовалом файле — худшее, что тут можно
             # сделать: сжать разрешаем только руками, удалив сырьё.
             print("hermes-ingest: %s усохло (%d -> %d), не переписываю; "
                   "если так и надо — удалите %s"
-                  % (sid, os.path.getsize(raw), len(text), raw_rel))
+                  % (sid, os.path.getsize(raw), size, raw_rel))
         else:
             tmp = raw + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
@@ -128,10 +131,14 @@ def self_check():
     import tempfile as _t
     d = _t.mkdtemp(); raw = os.path.join(d, "s.jsonl")
     open(raw, "w", encoding="utf-8").write("x" * 1000)
-    shrank = lambda t: os.path.exists(raw) and len(t) < os.path.getsize(raw) * 0.9
+    shrank = lambda t: (os.path.exists(raw)
+                        and len(t.encode("utf-8")) < os.path.getsize(raw) * 0.9)
     assert shrank("y" * 100)          # усохло — не пишем
     assert not shrank("z" * 1000)     # столько же — пишем
     assert not shrank("z" * 5000)     # дописали — пишем
+    # кириллица: 500 букв это 1000 байт, файл не усох
+    open(raw, "w", encoding="utf-8").write("я" * 500)
+    assert not shrank("я" * 500), "байты надо мерить в байтах"
     # кавычка в запросе не разваливает шелл
     assert json_arg("select 'a'") == """'select '\\''a'\\'''"""
     # машинные сессии отсекаются в самом запросе, а не потом по тексту
