@@ -35,8 +35,13 @@ def repos(path=CONF):
         out.append((name.strip(), (kind or "own").strip()))
     return out
 
+# Без этого git на приватном репозитории садится спрашивать логин, и ночной
+# прогон встаёт колом до таймаута.
+ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="", GCM_INTERACTIVE="never")
+NOAUTH = re.compile(r"could not read Username|Authentication|not found|403|denied|Permission")
+
 def git(args, cwd=None, timeout=180):
-    p = subprocess.run(["git"] + args, cwd=cwd, timeout=timeout,
+    p = subprocess.run(["git"] + args, cwd=cwd, timeout=timeout, env=ENV,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
@@ -48,13 +53,17 @@ def mirror(name, root):
     path = os.path.join(root, name + ".git")
     if os.path.isdir(path):
         rc, _, err = git(["remote", "update", "--prune"], cwd=path)
+        if not rc: return path, None
     else:
-        rc, _, err = git(["clone", "--mirror", "--quiet",
-                          "https://github.com/%s/%s.git" % (OWNER, name), path], timeout=900)
-    if rc:
-        why = "нет доступа" if re.search(r"Authentication|not found|403|denied", err) else err.strip().split("\n")[-1][:80]
-        return None, why
-    return path, None
+        err = ""
+        # https работает без ключей для всего публичного; приватное отдаётся
+        # только по ssh — и то, если ключ пользовательский.
+        for url in ("https://github.com/%s/%s.git" % (OWNER, name),
+                    "git@github.com:%s/%s.git" % (OWNER, name)):
+            rc, _, err = git(["clone", "--mirror", "--quiet", url, path], timeout=900)
+            if not rc: return path, None
+    return None, ("нет доступа" if NOAUTH.search(err)
+                  else err.strip().split("\n")[-1][:80] or "rc=%d" % rc)
 
 def log(path, day, kind, author):
     """Коммиты за сутки по всем веткам. У форка — только свои: иначе в заметку
@@ -84,7 +93,7 @@ def card(name, day, text, canon, raw_rel):
           "distilled: false",
           "---", "",
           "# %s — %s" % (name, day.isoformat()), "",
-          "Дистилляция не прошла: заметка соберётся из `%s`." % raw_rel, ""]
+          "Ждёт дистилляции, сырьё — `%s`." % raw_rel, ""]
     return "\n".join(fm)
 
 def write(path, text):
