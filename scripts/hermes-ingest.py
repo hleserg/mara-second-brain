@@ -52,6 +52,10 @@ def main(argv=None):
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
     ap.add_argument("--mac", default=os.environ.get("MARA_MAC", "serg@192.168.1.80"))
     ap.add_argument("--db", default="~/.hermes/state.db")
+    # Разговор с Марой — личное по умолчанию (§7.2: настроение, проблемы,
+    # третьи лица). Решит владелец иначе — снимается этим флагом.
+    ap.add_argument("--to-cloud", dest="sensitive", action="store_false",
+                    help="разрешить дистилляцию разговоров с Марой в облаке")
     a = ap.parse_args(argv)
 
     sessions = as_claude(fetch(a.mac, a.db))
@@ -69,7 +73,8 @@ def main(argv=None):
         os.replace(tmp, raw)
         subprocess.run([sys.executable, os.path.join(HERE, "session-note.py"), raw,
                         "--vault", a.vault, "--raw-rel", raw_rel, "--session-id", sid,
-                        "--source", "hermes", "--skip-existing", "--skip-empty"], check=False)
+                        "--source", "hermes"] + (["--sensitive"] if a.sensitive else []) +
+                       ["--skip-existing", "--skip-empty"], check=False)
         made += 1
     print("hermes-ingest: сессий %d, новых карточек %d" % (len(sessions), made))
     return 0

@@ -157,7 +157,7 @@ def _clip(s, n):
     cut = s[:n]
     return (cut[:cut.rfind(" ")] if " " in cut[n // 2:] else cut).rstrip(" ,.;:—-") + "…"
 
-def render(f, sid, raw_rel, canon=None):
+def render(f, sid, raw_rel, canon=None, sensitive=False):
     ts = sorted(f["ts"])
     start = _local(ts[0]) if ts else _now()
     end = _local(ts[-1]) if ts else start
@@ -176,13 +176,13 @@ def render(f, sid, raw_rel, canon=None):
     # в граф фантомный узел, — обе беды лечит vault_common.link.
     if project: fm.append("project: " + _yaml_str(_link(project, canon)))
     fm += ["tags: [session, %s]" % f["source"],
-           "sensitive: false",
+           "sensitive: %s" % ("true" if sensitive else "false"),
            "distilled: false",
            "---", ""]
 
     span = "%s %s–%s" % (start.date().isoformat(), start.strftime("%H:%M"), end.strftime("%H:%M"))
     if f["duration"]: span += " (%d мин)" % round(f["duration"] / 60000)
-    label = {"claude-code": "Claude Code", "codex": "Codex", "hermes": "Мара"}.get(
+    label = {"claude-code": "Claude Code", "codex": "Codex", "hermes": "Мары"}.get(
         f["source"], f["source"])
     body = ["# " + title, "",
             "Сессия %s, %s." % (label, span)]
@@ -195,9 +195,11 @@ def render(f, sid, raw_rel, canon=None):
         body.append("- Инструменты: " + ", ".join("%s×%d" % (n, c) for n, c in f["tools"].most_common()))
     if f["models"]: body.append("- Модели: " + ", ".join(f["models"]))
     if f["cost"]: body.append("- Стоимость: $%.2f" % f["cost"])
-    body += ["- Сырьё: `%s`" % raw_rel, "",
-             "> Не дистиллировано. Карточка собрана механически, содержание сессии — в сырье,",
-             "> задача стоит в `_system/queue/`.", ""]
+    body += ["- Сырьё: `%s`" % raw_rel, ""]
+    body += (["> В облако не отправляется (§8.3.3): выжимки не будет, содержание — в сырье.", ""]
+             if sensitive else
+             ["> Не дистиллировано. Карточка собрана механически, содержание сессии — в сырье,",
+              "> задача стоит в `_system/queue/`.", ""])
     return "\n".join(fm + body)
 
 def write_atomic(path, text):
@@ -215,6 +217,11 @@ def main(argv=None):
     # Транскрипт Мары приезжает в форме claude-code (её кладёт hermes-ingest.py),
     # иначе parse его не разберёт. Но в карточке источник должен быть честным.
     p.add_argument("--source", help="перебить источник в карточке (напр. hermes)")
+    # Разговоры с Марой — не рабочая сессия, а личное: дневник, настроение,
+    # третьи лица (§7.2). По умолчанию такое в облако не уезжает, и задача в
+    # очередь не ставится вовсе — придержанная задача висела бы в отчёте вечно.
+    p.add_argument("--sensitive", action="store_true",
+                   help="карточка с sensitive: true, без задачи в очередь (§8.3.3)")
     p.add_argument("--skip-empty", action="store_true",
                    help="молча выйти, если человек не сказал ни слова (оборванная сессия)")
     p.add_argument("--skip-existing", action="store_true",
@@ -227,12 +234,13 @@ def main(argv=None):
     sid = a.session_id or f["sid"] or os.path.splitext(os.path.basename(a.transcript))[0]
     raw_rel = a.raw_rel or "raw/claude-code/%s/%s.jsonl" % (
         os.path.basename(os.path.dirname(os.path.abspath(a.transcript))), sid)
-    note = render(f, sid, raw_rel, _canon_map(a.vault))
+    note = render(f, sid, raw_rel, _canon_map(a.vault), a.sensitive)
     if not a.vault:
         sys.stdout.write(note); return 0
     if a.skip_existing and os.path.exists(os.path.join(a.vault, "kb/sessions", sid + ".md")):
         return 0
     write_atomic(os.path.join(a.vault, "kb/sessions", sid + ".md"), note)
+    if a.sensitive: return 0
     write_atomic(os.path.join(a.vault, "_system/queue", sid + ".json"),
                  json.dumps({"kind": "distill", "source": f["source"], "source_id": sid,
                              "note": "kb/sessions/%s.md" % sid, "raw": raw_rel,
@@ -318,6 +326,11 @@ def self_check():
         assert m == [("user", "Почини синк")], m        # tool_result и thinking мимо
         mc = list(messages(cp))
         assert mc == [("user", "Собери прошивку"), ("assistant", "готово")], mc
+    # sensitive-ветка: карточка честно говорит, что выжимки не будет
+    f = _blank(); f["users"] = 1
+    c = render(f, "s1", "raw/hermes/s1.jsonl", None, True)
+    assert "sensitive: true" in c and "В облако не отправляется" in c
+    assert "sensitive: false" in render(f, "s1", "r", None)
     print("session-note self-check ok")
 
 if __name__ == "__main__":
