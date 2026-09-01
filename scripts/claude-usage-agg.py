@@ -254,6 +254,13 @@ def pct(x, digits=1):
     return ("%%.%df%%%%" % digits) % (x or 0)
 
 
+def plink(name, canon):
+    """`[[канон|как называется каталог]]`. Именно с подписью: `mara` и
+    `mara-second-brain` ведут на одну карточку проекта, и без подписи две
+    строки таблицы выглядели бы одинаково."""
+    return vault_common.linkify([name], canon)[0] if name else "?"
+
+
 def table(head, rows):
     if not rows: return "_нет данных_\n"
     out = ["| " + " | ".join(head) + " |", "|" + "|".join(["---"] * len(head)) + "|"]
@@ -398,7 +405,7 @@ def dashboard(m):
         s = next((x for x in m["sessions"] if x["session_id"] == sid), {})
         conf = collections.Counter(t["confidence"] for t in m["turns"]
                                    if t["session_id"] == sid and t["confidence"])
-        rows.append([vault_common.link(os.path.basename(rs[-1]["cwd"] or "") or "?", m["canon"]),
+        rows.append([plink(os.path.basename(rs[-1]["cwd"] or "") or "?", m["canon"]),
                      rs[-1]["model_name"] or rs[-1]["model_id"], rs[-1]["effort"] or "—",
                      ru_span(rs[-1]["epoch_last"] - rs[0]["epoch"]),
                      human(s.get("tokens_total", 0)), pct(p.get(sid, 0), 2),
@@ -415,7 +422,7 @@ def by_key(m, turns, keyf, canon=False):
     g = group(turns, keyf, "pct", "tokens", "in", "out", "cw", "cr")
     rows = []
     for k, a in sorted(g.items(), key=lambda kv: -kv[1]["pct"]):
-        rows.append([vault_common.link(k, m["canon"]) if canon else k,
+        rows.append([plink(k, m["canon"]) if canon else k,
                      pct(a["pct"], 2), human(a["tokens"]), a["n"]])
     return rows
 
@@ -444,7 +451,7 @@ def daily(m, day):
         my = [t for t in turns if t["session_id"] == sid]
         conf = collections.Counter(t["confidence"] for t in my if t["confidence"])
         rows.append([local(min(t["epoch"] for t in my)).strftime("%H:%M"),
-                     vault_common.link(os.path.basename(s.get("cwd") or "") or "?", m["canon"]),
+                     plink(os.path.basename(s.get("cwd") or "") or "?", m["canon"]),
                      s.get("effort") or "—", len(my),
                      "%s / %s / %s" % (human(sum(t["in"] for t in my)),
                                        human(sum(t["out"] for t in my)),
@@ -506,7 +513,7 @@ def weekly(m, w):
     top = sorted({t["session_id"] for t in turns}, key=lambda s: (-p[s], s))[:5]
     b += ["", "## Пять самых дорогих сессий", "",
           table(["Дата", "Проект", "Модель", "% недели", "Токенов", "Ходов", "$", "Карточка"],
-                [[sd[s]["day"], vault_common.link(os.path.basename(sd[s].get("cwd") or "") or "?", m["canon"]),
+                [[sd[s]["day"], plink(os.path.basename(sd[s].get("cwd") or "") or "?", m["canon"]),
                   ", ".join(sd[s]["model_ids"] or sorted({t["model"] for t in turns
                                                           if t["session_id"] == s})) or "—",
                   pct(p[s], 2),

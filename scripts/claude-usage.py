@@ -10,7 +10,7 @@ effort, версию, ветку и sidechain; `user.toolUseResult` — резу
 посчитанные самим Claude Code (прайс-таблица не нужна).
 
 Чего в транскриптах нет вовсе — процентов лимита подписки. Их отдаёт только
-statusline, поэтому тики пишет отдельный шаг (см. `claude-usage-tick.sh`).
+statusline, поэтому тики пишет отдельный шаг (см. `claude-usage-ship.py`).
 
     python3 scripts/claude-usage.py scan --out /srv/vault/"Claude Usage"/_data
     python3 scripts/claude-usage.py status
