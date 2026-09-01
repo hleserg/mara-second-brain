@@ -434,7 +434,14 @@ def daily(m, day):
     sd = {s["session_id"]: s for s in m["sessions"]}
     total = sum(t["pct"] for t in turns)
     tok = sum(t["tokens"] for t in turns)
-    usd = sum(sd[s]["api_usd_equiv"] for s in ss if s in sd)
+    # Деньги Claude Code считает на всю сессию. Сессия, начатая до полуночи,
+    # иначе попала бы в оба дня целиком — режем по доле токенов этого дня.
+    def day_usd(sid):
+        s = sd.get(sid) or {}
+        whole = s.get("tokens_total") or 0
+        mine = sum(t["tokens"] for t in turns if t["session_id"] == sid)
+        return (s.get("api_usd_equiv") or 0) * (mine / whole if whole else 0)
+    usd = sum(day_usd(s) for s in ss)
     d = datetime.strptime(day, "%Y-%m-%d")
     b = ["# Расход за %d %s" % (d.day, MONTHS[d.month - 1]), "",
          "Съедено **%s** недельного лимита (оценка), токенов %s, по ценам API $%.2f, "
@@ -459,8 +466,7 @@ def daily(m, day):
                      s.get("n_tool_calls", 0), ", ".join(sorted(s.get("mcp_servers") or {})) or "—",
                      pct(sum(t["pct"] for t in my), 2),
                      conf.most_common(1)[0][0] if conf else "—",
-                     "$%.2f" % (s.get("api_usd_equiv") or 0),
-                     "[[%s|%s]]" % (sid, sid[:8])])
+                     "$%.2f" % day_usd(sid), "[[%s|%s]]" % (sid, sid[:8])])
     b.append(table(["Начало", "Проект", "Усилие", "Ходов", "Вход/выход/кэш",
                     "Инстр.", "MCP", "% недели", "Доверие", "$", "Карточка"], rows))
     hv = [h for h in m["heavy"] if h["ts"][:10] == day]
