@@ -37,7 +37,7 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 
 | Что | Как |
 |---|---|
-| Синк с R2 | крон `*/5`, `scripts/vault-r2-sync.sh` (rclone bisync) |
+| Синк с R2 | крон `*/5`, `scripts/vault-r2-sync.sh` (rclone bisync). Меняешь `config/r2-filters.txt` — следом убери `~/.cache/rclone/bisync/*.lst` и прогони скрипт руками: после смены фильтров bisync требует `--resync` и до него молча стоит |
 | Автокоммит | крон `*/15`, `scripts/vault-git.sh commit` |
 | Пуш в зеркало | крон `0 * * * *`, `scripts/vault-git.sh push` |
 | Забор из старого бакета | крон `*/5`, `scripts/r2-legacy-pull.sh` — **временный**, до перецеливания устройств |
