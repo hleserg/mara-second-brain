@@ -112,8 +112,13 @@ def main():
         raw = os.path.join(a.vault, job.get("raw", ""))
         if not os.path.exists(card) or not os.path.exists(raw):
             print("queue-worker: нет карточки или сырья, снимаю", name); os.unlink(jp); continue
-        if re.search(r"(?m)^sensitive:\s*['\"]?true", open(card, encoding="utf-8").read()):
+        head = open(card, encoding="utf-8").read()
+        if re.search(r"(?m)^sensitive:\s*['\"]?true", head):
             held += 1; continue                        # §8.3.3 — облако не трогает
+        if re.search(r"(?m)^distilled:\s*['\"]?true", head):
+            # Задача пережила карточку: bisync мог воскресить её с устройства,
+            # которое отлежалось офлайн. Второй раз платить незачем.
+            os.unlink(jp); continue
         if job.get("attempts", 0) >= MAX_ATTEMPTS:
             held += 1; continue
 
