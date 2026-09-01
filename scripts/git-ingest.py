@@ -12,11 +12,11 @@
     python3 scripts/git-ingest.py --vault /srv/vault            # за вчера
     python3 scripts/git-ingest.py --date 2026-08-31 --dry-run
 """
-import os, re, sys, json, fcntl, argparse, subprocess, contextlib
+import os, re, sys, json, argparse, subprocess
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vault_common import canon_map, link, scrub, yaml_str
+from vault_common import canon_map, link, locked, scrub, yaml_str
 
 OWNER = os.environ.get("MARA_GH_OWNER", "hleserg")
 CONF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../config/git-repos.txt")
@@ -114,18 +114,6 @@ def write(path, text):
     tmp = path + ".tmp"                # рядом крутятся автокоммит и bisync
     with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
     os.replace(tmp, path)
-
-@contextlib.contextmanager
-def locked(vault):
-    """Общий с автокоммитом и bisync флок (§13.8). Берём его только вокруг
-    записи в волт: качать зеркала под ним — значит держать синк все те минуты,
-    что идёт clone."""
-    fh = open(os.path.join(vault, ".git/vault-git.lock"), "w")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        yield
-    finally:
-        fh.close()
 
 def main(argv=None):
     ap = argparse.ArgumentParser()

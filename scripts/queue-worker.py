@@ -18,6 +18,7 @@ import json, os, re, sys, fcntl, argparse, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import redact
 from session_note_compat import messages   # см. ниже
+from vault_common import canon_map, linkify
 
 API = "https://openrouter.ai/api/v1/chat/completions"
 MAX_CHARS = 100_000     # ~25k токенов; вход дешёвый, но лишний хвост только шумит
@@ -106,7 +107,7 @@ def call_llm(prompt, text, model, key):
         d = json.loads(r.read())
     return json.loads(d["choices"][0]["message"]["content"])
 
-def rewrite_card(path, out, canon=()):
+def rewrite_card(path, out, canon=None):
     """Меняем тело под фронтматтером и один флаг. Фронтматтер целиком не
     перегенерируем: Basic Memory нормализует YAML по-своему и дописывает
     permalink — переписав, мы бы каждый раз воевали с ним."""
@@ -119,13 +120,15 @@ def rewrite_card(path, out, canon=()):
     for key, head in (("facts", "## Факты и решения"), ("open", "## Осталось")):
         items = [i for i in (out.get(key) or []) if str(i).strip()]
         if items: body += [head] + ["- " + str(i).strip() for i in items] + [""]
+    # Имя, которое есть в реестре, линкуем прямо здесь — иначе свежая карточка
+    # ложилась бы текстом и ждала ночного entity-link (§5.4).
     for key, head in (("people", "Люди"), ("projects", "Проекты")):
-        items = [str(i).strip() for i in (out.get(key) or []) if str(i).strip()]
+        items = linkify(out.get(key) or [], canon)
         if items: body.append("%s: %s" % (head, ", ".join(items)))
     # §5.3: в links модель кладёт и то, чего в реестре нет. Пропустив выдумку
     # в тело, мы бы своими руками наполняли отчёт линтера (§5.6).
-    links = [x for x in (str(i).strip() for i in (out.get("links") or [])) if x in canon]
-    if links: body.append("Связи: " + " · ".join("[[%s]]" % x for x in links))
+    links = [x for x in linkify(out.get("links") or [], canon) if x.startswith("[[")]
+    if links: body.append("Связи: " + " · ".join(links))
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh: fh.write(fm + "\n".join(body).rstrip() + "\n")
     os.replace(tmp, path)     # атомарно: рядом крутятся автокоммит и bisync
@@ -157,7 +160,7 @@ def main():
               "очередь держим" % (type(e).__name__, e)); return 0
 
     idx = index(a.vault)
-    canon = {e["canonical"] for e in idx}
+    canon = canon_map(a.vault)
     block, cache = entity_block(idx), {}
     def prompt_for(kind):
         if kind not in cache:
@@ -214,13 +217,17 @@ def self_check():
     card = os.path.join(tempfile.mkdtemp(), "s.md")
     open(card, "w", encoding="utf-8").write(
         "---\ntitle: x\ndistilled: false\n---\n\nстарое тело\n")
+    canon = {"mara": "mara", "сергей": "sergey"}
     assert rewrite_card(card, {"title": "Т", "summary": "с", "facts": ["ф"],
-                               "links": ["mara", "выдуманная-сущность"]}, {"mara"})
+                               "people": ["Сергей", "Вася"],
+                               "links": ["mara", "выдуманная-сущность"]}, canon)
     got = open(card, encoding="utf-8").read()
     assert "distilled: true" in got and "старое тело" not in got
     # выдумка модели отсеяна, иначе линтер §5.6 ловил бы наши же ссылки
     assert "Связи: [[mara]]\n" in got + "\n", got
     assert "выдуманная" not in got
+    # знакомое имя линкуется на канон, незнакомое остаётся текстом
+    assert "Люди: [[sergey|Сергей]], Вася\n" in got + "\n", got
     # без реестра ссылок не бывает вовсе, а не «все подряд»
     assert entity_block([]) == "" and rewrite_card(card, {"links": ["mara"]}) \
            and "Связи" not in open(card, encoding="utf-8").read()
