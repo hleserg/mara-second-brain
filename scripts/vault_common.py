@@ -10,17 +10,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from redact import SECRETS          # слой 1 §8.3, чистые регэкспы
 
 def canon_map(vault):
-    """Алиас или каноническое имя → каноническое (§5.2). Голый `[[алиас]]`
-    Obsidian не резолвит — он вставляет `[[Каноническое|алиас]]`, — поэтому
-    имя приводим к канону, а незнакомое не линкуем вовсе. Индекса нет
-    (клиентский спул) — не линкуем ничего, и это правильно."""
+    """Алиас, заголовок или каноническое имя → каноническое (§5.2). Голый
+    `[[алиас]]` Obsidian не резолвит — он вставляет `[[Каноническое|алиас]]`, —
+    поэтому имя приводим к канону, а незнакомое не линкуем вовсе. Индекса нет
+    (клиентский спул) — не линкуем ничего, и это правильно.
+
+    `title` тут наравне с алиасами: имя файла латиницей (`devin`, `sergey`), а в
+    тексте сущность зовут заголовком («Devin AI», «Иван Петров»). Без него
+    самая очевидная форма имени как раз и не линковалась."""
     try:
         idx = json.load(open(os.path.join(vault or "", "_system/entity-index.json"),
                              encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return {}
     return {n.lower(): e["canonical"] for e in idx
-            for n in [e["canonical"]] + list(e.get("aliases") or [])}
+            for n in [e["canonical"], e.get("title")] + list(e.get("aliases") or []) if n}
 
 def link(name, canon):
     """Значение для frontmatter: ссылка, если сущность известна, иначе текст."""

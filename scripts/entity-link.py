@@ -38,6 +38,14 @@ PROJ = re.compile(r"(?m)^project:[ \t]*(.+)$")
 DENY = re.compile(r"\[bot\]$|^(unknown|n/a|-|—|none|нет|не указан\w*"
                   r"|dependabot|renovate|github-actions|blocks task runner)$", re.I)
 
+def ignored(vault):
+    """Имена, про которые владелец уже сказал «не заводить». Без этого отчёт
+    вечно показывает один и тот же отвергнутый десяток, и в нём тонет новое."""
+    p = os.path.join(vault, "_system", "entity-ignore.txt")
+    try: lines = open(p, encoding="utf-8").read().split("\n")
+    except OSError: return set()
+    return {norm(l.split("#")[0].strip()) for l in lines if l.split("#")[0].strip()}
+
 def norm(s):
     """Ключ склейки: регистр, ё и разделители. attadipa/Attadipa и
     make_style_dataset/make-style-dataset — одно и то же, а не разное."""
@@ -91,7 +99,7 @@ def card_text(name, kind, c, vault):
            "Описание допишите руками — из перечислений его не собрать.", ""]
     return "\n".join(fm)
 
-def create(vault, found, canon, min_n):
+def create(vault, found, canon, min_n, skip=()):
     """Новые карточки сущностей. Люди сюда не попадают вовсе — см. шапку."""
     made, review = [], []
     for kind, cands in found.items():
@@ -103,7 +111,8 @@ def create(vault, found, canon, min_n):
                    "упоминаний %d, порог %d" % (c["n"], min_n) if c["n"] < min_n else
                    "имя не латиницей" if not stem(name) else None)
             if why:
-                if why != "есть в реестре": review.append((kind, name, c, why))
+                if why != "есть в реестре" and key not in skip:
+                    review.append((kind, name, c, why))
                 continue
             made.append((os.path.join(vault, "entities", kind, stem(name) + ".md"),
                          card_text(name, kind, c, vault), name, c["n"]))
@@ -133,7 +142,9 @@ def review_text(review, canon, min_n):
            "Автоотчёт `scripts/entity-link.py` (ТЗ §5.4, §5.5). Сюда попадает то,",
            "что скрипт сам заводить не стал. Согласны — заведите файл в `entities/`",
            "(или допишите имя в `aliases:` существующей сущности), и следующий",
-           "прогон проставит ссылки задним числом. Боты (`…[bot]`) отброшены совсем.", ""]
+           "прогон проставит ссылки задним числом. Боты (`…[bot]`) отброшены совсем.",
+           "Не надо заводить — впишите имя в `_system/entity-ignore.txt`, и оно",
+           "перестанет тут появляться.", ""]
     rows = ["| Имя | Тип | Упом. | Первое | Почему не завели | Похоже на |", "|---|---|---:|---|---|---|"]
     for kind, name, c, why in sorted(review, key=lambda r: (-r[2]["n"], r[1])):
         near = difflib.get_close_matches(norm(name), [norm(k) for k in canon], 1, 0.8)
@@ -162,7 +173,7 @@ def main(argv=None):
 
     from vault_common import locked
     canon = canon_map(a.vault)
-    made, review = create(a.vault, harvest(a.vault), canon, a.min)
+    made, review = create(a.vault, harvest(a.vault), canon, a.min, ignored(a.vault))
     if a.dry_run:
         for _, _, name, n in made: print("завёл бы: %s (%d упом.)" % (name, n))
         files = links = 0
@@ -235,6 +246,8 @@ def self_check():
     assert h["projects"]["attadipa"]["first"][0] == "2026-08-01"
     assert "dependabot[bot]" not in str(h["people"])
     # порог и «людей не заводим»
+    # отвергнутое владельцем в отчёт больше не лезет
+    assert not [r for r in create(v, h, {}, 2, {norm("Ponytail")})[1] if r[1] == "Ponytail"]
     made, review = create(v, h, {}, 2)
     # имя берётся в самой частой написанной форме; при равенстве — первая
     assert [m[2] for m in made] == ["attadipa"], made
