@@ -85,7 +85,13 @@ def main(argv=None):
         os.makedirs(os.path.dirname(raw), exist_ok=True)
         # Короче прежнего — значит что-то съело историю на той стороне.
         # Затирать длинное коротким не будем: сырьё восстановить неоткуда.
-        if not (os.path.exists(raw) and len(text) < os.path.getsize(raw) * 0.9):
+        if os.path.exists(raw) and len(text) < os.path.getsize(raw) * 0.9:
+            # Молча замереть на полугодовалом файле — худшее, что тут можно
+            # сделать: сжать разрешаем только руками, удалив сырьё.
+            print("hermes-ingest: %s усохло (%d -> %d), не переписываю; "
+                  "если так и надо — удалите %s"
+                  % (sid, os.path.getsize(raw), len(text), raw_rel))
+        else:
             tmp = raw + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
             os.replace(tmp, raw)
