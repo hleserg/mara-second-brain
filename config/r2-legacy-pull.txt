@@ -1,0 +1,54 @@
+# ВРЕМЕННЫЙ. Снимок фильтров больного бакета obsidian-vault на момент переезда.
+# Нужен ровно для одного: пока Remotely Save на телефоне/маке/винде ещё пишет в
+# старый бакет, вытягивать оттуда новые заметки односторонним copy --update.
+# Удалить вместе с legacy-pull из крона, когда все устройства перецелены.
+# Исключения синка R2 (ТЗ §2.1). Порядок важен: rclone берёт первое совпадение.
+- /.git/**
+- /.smart-env/**
+- /.basic-memory/**
+- /.obsidian/workspace*.json
+- **/.DS_Store
+- /raw/**/*.jsonl
+# производный индекс copilot, 85 МБ, гонять между устройствами незачем (§1)
+- /.obsidian/copilot-index-*.json
+# В data.json плагинов лежат живые API-ключи (Copilot: OpenAI/Anthropic/OpenRouter).
+# Секреты в облако не уезжают (ТЗ §11). Настройки плагинов остаются локальными.
+- /.obsidian/plugins/*/data.json
+# Залипшие объекты R2: GET/LIST отдают их, PUT и DELETE — HTTP 500 InternalError
+# (проверено 2026-09-01, на свежесозданном ключе delete в том же бакете работает).
+# Всё это остатки реструктуризации §3: содержимое живёт в волте под новым путём
+# либо в истории git. Исключены, чтобы bisync не тянул их обратно в волт.
+# Убрать эти строки, когда Cloudflare отпустит ключи — см. scripts/r2-retry-orphans.sh
+- /_возобновление клода.md
+- /atman/benchmarks/BENCHMARKS.md
+- /atman/development/ROADMAP.md
+- /atman/development/work-packages/06-reality-and-affect.md
+- /atman/features/reflection-engine/README.md
+- /atman/Форма подачи на подачки.md
+- /kb/notes/возобновление клода.md
+- /stickerz/Инструкция_автодеплой.md
+- /Без названия.md
+- /Умный дом/iot stack/MQTT_TOPICS.md
+- /возобновление клода.md
+- /комиксы/proekt_zametki-1.md
+- /_selftest-1788210698.md
+- /_probe2.txt
+# Испорченные объекты, которые ЕСТЬ в волте: R2 отдаёт по ним 500 на PUT/DELETE
+# детерминированно (два независимых прогона — один и тот же список из 14).
+# Исключены, чтобы bisync не падал на них и синкал остальные 170 файлов.
+# Волт остаётся источником истины (§1); в R2 по ним лежит устаревшая копия.
+- /archive/scraps/Открытки.md
+- /copilot/copilot-custom-prompts/Fix grammar and spelling.md
+- /entities/projects/.gitkeep
+- /kb/howto/atman/architecture/DATADOG-LLM-OBSERVABILITY.md
+- /kb/howto/atman/development/TEST_COVERAGE_PLAN.md
+- /kb/howto/atman/ENDPOINTS.md
+- /kb/howto/atman/research/agent-ui-research.md
+- /kb/howto/smart-home/HANDOFF.md
+- /kb/notes/diary-2026/Баофенги учет.md
+- /kb/notes/diary-2027/01-карта-клиента.md
+- /.obsidian/community-plugins.json
+- /.obsidian/plugins/calendar/manifest.json
+- /.obsidian/plugins/pdf-plus/main.js
+- /views/Когда я узнал.base
++ **

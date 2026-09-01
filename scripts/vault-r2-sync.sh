@@ -7,7 +7,7 @@
 set -euo pipefail
 
 VAULT="${VAULT:-/srv/vault}"
-REMOTE="${REMOTE:-r2:obsidian-vault}"
+REMOTE="${REMOTE:-r2:mara-vault}"
 RCLONE="${RCLONE:-/opt/rclone/rclone}"
 LOCK="${LOCK:-$VAULT/.git/vault-git.lock}"   # общий с vault-git.sh: §13.8
 FILTERS="$(dirname "${BASH_SOURCE[0]}")/../config/r2-filters.txt"
