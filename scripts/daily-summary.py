@@ -95,13 +95,17 @@ def nolinks(text):
     return re.sub(r"\[\[([^\]|#\n]+?)(?:\|([^\]\n]*))?\]\]",
                   lambda m: (m.group(2) or m.group(1)).strip(), text)
 
+# Оглавление дня, которое собрал daily-page.py. В сводку его пускать нельзя:
+# те же карточки уже пересказаны выше, а ссылки в телеграме — мусор.
+AUTO = re.compile(r"<!-- mara:auto -->.*?<!-- /mara:auto -->", re.S)
+
 def diary(vault, day):
     """Дневник Мары — уже человеческий текст, в облако его не гоняем."""
     p = os.path.join(vault, "daily", day + ".md")
     if not os.path.exists(p): return ""
     m = FM.match(open(p, encoding="utf-8", errors="replace").read())
     text = m.group(2) if m else open(p, encoding="utf-8", errors="replace").read()
-    return re.sub(r"(?m)^#.*$", "", text).strip()[:1500]
+    return re.sub(r"(?m)^#.*$", "", AUTO.sub("", text)).strip()[:1500]
 
 
 def plain(git, ses):
