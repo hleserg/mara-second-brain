@@ -84,9 +84,16 @@ def cards(d, day):
         p = re.search(r"(?m)^project:\s*'?\"?\[?\[?([^'\"\]\n]+)", fm)
         out.append(((h.group(1).strip() if h else name[:-3]),
                     (p.group(1).strip() if p else ""),
-                    re.sub(r"(?m)^#.*$", "", body).strip()))
+                    nolinks(re.sub(r"(?m)^#.*$", "", body)).strip()))
     return out
 
+
+def nolinks(text):
+    """`[[sergey|Сергей]]` → `Сергей`. С автосвязей (§5.4) тело карточки
+    размечено викилинками, а сводка уезжает в телеграм, где `[[…]]` — просто
+    квадратные скобки в тексте. Модель охотно копирует их из источника."""
+    return re.sub(r"\[\[([^\]|#\n]+?)(?:\|([^\]\n]*))?\]\]",
+                  lambda m: (m.group(2) or m.group(1)).strip(), text)
 
 def diary(vault, day):
     """Дневник Мары — уже человеческий текст, в облако его не гоняем."""
@@ -177,7 +184,8 @@ def self_check():
     v = tempfile.mkdtemp()
     for sub in ("kb/notes", "kb/sessions", "daily"): os.makedirs(os.path.join(v, sub))
     open(os.path.join(v, "kb/notes/g.md"), "w", encoding="utf-8").write(
-        "---\noccurred: 2026-08-31\nproject: '[[atman]]'\nsensitive: false\n---\n\n# Починил синк\nтело\n")
+        "---\noccurred: 2026-08-31\nproject: '[[atman]]'\nsensitive: false\n---\n"
+        "\n# Починил синк\nтело\nЛюди: [[sergey|Сергей]]\n")
     open(os.path.join(v, "kb/notes/old.md"), "w", encoding="utf-8").write(
         "---\noccurred: 2026-08-30\nproject: x\n---\n\n# Не тот день\n")
     open(os.path.join(v, "kb/notes/secret.md"), "w", encoding="utf-8").write(
@@ -203,6 +211,9 @@ def self_check():
     v2 = tempfile.mkdtemp(); os.makedirs(os.path.join(v2, "daily"))
     open(os.path.join(v2, "daily/2026-08-31.md"), "w", encoding="utf-8").write("# д\nтолько дневник\n")
     assert "только дневник" in summary(v2, "2026-08-31", raw=True)
+    # викилинки из карточек в сводку не просачиваются
+    assert nolinks("Люди: [[sergey|Сергей]], [[atman]]") == "Люди: Сергей, atman"
+    assert "[[" not in cards(os.path.join(v, "kb/notes"), "2026-08-31")[0][2]
     print("daily-summary: самопроверка ок")
     return 0
 
