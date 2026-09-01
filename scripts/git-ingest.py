@@ -45,15 +45,18 @@ def git(args, cwd=None, timeout=180):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
+# Зеркало, уже обновлённое в этом прогоне. Бэкфилл идёт по дням и заходит в
+# каждый репозиторий сотни раз; без этого он сотни раз дёрнул бы и GitHub.
+FETCHED = set()
+
 def mirror(name, root):
     """Зеркало репозитория. Вернуть путь или (None, причина).
-    Приватные репозитории по https недоступны: на doctor лежит deploy-key от
-    одного mara-second-brain, а не пользовательский ключ. Такие пропускаем и
-    называем поимённо — молча терять половину репозиториев нельзя."""
+    Недоступное называем поимённо — молча терять репозитории нельзя."""
     path = os.path.join(root, name + ".git")
     if os.path.isdir(path):
+        if name in FETCHED: return path, None
         rc, _, err = git(["remote", "update", "--prune"], cwd=path)
-        if not rc: return path, None
+        if not rc: FETCHED.add(name); return path, None
     else:
         err = ""
         # https работает без ключей для всего публичного; приватное отдаётся
@@ -64,6 +67,10 @@ def mirror(name, root):
             if not rc: return path, None
     return None, ("нет доступа" if NOAUTH.search(err)
                   else err.strip().split("\n")[-1][:80] or "rc=%d" % rc)
+
+def days(start, end):
+    """Дни включительно с обоих концов: один день — это [start], а не пусто."""
+    return [start + timedelta(days=i) for i in range((end - start).days + 1)]
 
 def log(path, day, kind, author):
     """Коммиты за сутки по всем веткам. У форка — только свои: иначе в заметку
@@ -120,6 +127,7 @@ def main(argv=None):
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
     ap.add_argument("--mirrors", default=os.environ.get("MARA_MIRRORS", "/srv/git-mirrors"))
     ap.add_argument("--date", help="день в ISO; по умолчанию вчерашний")
+    ap.add_argument("--since", help="бэкфилл: с этого дня по --date включительно")
     # Подстрока, а не адрес целиком: --author у git — регэксп по «Имя <почта>»,
     # а коммиты, сделанные через веб-морду GitHub, подписаны
     # hleserg@users.noreply.github.com. По полному адресу они бы потерялись.
@@ -128,13 +136,14 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
 
-    day = (datetime.fromisoformat(a.date).date() if a.date
+    end = (datetime.fromisoformat(a.date).date() if a.date
            else (datetime.now().date() - timedelta(days=1)))
+    start = datetime.fromisoformat(a.since).date() if a.since else end
     if not os.path.isdir(a.mirrors): os.makedirs(a.mirrors)
     canon = canon_map(a.vault)
     made = skipped = 0
     unreachable = []
-    for name, kind in repos():
+    for day, (name, kind) in ((d, r) for d in days(start, end) for r in repos()):
         cardp = os.path.join(a.vault, "kb/notes", "git-%s-%s.md" % (name, day))
         if os.path.exists(cardp): skipped += 1; continue    # идемпотентность
         path, why = mirror(name, a.mirrors)
@@ -157,7 +166,8 @@ def main(argv=None):
                               "queued": datetime.now().astimezone().isoformat(timespec="seconds")},
                              ensure_ascii=False, indent=2) + "\n")
         made += 1
-    print("git-ingest %s: заметок %d, уже было %d" % (day, made, skipped))
+    print("git-ingest %s: заметок %d, уже было %d"
+          % (start if start == end else "%s..%s" % (start, end), made, skipped))
     if unreachable:
         print("не забрано: " + ", ".join(unreachable))
     return 0
@@ -178,6 +188,9 @@ def self_check():
     assert "5 коммитов за" in card("x", datetime(2026, 8, 31).date(),
                                    "".join("abc123%d С\nраз\n" % i for i in range(5)), {}, "r")
     assert 'project: "x"' in card("x", datetime(2026, 8, 31).date(), txt, {}, "r")
+    # диапазон включает оба конца, один день — это один день, а не ноль
+    d1, d3 = datetime(2026, 8, 31).date(), datetime(2026, 9, 2).date()
+    assert days(d1, d1) == [d1] and len(days(d1, d3)) == 3
     assert "<API_KEY>" in scrub("ключ sk-or-v1-abcdefghijklmnopqrstuvwx в сообщении")
     print("git-ingest: самопроверка ок")
     return 0
