@@ -16,9 +16,12 @@ from datetime import datetime, timezone, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
+# Без `active = 1`: компрессия контекста гасит старые сообщения, и живая
+# сессия со временем «худела» бы прямо в сырье. Синтетические выжимки
+# компрессии (_compressed_summary) наоборот не берём — это не то, что говорили.
 Q = ('select session_id,role,content,timestamp from messages '
      "where role in ('user','assistant') and content is not null and content <> '' "
-     'and active = 1 order by session_id, id')
+     'and _compressed_summary = 0 order by session_id, id')
 
 def fetch(mac, db):
     """Сообщения с мака. sqlite3 -json есть в macOS начиная с Sonoma."""
@@ -64,13 +67,21 @@ def main(argv=None):
         raw_rel = "raw/hermes/%s.jsonl" % sid
         raw = os.path.join(a.vault, raw_rel)
         text = "\n".join(lines) + "\n"
-        # Разговор дописывается: перезаписываем сырьё, пока карточки нет.
-        # Есть карточка — сессия уже разобрана, второй раз не платим.
-        if os.path.exists(os.path.join(a.vault, "kb/sessions", sid + ".md")): continue
+        # Сессия у Мары не кончается: session_reset выключен, а разговоры
+        # группируются по пользователю — один sid живёт месяцами. Поэтому
+        # сырьё переписываем всегда, а не только пока нет карточки, иначе в
+        # волте остался бы первый час разговора и больше ничего.
         os.makedirs(os.path.dirname(raw), exist_ok=True)
-        tmp = raw + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
-        os.replace(tmp, raw)
+        # Короче прежнего — значит что-то съело историю на той стороне.
+        # Затирать длинное коротким не будем: сырьё восстановить неоткуда.
+        if not (os.path.exists(raw) and len(text) < os.path.getsize(raw) * 0.9):
+            tmp = raw + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
+            os.replace(tmp, raw)
+        # Карточка — один раз: она про то, когда разговор начался. Для вечной
+        # сессии это дата первого снимка, и это честнее, чем каждый час
+        # переписывать occurred на сегодня.
+        if os.path.exists(os.path.join(a.vault, "kb/sessions", sid + ".md")): continue
         subprocess.run([sys.executable, os.path.join(HERE, "session-note.py"), raw,
                         "--vault", a.vault, "--raw-rel", raw_rel, "--session-id", sid,
                         "--source", "hermes"] + (["--sensitive"] if a.sensitive else []) +
@@ -95,6 +106,15 @@ def self_check():
     f = parse(p)
     assert f["users"] == 1 and f["assists"] == 1, f
     assert list(messages(p)) == [("user", "привет"), ("assistant", "ну привет")]
+    # старое сырьё не затирается усохшим: compression гасит сообщения, и
+    # прогон после неё не должен уносить историю
+    import tempfile as _t
+    d = _t.mkdtemp(); raw = os.path.join(d, "s.jsonl")
+    open(raw, "w", encoding="utf-8").write("x" * 1000)
+    shrank = lambda t: os.path.exists(raw) and len(t) < os.path.getsize(raw) * 0.9
+    assert shrank("y" * 100)          # усохло — не пишем
+    assert not shrank("z" * 1000)     # столько же — пишем
+    assert not shrank("z" * 5000)     # дописали — пишем
     # кавычка в запросе не разваливает шелл
     assert json_arg("select 'a'") == """'select '\\''a'\\'''"""
     print("hermes-ingest: самопроверка ок")

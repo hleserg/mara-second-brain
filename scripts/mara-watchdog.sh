@@ -11,6 +11,12 @@
 set -euo pipefail
 
 MAC="${MAC:-serg@192.168.1.80}"
+COOLDOWN="${COOLDOWN:-2100}"   # 35 минут. `gateway restart` доливает
+                               # незакрытые прогоны до 1815 с, и всё это время
+                               # тикер молчит законно. Без паузы сторож
+                               # накидывал бы второй и третий рестарт на
+                               # gateway, который и так встаёт.
+MARK="${MARK:-$HOME/.local/state/mara/watchdog-restart}"
 STALE="${STALE:-600}"          # 10 минут: тикер ходит раз в минуту, но мак
                                # успевает и подтормозить, и уснуть на пару.
 
@@ -22,6 +28,12 @@ last=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$MAC" \
 
 age=$(( $(date +%s) - ${last%%.*} ))
 [ "$age" -lt "$STALE" ] && exit 0
+
+if [ -f "$MARK" ] && [ $(( $(date +%s) - $(stat -c %Y "$MARK") )) -lt "$COOLDOWN" ]; then
+  echo "$(date -Is) mara-watchdog: тикер молчит $age с, но рестарт был недавно — жду"
+  exit 0
+fi
+mkdir -p "$(dirname "$MARK")"; touch "$MARK"
 
 echo "$(date -Is) mara-watchdog: тикер молчит $age с, рестарт gateway"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$MAC" \
