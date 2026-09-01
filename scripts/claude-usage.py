@@ -52,6 +52,13 @@ def ts_of(d):
     return t if isinstance(t, str) else ""
 
 
+def epoch_of(ts):
+    """ISO → epoch. Тики штампованы epoch'ом, ходы — строкой; свести их на одну
+    ось иначе нельзя."""
+    try: return datetime.fromisoformat((ts or "").replace("Z", "+00:00")).timestamp()
+    except ValueError: return 0.0
+
+
 def size(x):
     """Байты, которые результат инструмента занял в контексте."""
     if x is None: return 0
@@ -61,7 +68,11 @@ def size(x):
 
 
 def parse(path):
-    """Транскрипт → (запись сессии, тяжёлые вызовы инструментов).
+    """Транскрипт → (запись сессии, тяжёлые вызовы инструментов, ходы).
+
+    Ход — это `(время, сессия, модель, токены)` одного ответа. Агрегатору он
+    нужен поштучно: интервал между тиками надо разложить по сессиям, а сумма по
+    сессии тут не поможет.
 
     Дедуп по `message.id`: одно и то же сообщение встречается в файле не раз
     (резюме компакции, ретраи), и без дедупа токены задваиваются."""
@@ -75,7 +86,7 @@ def parse(path):
          "api_duration_ms": 0, "tool_duration_ms": 0, "lines_added": 0, "lines_removed": 0,
          "models": {}, "tools": {}, "mcp_servers": {}, "skills": {},
          "tool_result_bytes": 0, "advisor_models": {}}
-    seen, heavy, use = set(), [], {}
+    seen, heavy, use, turns = set(), [], {}, []
     for line in open(path, encoding="utf-8", errors="replace"):
         line = line.strip()
         if not line: continue
@@ -109,6 +120,9 @@ def parse(path):
             s["tokens_in"] += got[0]; s["tokens_out"] += got[1]
             s["tokens_cache_write"] += got[2]; s["tokens_cache_read"] += got[3]
             s["tokens_thinking"] += (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0
+            turns.append({"epoch": epoch_of(ts), "session_id": s["session_id"],
+                          "model": m["model"], "sidechain": bool(d.get("isSidechain")),
+                          "in": got[0], "out": got[1], "cw": got[2], "cr": got[3]})
             # §4А: первый ответ — это системный промпт, описания инструментов и
             # CLAUDE.md. По нему и меряется, во что обходится сам тулсет.
             if not s["first_turn_input_tokens"]: s["first_turn_input_tokens"] = got[0] + got[2]
@@ -153,7 +167,9 @@ def parse(path):
     s["model_ids"] = sorted(s["models"])
     s["tokens_total"] = s["tokens_in"] + s["tokens_out"] + s["tokens_cache_write"] + s["tokens_cache_read"]
     s["day"] = s["started_at"][:10]
-    return (s, heavy) if s["n_turns"] or s["n_sidechain_turns"] else (None, [])
+    # session_id узнаётся по ходу разбора; проставим его ходам задним числом
+    for t in turns: t["session_id"] = s["session_id"]
+    return (s, heavy, turns) if s["n_turns"] or s["n_sidechain_turns"] else (None, [], [])
 
 
 def transcripts(roots):
@@ -170,19 +186,20 @@ def dump(path, rows):
 
 
 def scan(roots, out):
-    sessions, heavy = [], []
+    sessions, heavy, turns = [], [], []
     for p in transcripts(roots):
-        try: s, h = parse(p)
+        try: s, h, t = parse(p)
         except OSError: continue
-        if s: sessions.append(s); heavy.extend(h)
+        if s: sessions.append(s); heavy.extend(h); turns.extend(t)
     sessions.sort(key=lambda s: s["started_at"])
     heavy.sort(key=lambda h: h["ts"])
+    turns.sort(key=lambda t: t["epoch"])
     if out:
         d = os.path.join(out, "derived")
         if not os.path.isdir(d): os.makedirs(d)
         dump(os.path.join(d, "sessions.jsonl"), sessions)
         dump(os.path.join(d, "heavy-results.jsonl"), heavy)
-    return sessions, heavy
+    return sessions, heavy, turns
 
 
 def human(n):
@@ -221,7 +238,7 @@ def main(argv=None):
         "CLAUDE_PROJECTS", "~/.claude/projects")])
     ap.add_argument("--out", help="каталог _data; без него ничего не пишем")
     a = ap.parse_args(argv)
-    sessions, heavy = scan(a.roots, a.out if a.cmd == "scan" else None)
+    sessions, heavy, _ = scan(a.roots, a.out if a.cmd == "scan" else None)
     if a.cmd == "scan":
         print("claude-usage: сессий %d, тяжёлых результатов %d%s"
               % (len(sessions), len(heavy), ", записано в " + a.out if a.out else ""))
@@ -257,7 +274,7 @@ def self_check():
          "modelUsage": {"claude-opus-5": {"inputTokens": 10, "outputTokens": 5, "costUSD": 1.5}}},
     ]
     open(p, "w", encoding="utf-8").write("\n".join(json.dumps(r) for r in rows) + "\n")
-    s, heavy = parse(p)
+    s, heavy, turns = parse(p)
     assert s["session_id"] == "s1" and s["host"] == "BetaPi", s
     assert host_of("", "-tmp-claude-1000--home-hleserg-x-scratchpad") == "BetaPi"
     assert s["n_turns"] == 1, "дубль по message.id не отсеян: %d" % s["n_turns"]
@@ -280,14 +297,18 @@ def self_check():
     sy = os.path.join(d, "-home-hleserg-x", "s3.jsonl")
     open(sy, "w").write(json.dumps({"type": "assistant", "sessionId": "s3",
         "message": {"id": "z", "model": "<synthetic>", "usage": {}}}) + "\n")
-    assert parse(sy) == (None, [])
+    assert parse(sy) == (None, [], [])
 
     # пустой транскрипт сессией не считается
     e = os.path.join(d, "-home-hleserg-x", "s2.jsonl")
     open(e, "w").write('{"type":"summary"}\n')
-    assert parse(e) == (None, [])
+    assert parse(e) == (None, [], [])
+    # ход попал в ленту один раз (дубль по message.id тут тоже должен отсеяться)
+    assert len(turns) == 1 and turns[0]["model"] == "claude-opus-5", turns
+    assert turns[0]["epoch"] == epoch_of("2026-08-31T10:00:00Z") > 0
+    assert (turns[0]["in"], turns[0]["cr"]) == (10, 7)
     out = tempfile.mkdtemp()
-    ss, hh = scan([d], out)
+    ss, hh, tt = scan([d], out)
     assert len(ss) == 1 and os.path.exists(os.path.join(out, "derived/sessions.jsonl"))
     print("claude-usage: самопроверка ок")
     return 0
