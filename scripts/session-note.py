@@ -182,7 +182,8 @@ def render(f, sid, raw_rel, canon=None):
 
     span = "%s %s–%s" % (start.date().isoformat(), start.strftime("%H:%M"), end.strftime("%H:%M"))
     if f["duration"]: span += " (%d мин)" % round(f["duration"] / 60000)
-    label = "Claude Code" if f["source"] == "claude-code" else "Codex"
+    label = {"claude-code": "Claude Code", "codex": "Codex", "hermes": "Мара"}.get(
+        f["source"], f["source"])
     body = ["# " + title, "",
             "Сессия %s, %s." % (label, span)]
     if f["cwd"]: body.append("Каталог: `%s`%s." % (f["cwd"], ", ветка `%s`" % f["branch"] if f["branch"] else ""))
@@ -211,6 +212,9 @@ def main(argv=None):
     p.add_argument("--session-id")
     p.add_argument("--vault", help="корень волта (или спула той же формы); без него — в stdout")
     p.add_argument("--raw-rel", help="путь к сырью относительно волта; по умолчанию — как у claude-code")
+    # Транскрипт Мары приезжает в форме claude-code (её кладёт hermes-ingest.py),
+    # иначе parse его не разберёт. Но в карточке источник должен быть честным.
+    p.add_argument("--source", help="перебить источник в карточке (напр. hermes)")
     p.add_argument("--skip-empty", action="store_true",
                    help="молча выйти, если человек не сказал ни слова (оборванная сессия)")
     p.add_argument("--skip-existing", action="store_true",
@@ -218,6 +222,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     f = parse(a.transcript)
+    if a.source: f["source"] = a.source
     if a.skip_empty and not f["users"]: return 0
     sid = a.session_id or f["sid"] or os.path.splitext(os.path.basename(a.transcript))[0]
     raw_rel = a.raw_rel or "raw/claude-code/%s/%s.jsonl" % (
@@ -229,7 +234,7 @@ def main(argv=None):
         return 0
     write_atomic(os.path.join(a.vault, "kb/sessions", sid + ".md"), note)
     write_atomic(os.path.join(a.vault, "_system/queue", sid + ".json"),
-                 json.dumps({"kind": "distill", "source": "claude-code", "source_id": sid,
+                 json.dumps({"kind": "distill", "source": f["source"], "source_id": sid,
                              "note": "kb/sessions/%s.md" % sid, "raw": raw_rel,
                              "queued": _now().isoformat(timespec="seconds")},
                             ensure_ascii=False, indent=2) + "\n")

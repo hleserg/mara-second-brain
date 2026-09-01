@@ -54,7 +54,12 @@ git push -q --mirror "$MIRROR"
 
 say "крон: синк R2 /5 мин, коммит /15 мин, пуш /час"
 tmp=$(mktemp)
-crontab -l 2>/dev/null | grep -v '# mara-second-brain$' > "$tmp" || true
+# Вычищаем только свои три строки, по именам скриптов. Раньше здесь стоял
+# grep -v по тегу '# mara-second-brain' — и повторный запуск установщика
+# сносил все остальные задачи с тем же тегом (ingest, реестр, очередь):
+# идемпотентный по замыслу скрипт молча ломал этапы 2 и 4.
+crontab -l 2>/dev/null \
+  | grep -vE "scripts/(vault-r2-sync|vault-git)\.sh" > "$tmp" || true
 cat >> "$tmp" <<CRON
 */5 * * * *  $REPO/scripts/vault-r2-sync.sh # mara-second-brain
 */15 * * * * $REPO/scripts/vault-git.sh commit # mara-second-brain
@@ -64,4 +69,4 @@ crontab "$tmp"; rm -f "$tmp"
 
 say "готово"
 git -C "$VAULT" log --oneline | head -3
-crontab -l | grep '# mara-second-brain$'
+crontab -l | grep -E "scripts/(vault-r2-sync|vault-git)\.sh"
