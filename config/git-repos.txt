@@ -1,0 +1,43 @@
+# Репозитории для git-ingest (ТЗ §6.5). Формат: имя<TAB>own|fork
+#
+# Обновить (с любой машины, где есть gh — на doctor его нет, и не надо):
+#   gh repo list hleserg --limit 200 --json name,isFork,diskUsage \
+#     -q '.[]|select(.diskUsage < 500000)|[.name,(if .isFork then "fork" else "own" end)]|@tsv' \
+#     | sort > config/git-repos.txt.new
+#
+# Отсечка 500 МБ выкидывает Momentum-Apps (1,2 ГБ) и all-the-plugins (570 МБ) —
+# это апстримные сборники прошивок Flipper, своих коммитов там нет, а зеркалить
+# два гигабайта чужой истории незачем.
+#
+# own — берём все коммиты: в своём репозитории и чужой коммит часть истории проекта.
+# fork — только свои: иначе в заметки поедет чужой апстрим.
+1c-consultant	own
+agent-playbook	own
+atman	own
+atmanreflects	own
+Attadipa	own
+awesome-flipperzero	fork
+azimut	fork
+create-char-passport	own
+esp32-flipper-exp	own
+fairytaler_bot	own
+flipper-application-catalog	fork
+flipper-fake-chip-detector	own
+flipperMeshCoreConfig	own
+game_collection	own
+ha-mqtt-sensor-hub	own
+illustrious-2.0-study	own
+diary_mesh_map	own
+insonmia	own
+intronet-front-lab	own
+make-char-dataset	own
+make-style-dataset	own
+mara-second-brain	own
+mara-the-demon-assistant	own
+meshcore-node-fw	own
+MiCasa	own
+my-agents-ui	own
+obsidian-vault	own
+remote_ir_rf	own
+stickerz	own
+template	own

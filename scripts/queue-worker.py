@@ -56,7 +56,13 @@ def entity_block(idx):
         lines.append("- [[%s]] — %s%s" % (e["canonical"], e.get("type", "?"), al))
     return "\n".join(lines)
 
-def payload(raw_path):
+# Каждому виду сырья — свой промпт: git-лог и транскрипт сессии просят
+# разного, а формат ответа общий, его разбирает один rewrite_card.
+PROMPTS = {"distill": "session-distill.md", "git": "git-distill.md"}
+
+def payload(raw_path, kind="distill"):
+    if kind == "git":     # лог — обычный текст, парсить нечего
+        return open(raw_path, encoding="utf-8", errors="replace").read()[:MAX_CHARS]
     parts, total = [], 0
     for role, text in messages(raw_path):
         who = "Сергей" if role == "user" else "Ассистент"
@@ -128,8 +134,13 @@ def main():
 
     idx = index(a.vault)
     canon = {e["canonical"] for e in idx}
-    prompt = open(os.path.join(a.vault, "_system/prompts/session-distill.md"),
-                  encoding="utf-8").read() + entity_block(idx)
+    block, cache = entity_block(idx), {}
+    def prompt_for(kind):
+        if kind not in cache:
+            cache[kind] = open(os.path.join(a.vault, "_system/prompts",
+                                            PROMPTS.get(kind, PROMPTS["distill"])),
+                               encoding="utf-8").read() + block
+        return cache[kind]
     qdir = os.path.join(a.vault, "_system/queue")
     jobs = sorted(f for f in os.listdir(qdir) if f.endswith(".json"))
     done = held = 0
@@ -154,12 +165,13 @@ def main():
         if job.get("attempts", 0) >= MAX_ATTEMPTS:
             held += 1; continue
 
-        text, stats = redact.redact(payload(raw))
+        kind = job.get("kind", "distill")
+        text, stats = redact.redact(payload(raw, kind))
         if a.dry_run:
             print("=" * 60, "\n%s  (вычищено: %s)\n" % (name, stats or "ничего"), text[:4000])
             done += 1; continue
         try:
-            out = call_llm(prompt, text, model, key)
+            out = call_llm(prompt_for(kind), text, model, key)
         except Exception as e:
             job["attempts"] = job.get("attempts", 0) + 1
             job["last_error"] = "%s: %s" % (type(e).__name__, e)
@@ -188,6 +200,11 @@ def self_check():
     # без реестра ссылок не бывает вовсе, а не «все подряд»
     assert entity_block([]) == "" and rewrite_card(card, {"links": ["mara"]}) \
            and "Связи" not in open(card, encoding="utf-8").read()
+    # git-сырьё читается как есть, без разбора транскрипта
+    raw = os.path.join(os.path.dirname(card), "g.txt")
+    open(raw, "w", encoding="utf-8").write("abc1234 С\nпочинил синк\n")
+    assert payload(raw, "git").startswith("abc1234")
+    assert PROMPTS["git"] != PROMPTS["distill"]
     print("queue-worker: самопроверка ок")
     return 0
 

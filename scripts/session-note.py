@@ -14,10 +14,11 @@ from datetime import datetime, timedelta, timezone
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# Слой 1 из §8.3 — чистые регэкспы, presidio не тянет, работает где угодно.
-# Импорт намеренно жёсткий: лучше не собрать карточку вовсе, чем записать в
-# волт ключ. Волт уезжает в R2 и коммитится — §11, «секреты не в волте, никогда».
-from redact import SECRETS
+# Импорт намеренно жёсткий: _scrub тянет за собой слой 1 §8.3, и лучше не
+# собрать карточку вовсе, чем записать в волт ключ. Волт уезжает в R2 и
+# коммитится — §11, «секреты не в волте, никогда».
+from vault_common import canon_map as _canon_map, link as _link, \
+                         scrub as _scrub, yaml_str as _yaml_str
 
 # Codex вклеивает AGENTS.md и окружение первым же user-сообщением. Это не то,
 # «с чего началось» — настоящий запрос идёт следующим.
@@ -149,34 +150,12 @@ def _project(cwd):
     # .claude, .config и прочие служебные каталоги проектами не бывают.
     return None if name.startswith(".") else name
 
-def _canon_map(vault):
-    """Алиас или каноническое имя → каноническое (§5.2). Проект — это имя
-    каталога, и линковать его можно, только если такая сущность заведена:
-    `[[что-попало]]` вешает в граф фантомный узел. На клиентском спуле индекса
-    нет — проект уедет обычным текстом, и это ровно то, что надо."""
-    try:
-        idx = json.load(open(os.path.join(vault or "", "_system/entity-index.json"),
-                             encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-    return {n.lower(): e["canonical"] for e in idx
-            for n in [e["canonical"]] + list(e.get("aliases") or [])}
-
-def _scrub(s):
-    """Реплика человека попадает в карточку как есть, а карточка синкается.
-    Сергей регулярно вставляет ключи прямо в запрос — вот тут они и уехали бы."""
-    for rx, repl in SECRETS: s = rx.sub(repl, s)
-    return s
-
 def _clip(s, n):
     """Обрезка по границе слова: заголовок, разорванный посередине, потом
     попадает в эмбеддинги и в графы — пусть хотя бы читается."""
     if not s or len(s) <= n: return s
     cut = s[:n]
     return (cut[:cut.rfind(" ")] if " " in cut[n // 2:] else cut).rstrip(" ,.;:—-") + "…"
-
-def _yaml_str(s):
-    return '"%s"' % s.replace("\\", "\\\\").replace('"', '\\"')
 
 def render(f, sid, raw_rel, canon=None):
     ts = sorted(f["ts"])
@@ -193,11 +172,9 @@ def render(f, sid, raw_rel, canon=None):
           "source_id: " + sid,
           "created: " + _now().isoformat(timespec="seconds"),
           "occurred: " + start.date().isoformat()]
-    if project:
-        # Голый `[[алиас]]` Obsidian не резолвит — вставляет `[[Каноническое|алиас]]`,
-        # так что имя каталога приводим к каноническому, а незнакомое пишем текстом.
-        c = (canon or {}).get(project.lower())
-        fm.append("project: " + _yaml_str("[[%s]]" % c if c else project))
+    # Голый `[[алиас]]` Obsidian не резолвит, а незнакомое имя каталога вешает
+    # в граф фантомный узел, — обе беды лечит vault_common.link.
+    if project: fm.append("project: " + _yaml_str(_link(project, canon)))
     fm += ["tags: [session, %s]" % f["source"],
            "sensitive: false",
            "distilled: false",
