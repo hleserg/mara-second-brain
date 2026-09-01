@@ -11,6 +11,9 @@
 # по две сотни задач за прогон, и bisync с его --max-delete 25 отваливался на
 # каждом таком прогоне. Устройствам она не нужна ни для чего.
 - /_system/queue/**
+# Тики statusline: ~10 строк в минуту активной работы, и нужны они только
+# агрегатору на doctor. Отчёты в «Claude Usage/» синкаются как обычно.
+- /Claude Usage/_data/**
 # производный индекс copilot, 85 МБ, гонять между устройствами незачем (§1)
 - /.obsidian/copilot-index-*.json
 # В data.json плагинов лежат живые API-ключи (Copilot: OpenAI/Anthropic/OpenRouter).

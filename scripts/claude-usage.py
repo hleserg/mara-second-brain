@@ -68,7 +68,7 @@ def parse(path):
     s = {"schema_version": SCHEMA, "session_id": os.path.basename(path)[:-6],
          "transcript": path, "started_at": "", "ended_at": "", "cc_version": "",
          "effort": "", "cwd": "", "git_branch": "", "project_key": os.path.basename(os.path.dirname(path)),
-         "n_turns": 0, "n_sidechain_turns": 0, "n_tool_calls": 0, "n_compactions": 0,
+         "n_turns": 0, "n_sidechain_turns": 0, "n_synthetic": 0, "n_tool_calls": 0, "n_compactions": 0,
          "tokens_in": 0, "tokens_out": 0, "tokens_cache_write": 0, "tokens_cache_read": 0,
          "tokens_thinking": 0, "first_turn_input_tokens": 0, "dropped_tokens": 0,
          "api_usd_equiv": 0.0, "unknown_model_cost": False, "duration_ms": 0,
@@ -97,6 +97,12 @@ def parse(path):
                 if d.get(f): s[k] = d[f]
             if d.get("advisorModel"):
                 s["advisor_models"][d["advisorModel"]] = s["advisor_models"].get(d["advisorModel"], 0) + 1
+            # `<synthetic>` — не ответ модели, а заглушка Claude Code (обрыв,
+            # ошибка API). На маке из таких состоят 506 пустых сессий OpenClaw,
+            # и без отсева они утопили бы любой счёт сессий.
+            if (m.get("model") or "") in ("", "<synthetic>"):
+                s["n_synthetic"] += 1
+                continue
             s["n_sidechain_turns" if d.get("isSidechain") else "n_turns"] += 1
             got = (u.get("input_tokens") or 0, u.get("output_tokens") or 0,
                    u.get("cache_creation_input_tokens") or 0, u.get("cache_read_input_tokens") or 0)
@@ -270,6 +276,12 @@ def self_check():
     assert s["tool_result_bytes"] > 30000
     assert kind("mcp__basic-memory__search") == ("mcp", "basic-memory")
     assert kind("Read") == ("builtin", "") and kind("Skill")[0] == "skill"
+    # сессия из одних заглушек — не сессия
+    sy = os.path.join(d, "-home-hleserg-x", "s3.jsonl")
+    open(sy, "w").write(json.dumps({"type": "assistant", "sessionId": "s3",
+        "message": {"id": "z", "model": "<synthetic>", "usage": {}}}) + "\n")
+    assert parse(sy) == (None, [])
+
     # пустой транскрипт сессией не считается
     e = os.path.join(d, "-home-hleserg-x", "s2.jsonl")
     open(e, "w").write('{"type":"summary"}\n')
