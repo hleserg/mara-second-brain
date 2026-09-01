@@ -38,6 +38,20 @@ def _lines(path):
             try: yield json.loads(line)
             except ValueError: continue
 
+# Служебное, что Claude Code вклеивает в транскрипт как реплику человека, и
+# слэш-команды. Сессия, где Серёга набрал /exit и вышел, содержательного не
+# несёт: дистиллятору нечего выжимать, и он возвращает эхом сам ввод — в
+# волте оказывалась карточка с заголовком «<recommended_plugins> Here is a
+# list of plugins…».
+INJECTED = ("<command-name>", "<command-message>", "<local-command-stdout>",
+            "<recommended_plugins>", "<system-reminder>", "<user-prompt-submit-hook>")
+SLASH = re.compile(r"^/[A-Za-z][\w-]*(\s|$)")
+
+def substantive(text):
+    """Реплика человека, а не служебная вставка и не слэш-команда."""
+    t = (text or "").strip()
+    return bool(t) and not t.startswith(INJECTED) and not SLASH.match(t)
+
 def parse(path):
     for d in _lines(path):
         return parse_codex(path) if d.get("type") == "session_meta" else parse_claude(path)
@@ -61,7 +75,8 @@ def parse_codex(path):
             pt = p.get("type")
             if pt == "message":
                 text = " ".join(b.get("text", "") for b in p.get("content") or []).strip()
-                if p.get("role") == "user" and not text.startswith(CODEX_INJECTED):
+                if (p.get("role") == "user" and not text.startswith(CODEX_INJECTED)
+                        and substantive(text)):
                     f["users"] += 1
                     if f["prompt"] is None: f["prompt"] = text
                 elif p.get("role") == "assistant":
@@ -89,7 +104,8 @@ def parse_claude(path):
             c = (d.get("message") or {}).get("content")
             # Настоящий запрос человека: content — строка. Результаты
             # инструментов приходят тем же type=user, но списком блоков.
-            if isinstance(c, str) and not d.get("isMeta") and not d.get("isSidechain"):
+            if (isinstance(c, str) and not d.get("isMeta")
+                    and not d.get("isSidechain") and substantive(c)):
                 f["users"] += 1
                 if f["prompt"] is None: f["prompt"] = c
         elif t == "assistant":
@@ -331,6 +347,12 @@ def self_check():
     c = render(f, "s1", "raw/hermes/s1.jsonl", None, True)
     assert "sensitive: true" in c and "В облако не отправляется" in c
     assert "sensitive: false" in render(f, "s1", "r", None)
+    # служебные вставки и слэш-команды за реплику человека не считаем
+    assert not substantive("/exit") and not substantive("/effort high")
+    assert not substantive("<recommended_plugins> Here is a list…")
+    assert not substantive("  ") and not substantive(None)
+    assert substantive("почини синк") and substantive("/srv/vault пуст?")
+    assert substantive("Сделай /exit в конце")
     print("session-note self-check ok")
 
 if __name__ == "__main__":
