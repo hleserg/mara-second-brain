@@ -50,7 +50,8 @@ SLASH = re.compile(r"^/[A-Za-z][\w-]*(\s|$)")
 def substantive(text):
     """Реплика человека, а не служебная вставка и не слэш-команда."""
     t = (text or "").strip()
-    return bool(t) and not t.startswith(INJECTED) and not SLASH.match(t)
+    return (bool(t) and not t.startswith(INJECTED)
+            and not t.startswith(CODEX_INJECTED) and not SLASH.match(t))
 
 def parse(path):
     for d in _lines(path):
@@ -75,8 +76,7 @@ def parse_codex(path):
             pt = p.get("type")
             if pt == "message":
                 text = " ".join(b.get("text", "") for b in p.get("content") or []).strip()
-                if (p.get("role") == "user" and not text.startswith(CODEX_INJECTED)
-                        and substantive(text)):
+                if p.get("role") == "user" and substantive(text):
                     f["users"] += 1
                     if f["prompt"] is None: f["prompt"] = text
                 elif p.get("role") == "assistant":
@@ -134,11 +134,14 @@ def messages(path):
             role = p_.get("role")
             if role not in ("user", "assistant"): continue
             text = " ".join(b.get("text", "") for b in p_.get("content") or []).strip()
-            if role == "user" and text.startswith(CODEX_INJECTED): continue
+            if role == "user" and not substantive(text): continue
             if text: yield role, text
         elif t == "user":                              # claude code
             c = (d.get("message") or {}).get("content")
-            if isinstance(c, str) and not d.get("isMeta") and not d.get("isSidechain"):
+            # Служебные вставки и слэш-команды дистиллятору не нужны: он
+            # принимал их за первую реплику и делал из них заголовок.
+            if (isinstance(c, str) and not d.get("isMeta")
+                    and not d.get("isSidechain") and substantive(c)):
                 yield "user", c
         elif t == "assistant":
             text = "\n".join(b.get("text", "") for b in (d.get("message") or {}).get("content") or []
@@ -353,6 +356,7 @@ def self_check():
     assert not substantive("  ") and not substantive(None)
     assert substantive("почини синк") and substantive("/srv/vault пуст?")
     assert substantive("Сделай /exit в конце")
+    assert not substantive("# AGENTS.md instructions\nвклейка")
     print("session-note self-check ok")
 
 if __name__ == "__main__":
