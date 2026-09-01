@@ -11,7 +11,9 @@ import os, re, sys, json, glob
 
 VAULT = os.environ.get("VAULT", "/srv/vault")
 FM = re.compile(r"\A---\n(.*?)\n---\n", re.S)
-LINK = re.compile(r"\[\[([^\]|#]+)")
+# Обязательно с закрывающими ]]: в доках atman есть `[[ru](README-ru.md)]` —
+# это markdown-ссылка в квадратных скобках, а не викилинк.
+LINK = re.compile(r"\[\[([^\]|#\n]+?)(?:\|[^\]\n]*)?\]\]")
 
 def frontmatter(text):
     m = FM.match(text)
@@ -51,7 +53,8 @@ def lint(known):
              for p in glob.glob(os.path.join(VAULT, "**", "*.md"), recursive=True)}
     broken = {}
     for p in glob.glob(os.path.join(VAULT, "**", "*.md"), recursive=True):
-        if "/raw/" in p or "/archive/" in p: continue
+        # prompts — инструкции модели, там [[wikilinks]] упоминаются как слово.
+        if any(x in p for x in ("/raw/", "/archive/", "/_system/prompts/")): continue
         for t in LINK.findall(open(p, encoding="utf-8", errors="replace").read()):
             t = t.strip()
             if t and t not in notes and t not in known:
