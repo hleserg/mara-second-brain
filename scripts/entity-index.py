@@ -54,7 +54,10 @@ def lint(known):
     broken = {}
     for p in glob.glob(os.path.join(VAULT, "**", "*.md"), recursive=True):
         # prompts — инструкции модели, там [[wikilinks]] упоминаются как слово.
-        if any(x in p for x in ("/raw/", "/archive/", "/_system/prompts/")): continue
+        # broken-links.md — свой же прошлый отчёт: без этого линтер
+        # находит ссылки, которые сам напечатал, и они не кончаются.
+        if any(x in p for x in ("/raw/", "/archive/", "/_system/prompts/",
+                                "/_system/broken-links.md")): continue
         for t in LINK.findall(open(p, encoding="utf-8", errors="replace").read()):
             t = t.strip()
             if t and t not in notes and t not in known:
