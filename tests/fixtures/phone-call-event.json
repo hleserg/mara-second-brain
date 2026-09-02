@@ -1,0 +1,20 @@
+{
+  "kind": "call",
+  "source": "phone",
+  "source_id": "9f2c4a1e0b6d8837f5a1c9e2b4d70a3c6e8f1b2d4a6c8e0f2a4c6e8b0d2f4a6c",
+  "occurred_at": "2026-09-02T14:05:00+03:00",
+  "ended_at": "2026-09-02T14:23:11+03:00",
+  "payload": {
+    "contact_name": "Анна Петрова",
+    "number": "+79990000000",
+    "direction": "incoming",
+    "contact_source": "call-log",
+    "duration_s": 1091,
+    "producer": "com.huawei.soundrecorder"
+  },
+  "blob": {
+    "sha256": "9f2c4a1e0b6d8837f5a1c9e2b4d70a3c6e8f1b2d4a6c8e0f2a4c6e8b0d2f4a6c",
+    "bytes": 4210688,
+    "ext": "m4a"
+  }
+}

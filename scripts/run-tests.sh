@@ -33,4 +33,20 @@ if out=$("$PY" install/mara-context/__init__.py --demo 2>&1); then
 else
   echo "FAIL install/mara-context"; echo "$out" | tail -3 | sed 's/^/     /'; fail=1
 fi
+
+# Kotlin-ядро приложения. aapt2 и d8 Google выпускает только под x86_64,
+# поэтому на BetaPi этого шага нет — сборка живёт на doctor. Правило простое:
+# трогал android/ — прогони гейт на doctor, иначе сюда уедет несобираемое.
+echo
+echo "== android =="
+if [ -x android/gradlew ] && command -v java >/dev/null 2>&1; then
+  if out=$(cd android && ./gradlew test --console=plain -q 2>&1); then
+    echo "ok   android/app (JVM-тесты ядра)"
+  else
+    echo "FAIL android/app"; echo "$out" | tail -15 | sed 's/^/     /'; fail=1
+  fi
+else
+  echo "skip android — нет JDK в этом окружении"
+fi
+
 exit $fail

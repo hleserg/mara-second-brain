@@ -161,6 +161,34 @@ class Api(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(len(d["packs"]), 1, "пакет ровно один и это now")
         self.assertIn("позвонить в банк", d["packs"][0]["text"])
+    def test_событие_телефона_принимается_как_есть(self):
+        """Общий фикс контракта: его же шлёт Kotlin-тест приложения.
+
+        Разъедутся стороны — упадёт одна из них, а не телефон в поле.
+        """
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "fixtures", "phone-call-event.json")
+        with open(p, encoding="utf-8") as fh:
+            ev = json.load(fh)
+        code, r = self.post("/v1/ingest/event", ev)
+        self.assertEqual(code, 200)
+        self.assertTrue(r["event_id"].startswith("call_"))
+        self.assertTrue(r["need_blob"], "у события есть блоб — сервер обязан его ждать")
+        row = self.con.execute("select payload_json, occurred, ended, device_id "
+                               "from events where id=?", (r["event_id"],)).fetchone()
+        payload = json.loads(row["payload_json"])
+        self.assertEqual(payload["contact_source"], "call-log",
+                         "без этого call_project не заведёт карточку человека")
+        self.assertEqual(row["occurred"], ev["occurred_at"])
+        self.assertEqual(row["device_id"], self.dev,
+                         "устройство берётся из токена, а не из тела")
+
+        # тот же файл под другим именем и от другого рекордера — тот же звонок
+        ev["payload"] = dict(ev["payload"], producer="другой рекордер")
+        _, снова = self.post("/v1/ingest/event", ev)
+        self.assertTrue(снова["duplicate"], "ключ — хеш содержимого, а не имя")
+        self.assertEqual(снова["event_id"], r["event_id"])
+        self.assertFalse(снова["need_blob"], "блоб уже просили, второй раз не надо")
 
 
 if __name__ == "__main__":
