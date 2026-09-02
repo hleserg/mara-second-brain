@@ -111,6 +111,11 @@ class Api(unittest.TestCase):
             body = r.read().decode("utf-8")
         self.assertIn("mara_ingest_queue_depth", body)
         self.assertIn("mara_dlq_count", body)
+        # устройство поимённо: спаренное, но ни разу не выходившее на связь — −1
+        contextd.pair(self.con, "тел\"ефон")
+        with urllib.request.urlopen(self.base + "/metrics", timeout=5) as r:
+            body = r.read().decode("utf-8")
+        self.assertIn('mara_device_last_seen_seconds{name="тел\\"ефон"} -1', body)
 
     def test_отозванное_устройство_401(self):
         dev, token = contextd.pair(self.con, "потерянный")

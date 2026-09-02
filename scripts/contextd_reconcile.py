@@ -167,24 +167,30 @@ def источник_замолчал(con, days=3, fresh_hours=24):
     """Источник с телефона раньше слал, три дня молчит, а телефон на связи —
     слушатель умер, разрешение сняли или Huawei вычистил фон. Телефон сам не
     на связи — не находка: это mara_mobile_last_seen_seconds, чинится не тут.
-    Ни разу не слал — тоже не находка: источник ещё не подключали."""
+    Ни разу не слал — тоже не находка: источник ещё не подключали.
+    Считается по каждому устройству отдельно: свежий экспорт через импортёр
+    не должен прикрывать умерший слушатель на телефоне, а сам экспорт — не
+    живой источник, его тишина ничего не значит."""
     out = []
     for src in ТЕЛЕФОННЫЕ:
-        last = con.execute("select received, device_id from events where source=? "
-                           "order by received desc limit 1", (src,)).fetchone()
-        age = _возраст(last["received"]) if last else None
-        if age is None or age < days * 86400:
-            continue
-        dev = con.execute("select last_seen from devices where id=?",
-                          (last["device_id"],)).fetchone()
-        seen = _возраст(dev["last_seen"]) if dev else None
-        if seen is None or seen > fresh_hours * 3600:
-            continue
-        # ponytail: три дня без единого сообщения — эвристика; SMS может и правда
-        # молчать, поэтому это warn в дневной сводке, а не error
-        out.append(находка("источник-замолчал", "warn",
-                           "телефон на связи, а %s молчит %d дн.: слушатель умер или разрешение снято"
-                           % (src, int(age // 86400)), source=src))
+        # max() в SQLite тянет остальные колонки из той же строки
+        for last in con.execute("select device_id, max(received) as received, payload_json "
+                                "from events where source=? group by device_id", (src,)):
+            if json.loads(last["payload_json"] or "{}").get("via") == "export":
+                continue
+            age = _возраст(last["received"])
+            if age is None or age < days * 86400:
+                continue
+            dev = con.execute("select name, last_seen from devices where id=?",
+                              (last["device_id"],)).fetchone()
+            seen = _возраст(dev["last_seen"]) if dev else None
+            if seen is None or seen > fresh_hours * 3600:
+                continue
+            # ponytail: три дня без единого сообщения — эвристика; SMS может и правда
+            # молчать, поэтому это warn в дневной сводке, а не error
+            out.append(находка("источник-замолчал", "warn",
+                               "%s на связи, а %s с него молчит %d дн.: слушатель умер или разрешение снято"
+                               % (dev["name"], src, int(age // 86400)), source=src, device=dev["name"]))
     return out
 
 

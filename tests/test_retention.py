@@ -91,9 +91,9 @@ class СверкаИсточников(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="mara-src-")
         self.con = mi.connect(self.root)
 
-    def событие(self, source, days_ago, device="dev_x", blob=None):
-        ev = {"kind": "message", "source": source, "source_id": "%s-%d" % (source, days_ago),
-              "device_id": device, "payload": {"text": "x"}}
+    def событие(self, source, days_ago, device="dev_x", blob=None, via=None):
+        ev = {"kind": "message", "source": source, "source_id": "%s-%s-%d" % (source, device, days_ago),
+              "device_id": device, "payload": {"text": "x", "via": via or "notification"}}
         if blob:
             ev.update(kind="call", blob={"sha256": blob, "ext": "m4a"})
         eid, _ = mi.put_event(self.con, ev)
@@ -121,6 +121,16 @@ class СверкаИсточников(unittest.TestCase):
         self.assertEqual(rc.источник_замолчал(self.con), [], "источник не подключали")
         self.событие("whatsapp", 1)
         self.assertEqual(rc.источник_замолчал(self.con), [], "вчера писали")
+
+    def test_свежий_экспорт_не_прикрывает_умерший_слушатель(self):
+        self.событие("whatsapp", 5); self.устройство()
+        self.событие("whatsapp", 1, device="dev_imp", via="export"); self.устройство("dev_imp", hours_ago=100)
+        f = rc.источник_замолчал(self.con)
+        self.assertEqual([x["device"] for x in f], ["тел"], "телефон молчит, хоть импортёр и залил вчера")
+
+    def test_старый_экспорт_сам_по_себе_не_находка(self):
+        self.событие("whatsapp", 20, device="dev_imp", via="export"); self.устройство("dev_imp")
+        self.assertEqual(rc.источник_замолчал(self.con), [], "экспорт — не живой источник")
 
     def test_обещанная_запись_не_долилась_за_сутки(self):
         свежий = self.событие("phone", 0, blob="b" * 64)

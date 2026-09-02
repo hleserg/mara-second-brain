@@ -96,8 +96,12 @@ def metrics(con, root=None, vault=None):
     lag = age_of(last[0] if last else None, 0)
     seen = con.execute("select last_seen from devices where revoked_at is null "
                        "order by last_seen desc limit 1").fetchone()
-    mobile = age_of(seen[0] if seen else None, 0)
+    mobile = age_of(seen[0] if seen else None)
     pack_age, pack_bytes = pack_stat(vault)
+    # mara_mobile_* берёт любое устройство, и Gmail-крон раз в 10 минут его
+    # всегда «освежит» — телефон виден только поимённо
+    devices = [(n, age_of(t)) for n, t in con.execute(
+        "select name, last_seen from devices where revoked_at is null order by name")]
     rows = [
         ("mara_ingest_queue_depth", q("select count(*) from jobs where state='ready'")),
         ("mara_ingest_lag_seconds", lag),
@@ -107,6 +111,8 @@ def metrics(con, root=None, vault=None):
         ("mara_task_extraction_failures_total",
          q("select count(*) from jobs where kind='extract' and state='dlq'")),
         ("mara_mobile_last_seen_seconds", mobile),
+        *[('mara_device_last_seen_seconds{name="%s"}' % n.replace('\\', '\\\\').replace('"', '\\"'), a)
+          for n, a in devices],
         ("mara_mobile_pending_uploads",
          q("select count(*) from events where state='new' and blob_sha256 is not null")),
         ("mara_tdlib_lag_seconds", heartbeat_lag(root, "tdlib")),

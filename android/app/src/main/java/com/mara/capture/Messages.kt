@@ -31,19 +31,22 @@ class MessageListener : NotificationListenerService() {
     private fun принять(sbn: StatusBarNotification) {
         val pkg = sbn.packageName
         if (pkg !in NotificationParse.WHATSAPP && pkg !in NotificationParse.SMS_APPS) return
-        val s = runCatching { Settings(this) }.getOrNull() ?: return
+        // Keystore отказал — теряем только учёт, сообщения всё равно в очередь
+        val s = runCatching { Settings(this) }.getOrNull()
         // режимы SMS взаимоисключающие, и решает не разрешение, а то, отдал ли
-        // провайдер: иначе одно SMS легло бы под двумя ключами — или ни под одним
-        if (pkg in NotificationParse.SMS_APPS && s.smsDirect) return
+        // провайдер: иначе одно SMS легло бы под двумя ключами — или ни под одним;
+        // режим неизвестен — SMS не трогаем, дубли хуже
+        if (pkg in NotificationParse.SMS_APPS && s?.smsDirect != false) return
         val msgs = NotificationParse.messages(seen(sbn))
         if (msgs.isEmpty()) return
-        msgs.firstOrNull { it.source == "whatsapp" }?.let { s.lastChatTitle = it.chat }
+        msgs.firstOrNull { it.source == "whatsapp" }?.let { m -> s?.lastChatTitle = m.chat }
         val q = Queue(this)
         val now = System.currentTimeMillis()
         val zone = ZoneId.systemDefault()
         // WhatsApp на каждое новое перепостит последние несколько — дедуп по ключу
         val новых = msgs.count { q.put(it, MessageJson.build(it, zone), now) }
         if (новых == 0) return
+        if (s == null) return
         msgs.filter { it.source == "sms" }.maxOfOrNull { it.atMs }
             ?.let { s.lastSmsNotificationMs = maxOf(s.lastSmsNotificationMs, it) }
         if (s.paired) SyncWorker.kick(this, delaySec = 30)   // подождать соседей, слать пачкой
