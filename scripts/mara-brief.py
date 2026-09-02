@@ -10,13 +10,17 @@
   - ~/.hermes/SOUL.md на маке, между <!-- mara:brief --> и <!-- /mara:brief -->,
     атомарно, по ssh с doctor: своего крона в GUI-домене мака нет (README).
 
-Hermes перечитывает SOUL.md при каждой сборке промпта, рестарт gateway не нужен.
+Системный промпт Hermes собирает один раз на сессию и хранит в state.db по хэшу
+(sessions.system_prompt_hash → system_prompts); рестарт gateway его не трогает.
+Поэтому после записи нового блока скрипт делает то же, что /model в телеграме:
+обнуляет хэш живым телеграм-сессиям — на следующей реплике промпт собирается
+заново, история остаётся. Блок без даты: меняется только с карточками, и хэш
+сбрасывается (а кэш префикса у провайдера рвётся) только когда есть что менять.
 Карточки с sensitive: true в сводку не идут: SOUL.md уезжает провайдеру модели.
 Один писатель на файл: _system/mara-brief.md пишет только этот скрипт, в SOUL.md
 он трогает только свой блок между маркерами.
 """
 import argparse
-import datetime
 import glob
 import os
 import re
@@ -37,7 +41,7 @@ INTRO = """## Что ты уже знаешь о Серёге
 имена без поиска. Подробности, историю и дневник ищи basic-memory (search_notes,
 read_note, build_context, recent_activity) — молча, до того как сказать «не знаю».
 Нашла — отвечай по делу, без permalink'ов и пересказа frontmatter. Не нашла — так
-и скажи, не выдумывай. Сводка собрана {date}."""
+и скажи, не выдумывай."""
 
 
 def frontmatter(text):
@@ -120,8 +124,8 @@ def card(path):
     return line
 
 
-def build(vault, today):
-    parts = [MARK_OPEN, INTRO.format(date=today.strftime("%-d.%m.%Y")), ""]
+def build(vault):
+    parts = [MARK_OPEN, INTRO, ""]
     total = 0
     for folder, name in KIND:
         lines = [card(p) for p in sorted(glob.glob(os.path.join(vault, "entities", folder, "*.md")))]
@@ -171,6 +175,15 @@ def push_mac(mac, soul_path, block):
     if r.returncode != 0:
         print(f"mara-brief: не записал SOUL.md: {r.stderr.strip()}", file=sys.stderr)
         return False
+    # Как /model: живая телеграм-сессия пересоберёт промпт на следующей реплике.
+    # ponytail: если агент этой сессии ещё в кэше gateway (Серёга писал меньше
+    # часа назад), новый промпт придёт после выселения агента; крон в 04:20 — ок.
+    db = os.path.dirname(soul_path) + "/state.db"
+    q = "UPDATE sessions SET system_prompt=NULL, system_prompt_hash=NULL WHERE source='telegram' AND ended_at IS NULL"
+    r = subprocess.run(ssh + [f"sqlite3 {db} \"{q}\""], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"mara-brief: SOUL.md записан, но хэш промпта не сброшен: {r.stderr.strip()}", file=sys.stderr)
+        return False
     return True
 
 
@@ -188,7 +201,7 @@ def self_check():
             "---\ntitle: Тайный Человек\ntype: person\nsensitive: true\n---\n# Тайный\nне для облака\n")
         open(os.path.join(v, "entities/people/y.md"), "w", encoding="utf-8").write(
             "---\ntitle: Катя\ntype: person\nsensitive: false\n---\n# Катя\nПодруга.\n")
-        block, n = build(v, datetime.date(2026, 9, 2))
+        block, n = build(v)
         assert n == 2, n
         assert "Atta-dipa** (Attadipa)" in block, block          # алиас-дубль и repo-slug отброшены
         assert "ESP32, меш и навигация. Вторая строка абзаца." in block, block
@@ -218,7 +231,7 @@ def main():
     a = ap.parse_args()
     if a.self_check:
         return self_check()
-    block, n = build(a.vault, datetime.date.today())
+    block, n = build(a.vault)
     out = os.path.join(a.vault, "_system", "mara-brief.md")
     body = ("---\ntitle: Что знает Мара\ntype: note\nsource: manual\nsource_id: mara-brief\n"
             "tags:\n- system\nsensitive: false\n---\n# Что знает Мара\n"

@@ -27,6 +27,10 @@ cat > .gitignore <<'IGN'
 .obsidian/workspace*.json
 # производный индекс плагина copilot, 85 МБ, восстановим (ТЗ §1)
 .obsidian/copilot-index-*.json
+# настройки плагинов с ключами: Copilot кладёт рядом с data.json свои
+# data-v3-credentials-backup-*.json — секреты в облако не уезжают (ТЗ §11)
+.obsidian/plugins/copilot/data*
+.obsidian/plugins/remotely-save/data*
 *.tmp
 .DS_Store
 IGN
