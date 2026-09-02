@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Сверка состояния приёма (спека §9, ТЗ §17). Крон раз в час.
 
-Пять инвариантов. То, что чинится однозначно, сверка чинит сама: ставит
+Девять инвариантов. То, что чинится однозначно, сверка чинит сама: ставит
 пропущенную работу извлечения, снимает с ретраев работу, у которой пропал
 исходник. То, где нужен человек, она только докладывает — файлы не удаляет
 никогда, даже осиротевшие: единственная копия личного разговора стирается по
 ретеншену или по прямой команде, а не по догадке.
 
+`--telegram` — раз в день, только о реальных проблемах, и ничего, если их
+нет: DLQ не должен превращаться в админку (ТЗ §17).
+
     python3 scripts/contextd_reconcile.py
     python3 scripts/contextd_reconcile.py --json
+    python3 scripts/contextd_reconcile.py --telegram
     python3 scripts/contextd_reconcile.py --self-check
 """
 import os, sys, json, glob, time, sqlite3, argparse
@@ -148,6 +152,57 @@ def сердцебиение(root):
     return out
 
 
+ТЕЛЕФОННЫЕ = ("whatsapp", "sms")   # молчат, когда слушатель умер или разрешение сняли
+
+
+def _возраст(iso):
+    """Секунды с момента в ISO; None, если момента нет или он не читается."""
+    try:
+        return time.time() - datetime.fromisoformat(iso).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def источник_замолчал(con, days=3, fresh_hours=24):
+    """Источник с телефона раньше слал, три дня молчит, а телефон на связи —
+    слушатель умер, разрешение сняли или Huawei вычистил фон. Телефон сам не
+    на связи — не находка: это mara_mobile_last_seen_seconds, чинится не тут.
+    Ни разу не слал — тоже не находка: источник ещё не подключали."""
+    out = []
+    for src in ТЕЛЕФОННЫЕ:
+        last = con.execute("select received, device_id from events where source=? "
+                           "order by received desc limit 1", (src,)).fetchone()
+        age = _возраст(last["received"]) if last else None
+        if age is None or age < days * 86400:
+            continue
+        dev = con.execute("select last_seen from devices where id=?",
+                          (last["device_id"],)).fetchone()
+        seen = _возраст(dev["last_seen"]) if dev else None
+        if seen is None or seen > fresh_hours * 3600:
+            continue
+        # ponytail: три дня без единого сообщения — эвристика; SMS может и правда
+        # молчать, поэтому это warn в дневной сводке, а не error
+        out.append(находка("источник-замолчал", "warn",
+                           "телефон на связи, а %s молчит %d дн.: слушатель умер или разрешение снято"
+                           % (src, int(age // 86400)), source=src))
+    return out
+
+
+def запись_не_долита(con, hours=24):
+    """Телефон объявил звонок с записью, а сама запись за сутки не пришла —
+    очередь загрузки на телефоне против серверной базы (ТЗ §17). Свежий
+    звонок ещё может долиться с плохой сети, поэтому порог в сутки."""
+    rows = con.execute(
+        "select e.id, e.received from events e left join blobs b on b.sha256=e.blob_sha256 "
+        "where e.blob_sha256 is not null and b.sha256 is null order by e.received").fetchall()
+    старые = [r["id"] for r in rows if (_возраст(r["received"]) or 0) > hours * 3600]
+    if not старые:
+        return []
+    return [находка("запись-не-долита", "warn",
+                    "звонков без записи дольше суток: %d — телефон не долил, смотреть очередь в мастере"
+                    % len(старые), count=len(старые), sample=старые[:5])]
+
+
 def dlq(con):
     n = con.execute("select count(*) from jobs where state='dlq'").fetchone()[0]
     if not n:
@@ -167,6 +222,8 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB):
     out += лаг_индекса(vault, bm_db)
     out += ретеншен_просрочен(con)
     out += сердцебиение(root)
+    out += источник_замолчал(con)
+    out += запись_не_долита(con)
     out += dlq(con)
     return out
 
@@ -176,12 +233,41 @@ def код(находки):
     return 1 if any(f["level"] == "error" for f in находки) else 0
 
 
+def текст(находки, limit=12):
+    """Сводка владельцу — только о проблемах. Нечего сказать — None, и в канал
+    не уходит ничего: тишина и есть хорошая новость."""
+    серьёзные = [f for f in находки if f["level"] in ("error", "warn")]
+    if not серьёзные:
+        return None
+    lines = ["Сверка Мары %s: проблем %d" % (datetime.now(mi.TZ).strftime("%d.%m %H:%M"),
+                                              len(серьёзные))]
+    lines += ["• " + f["detail"] for f in серьёзные[:limit]]
+    if len(серьёзные) > limit:
+        lines.append("… и ещё %d" % (len(серьёзные) - limit))
+    return "\n".join(lines)
+
+
+def доложить(находки):
+    """В домашний канал через транспорт дайджестов; ключи — из того же env."""
+    import call_digest as cd
+    t = текст(находки)
+    if not t:
+        return "nothing"
+    e = cd.env()
+    try:
+        return cd.deliver(t, e.get("TELEGRAM_BOT_TOKEN"), e.get("TELEGRAM_HOME_CHANNEL"))
+    except OSError as err:
+        return "failed: %s" % err
+
+
 def main():
     ap = argparse.ArgumentParser(description="сверка состояния приёма")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--vault", default=VAULT)
     ap.add_argument("--bm-db", default=BM_DB)
     ap.add_argument("--json", action="store_true", dest="as_json")
+    ap.add_argument("--telegram", action="store_true",
+                    help="доложить владельцу о реальных проблемах; нет их — молчать")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args()
     if a.self_check:
@@ -196,6 +282,8 @@ def main():
         print("%s сверка: находок %d" % (mi.now_iso(), len(находки)))
         for f in находки:
             print("  [%s] %s — %s" % (f["level"], f["check"], f["detail"]))
+    if a.telegram:
+        print("  telegram: " + доложить(находки))
     return код(находки)
 
 
@@ -236,6 +324,25 @@ def self_check():
     run(con, root, vault=None)
     assert con.execute("select count(*) from jobs where kind='extract'").fetchone()[0] == n, \
         "повторная сверка плодит работы"
+    # источник с телефона замолчал при живом устройстве
+    con.execute("insert into devices(id,name,token_sha256,created,last_seen) values(?,?,?,?,?)",
+                ("dev_t", "тел", "h", mi.now_iso(), mi.now_iso()))
+    wid, _ = mi.put_event(con, {"kind": "message", "source": "whatsapp", "source_id": "w1",
+                                "device_id": "dev_t", "payload": {"text": "x"}})
+    assert источник_замолчал(con) == [], "свежее сообщение — не тишина"
+    давно = datetime.fromtimestamp(time.time() - 5 * 86400, mi.TZ).isoformat(timespec="seconds")
+    con.execute("update events set received=? where id=?", (давно, wid))
+    assert [f["source"] for f in источник_замолчал(con)] == ["whatsapp"], "тишина не найдена"
+    con.execute("update devices set last_seen=? where id='dev_t'", (давно,))
+    assert источник_замолчал(con) == [], "телефон не на связи — не наша находка"
+    # запись обещана, но не долита
+    assert запись_не_долита(con) == [], "свежий звонок ещё может долиться"
+    con.execute("update events set received=? where id=?", (давно, eid))
+    z = запись_не_долита(con)
+    assert z and z[0]["count"] == 1 and z[0]["sample"] == [eid], z
+    assert текст([]) is None and текст([находка("x", "fixed", "починено")]) is None, \
+        "без проблем в канал не пишем"
+    assert "проблем 1" in текст([находка("x", "warn", "беда")])
     print("contextd_reconcile self-check: ок")
     return 0
 

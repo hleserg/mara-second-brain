@@ -4,7 +4,7 @@
 нему потом видно, что запись была и куда делась. Сверка чинит то, что чинится
 однозначно, и только докладывает про то, где нужен человек.
 """
-import os, sys, json, time, tempfile, unittest
+import os, sys, json, glob, time, tempfile, unittest
 from datetime import datetime, timedelta
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -82,6 +82,75 @@ class Ретеншен(unittest.TestCase):
         self.assertEqual(отчёт["errors"], [], "пропавший файл — не авария уборки")
         self.assertIsNotNone(con.execute("select purged_at from blobs where sha256=?",
                                          (sha,)).fetchone()["purged_at"])
+
+
+class СверкаИсточников(unittest.TestCase):
+    """Тишина источника с телефона и запись, обещанная, но не долитая (ТЗ §17)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="mara-src-")
+        self.con = mi.connect(self.root)
+
+    def событие(self, source, days_ago, device="dev_x", blob=None):
+        ev = {"kind": "message", "source": source, "source_id": "%s-%d" % (source, days_ago),
+              "device_id": device, "payload": {"text": "x"}}
+        if blob:
+            ev.update(kind="call", blob={"sha256": blob, "ext": "m4a"})
+        eid, _ = mi.put_event(self.con, ev)
+        когда = (datetime.now(mi.TZ) - timedelta(days=days_ago)).isoformat(timespec="seconds")
+        self.con.execute("update events set received=? where id=?", (когда, eid))
+        return eid
+
+    def устройство(self, dev="dev_x", hours_ago=1):
+        seen = (datetime.now(mi.TZ) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+        self.con.execute("insert or replace into devices(id,name,token_sha256,created,last_seen) "
+                         "values(?,?,?,?,?)", (dev, "тел", "h", seen, seen))
+
+    def test_телефон_на_связи_а_whatsapp_молчит(self):
+        self.событие("whatsapp", 5); self.устройство()
+        f = [x for x in rc.run(self.con, self.root, vault=None) if x["check"] == "источник-замолчал"]
+        self.assertEqual([x["source"] for x in f], ["whatsapp"])
+        self.assertEqual(f[0]["level"], "warn", "эвристика — в дневную сводку, не в код возврата")
+
+    def test_телефон_сам_не_на_связи_не_находка(self):
+        self.событие("sms", 5); self.устройство(hours_ago=72)
+        self.assertEqual(rc.источник_замолчал(self.con), [])
+
+    def test_никогда_не_слал_или_слал_недавно_не_находка(self):
+        self.устройство()
+        self.assertEqual(rc.источник_замолчал(self.con), [], "источник не подключали")
+        self.событие("whatsapp", 1)
+        self.assertEqual(rc.источник_замолчал(self.con), [], "вчера писали")
+
+    def test_обещанная_запись_не_долилась_за_сутки(self):
+        свежий = self.событие("phone", 0, blob="b" * 64)
+        self.assertEqual(rc.запись_не_долита(self.con), [], "свежий звонок ещё может долиться")
+        старый = self.событие("phone", 2, blob="c" * 64)
+        f = rc.запись_не_долита(self.con)
+        self.assertEqual((f[0]["count"], f[0]["sample"]), (1, [старый]))
+        self.assertNotIn(свежий, f[0]["sample"])
+
+    def test_сводка_владельцу_только_о_проблемах(self):
+        self.assertIsNone(rc.текст([]))
+        self.assertIsNone(rc.текст([rc.находка("x", "fixed", "починено")]), "починенное — не проблема")
+        t = rc.текст([rc.находка("x", "warn", "беда"), rc.находка("y", "error", "хуже")])
+        self.assertIn("проблем 2", t)
+        self.assertIn("• беда", t)
+
+
+class Сырьё(unittest.TestCase):
+    def test_raw_старше_срока_убирается_свежее_остаётся(self):
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        for name, d in (("tdlib", 40), ("gmail", 40), ("gmail", 3)):
+            p = os.path.join(root, name, "raw", день(-d) + ".jsonl")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("x")
+        все = lambda: sorted(os.path.basename(p) for p in glob.glob(os.path.join(root, "*", "raw", "*.jsonl")))
+        self.assertEqual(br.raw_sweep(root, dry=True)["files"], 2)
+        self.assertEqual(len(все()), 3, "холостой прогон удалил")
+        self.assertEqual(br.raw_sweep(root), {"files": 2, "bytes": 2})
+        self.assertEqual(все(), [день(-3) + ".jsonl"])
+        self.assertEqual(br.raw_sweep(root)["files"], 0, "повтор нашёл что убирать")
 
 
 class Сверка(unittest.TestCase):

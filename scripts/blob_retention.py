@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Уборка просроченного аудио (ТЗ §7).
+"""Уборка просроченного аудио (ТЗ §7) и сырых логов источников (ТЗ §17).
 
 Запись живёт девяносто дней и исчезает сама. Манифест не исчезает никогда: по
 нему потом видно, что звонок был, сколько длился и куда делась запись. Поэтому
@@ -8,20 +8,44 @@
 
 `pin: 1` отменяет удаление навсегда: владелец сам решил, что эта запись нужна.
 
+Сырые обновления TDLib и письма Gmail (`<источник>/raw/ДАТА.jsonl`) — отладка,
+через месяц они ничего не объяснят, а держать переписку в двух местах незачем.
+Срок — `MARA_RAW_DAYS`, по умолчанию тридцать дней.
+
     python3 scripts/blob_retention.py            # прогон
     python3 scripts/blob_retention.py --dry-run  # только показать
     python3 scripts/blob_retention.py --self-check
 """
-import os, sys, json, argparse
-from datetime import datetime
+import os, sys, json, glob, argparse
+from datetime import datetime, date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 
 
+RAW_DAYS = int(os.environ.get("MARA_RAW_DAYS", 30))
+СЫРЬЁ = ("tdlib", "gmail")
+
+
 def сегодня():
     return datetime.now(mi.TZ).date().isoformat()
+
+
+def raw_sweep(root=None, days=RAW_DAYS, dry=False, day=None):
+    """Файл по дате в имени, без базы: повтор просто ничего не находит."""
+    root = root or mi.ROOT
+    порог = (date.fromisoformat(day or сегодня()) - timedelta(days=days)).isoformat()
+    отчёт = {"files": 0, "bytes": 0}
+    for name in СЫРЬЁ:
+        for p in sorted(glob.glob(os.path.join(root, name, "raw", "????-??-??.jsonl"))):
+            if os.path.basename(p)[:10] >= порог:
+                continue
+            отчёт["files"] += 1
+            отчёт["bytes"] += os.path.getsize(p)
+            if not dry:
+                os.unlink(p)
+    return отчёт
 
 
 def просроченные(con, day=None):
@@ -80,8 +104,10 @@ def main():
         return self_check()
     mi.ROOT = a.root
     r = sweep(mi.connect(a.root), a.root, a.dry)
-    print("%s ретеншен: убрано %d записей, %.1f МБ%s" % (
-        mi.now_iso(), r["purged"], r["bytes"] / 1e6, ", вхолостую" if a.dry else ""))
+    rr = raw_sweep(a.root, dry=a.dry)
+    print("%s ретеншен: убрано %d записей, %.1f МБ; сырых логов %d, %.1f МБ%s" % (
+        mi.now_iso(), r["purged"], r["bytes"] / 1e6, rr["files"], rr["bytes"] / 1e6,
+        ", вхолостую" if a.dry else ""))
     for e in r["errors"]:
         print("  сбой: " + e)
     return 1 if r["errors"] else 0
@@ -111,6 +137,15 @@ def self_check():
     with open(mi.manifest_path(root, eid), encoding="utf-8") as fh:
         assert json.load(fh)["purged"]["reason"] == "retention", "манифест не помечен"
     assert sweep(con, root) == {"purged": 0, "bytes": 0, "errors": []}, "повтор убрал ещё раз"
+    for name, d in (("tdlib", 40), ("gmail", 40), ("gmail", 3)):
+        p = os.path.join(root, name, "raw", (date.today() - timedelta(days=d)).isoformat() + ".jsonl")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "w").write("x")
+    assert raw_sweep(root, dry=True)["files"] == 2, "холостой прогон не увидел старое сырьё"
+    assert len(glob.glob(os.path.join(root, "*", "raw", "*.jsonl"))) == 3, "холостой прогон удалил"
+    assert raw_sweep(root) == {"files": 2, "bytes": 2}
+    assert len(glob.glob(os.path.join(root, "*", "raw", "*.jsonl"))) == 1, "свежее сырьё убрано"
+    assert raw_sweep(root)["files"] == 0, "повтор нашёл что убирать"
     print("blob_retention self-check: ок")
     return 0
 

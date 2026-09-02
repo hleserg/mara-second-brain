@@ -88,27 +88,16 @@ def heartbeat_lag(root, name):
         return -1
 
 
-def metrics(con, root=None):
+def metrics(con, root=None, vault=None):
     """Считаем запросом, а не копим в памяти: перезапуск не теряет счётчики."""
     root = root or mi.ROOT
     q = lambda sql, *a: con.execute(sql, a).fetchone()[0]
     last = con.execute("select received from events order by received desc limit 1").fetchone()
-    lag = 0
-    if last and last[0]:
-        try:
-            from datetime import datetime
-            lag = int(time.time() - datetime.fromisoformat(last[0]).timestamp())
-        except ValueError:
-            lag = 0
+    lag = age_of(last[0] if last else None, 0)
     seen = con.execute("select last_seen from devices where revoked_at is null "
                        "order by last_seen desc limit 1").fetchone()
-    mobile = 0
-    if seen and seen[0]:
-        try:
-            from datetime import datetime
-            mobile = int(time.time() - datetime.fromisoformat(seen[0]).timestamp())
-        except ValueError:
-            mobile = 0
+    mobile = age_of(seen[0] if seen else None, 0)
+    pack_age, pack_bytes = pack_stat(vault)
     rows = [
         ("mara_ingest_queue_depth", q("select count(*) from jobs where state='ready'")),
         ("mara_ingest_lag_seconds", lag),
@@ -122,8 +111,37 @@ def metrics(con, root=None):
          q("select count(*) from events where state='new' and blob_sha256 is not null")),
         ("mara_tdlib_lag_seconds", heartbeat_lag(root, "tdlib")),
         ("mara_gmail_lag_seconds", heartbeat_lag(root, "gmail")),
+        ("mara_whatsapp_lag_seconds", source_lag(con, "whatsapp")),
+        ("mara_sms_lag_seconds", source_lag(con, "sms")),
+        ("mara_context_pack_age_seconds", pack_age),
+        ("mara_context_pack_bytes", pack_bytes),
     ]
     return "".join("%s %s\n" % (k, v) for k, v in rows)
+
+
+def age_of(iso, none=-1):
+    """Секунды с момента в ISO; `none`, если момента нет или он не читается."""
+    from datetime import datetime
+    try:
+        return int(time.time() - datetime.fromisoformat(iso).timestamp())
+    except (TypeError, ValueError):
+        return none
+
+
+def source_lag(con, source):
+    """Секунды с последнего события источника; −1 — не было ни одного."""
+    row = con.execute("select received from events where source=? "
+                      "order by received desc limit 1", (source,)).fetchone()
+    return age_of(row[0] if row else None)
+
+
+def pack_stat(vault=None):
+    """Возраст и размер пакета контекста (ТЗ §19); −1 — ещё не собран."""
+    try:
+        st = os.stat(os.path.join(vault or VAULT, "_system/context", "now.md"))
+    except OSError:
+        return -1, -1
+    return int(time.time() - st.st_mtime), st.st_size
 
 
 def health(con, root):
@@ -192,7 +210,8 @@ class Handler(BaseHTTPRequestHandler):
         if p.path == "/healthz":
             return self.say(200, health(con, self.server.root))
         if p.path == "/metrics":
-            return self.say(200, metrics(con, self.server.root), ctype="text/plain; version=0.0.4")
+            return self.say(200, metrics(con, self.server.root, self.server.vault),
+                            ctype="text/plain; version=0.0.4")
         if p.path.startswith("/v1/jobs/"):
             row = con.execute("select id,kind,state,attempts,next_at,last_error "
                               "from jobs where id=?", (p.path[9:],)).fetchone()

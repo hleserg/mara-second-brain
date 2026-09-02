@@ -242,7 +242,9 @@ class Api(unittest.TestCase):
     def test_метрики_источников_без_подключения_минус_один(self):
         with urllib.request.urlopen(self.base + "/metrics", timeout=5) as r:
             body = r.read().decode("utf-8")
-        for m in ("mara_tdlib_lag_seconds -1", "mara_gmail_lag_seconds -1"):
+        for m in ("mara_tdlib_lag_seconds -1", "mara_gmail_lag_seconds -1",
+                  "mara_whatsapp_lag_seconds -1", "mara_sms_lag_seconds -1",
+                  "mara_context_pack_age_seconds", "mara_context_pack_bytes"):
             self.assertIn(m, body)
 
     def test_кривая_правка_400_и_не_в_базе(self):
