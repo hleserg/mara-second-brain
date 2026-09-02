@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Уборка просроченного аудио (ТЗ §7).
+
+Запись живёт девяносто дней и исчезает сама. Манифест не исчезает никогда: по
+нему потом видно, что звонок был, сколько длился и куда делась запись. Поэтому
+файл удаляется, а в манифест дописывается `purged` — это единственная правка
+неизменяемого документа, и она добавляет, а не переписывает.
+
+`pin: 1` отменяет удаление навсегда: владелец сам решил, что эта запись нужна.
+
+    python3 scripts/blob_retention.py            # прогон
+    python3 scripts/blob_retention.py --dry-run  # только показать
+    python3 scripts/blob_retention.py --self-check
+"""
+import os, sys, json, argparse
+from datetime import datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import mara_ingest as mi
+
+
+def сегодня():
+    return datetime.now(mi.TZ).date().isoformat()
+
+
+def просроченные(con, day=None):
+    """Блобы, которым пора: срок вышел, не закреплены, ещё не убраны."""
+    return con.execute(
+        "select sha256, path from blobs where purged_at is null and pin=0 "
+        "and audio_until is not null and audio_until <= ? order by audio_until",
+        (day or сегодня(),)).fetchall()
+
+
+def пометить_манифесты(con, root, sha, when):
+    """`purged` во все манифесты, которые ссылались на эту запись."""
+    for row in con.execute("select id from events where blob_sha256=?", (sha,)):
+        path = mi.manifest_path(root, row["id"])
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            man = json.load(fh)
+        man["purged"] = {"at": when, "reason": "retention"}
+        mi.write_json(path, man)
+
+
+def sweep(con, root=None, dry=False, day=None):
+    """Один проход уборки. Возвращает отчёт, не печатает ничего сам."""
+    root = root or mi.ROOT
+    отчёт = {"purged": 0, "bytes": 0, "errors": []}
+    for b in просроченные(con, day):
+        path, sha = b["path"], b["sha256"]
+        try:
+            size = os.path.getsize(path) if path and os.path.exists(path) else 0
+            if dry:
+                отчёт["purged"] += 1
+                отчёт["bytes"] += size
+                continue
+            if path and os.path.exists(path):
+                os.unlink(path)
+            when = mi.now_iso()
+            пометить_манифесты(con, root, sha, when)
+            con.execute("update blobs set purged_at=? where sha256=?", (when, sha))
+            отчёт["purged"] += 1
+            отчёт["bytes"] += size
+        except OSError as e:
+            # ponytail: одна плохая запись не должна останавливать уборку —
+            # завтрашний прогон попробует её снова.
+            отчёт["errors"].append("%s: %s" % (sha[:12], e))
+    return отчёт
+
+
+def main():
+    ap = argparse.ArgumentParser(description="уборка просроченного аудио")
+    ap.add_argument("--root", default=mi.ROOT)
+    ap.add_argument("--dry-run", action="store_true", dest="dry")
+    ap.add_argument("--self-check", action="store_true", dest="self_check")
+    a = ap.parse_args()
+    if a.self_check:
+        return self_check()
+    mi.ROOT = a.root
+    r = sweep(mi.connect(a.root), a.root, a.dry)
+    print("%s ретеншен: убрано %d записей, %.1f МБ%s" % (
+        mi.now_iso(), r["purged"], r["bytes"] / 1e6, ", вхолостую" if a.dry else ""))
+    for e in r["errors"]:
+        print("  сбой: " + e)
+    return 1 if r["errors"] else 0
+
+
+def self_check():
+    import tempfile
+    from datetime import timedelta
+    root = tempfile.mkdtemp()
+    mi.ROOT = root
+    con = mi.connect(root)
+    sha = "c" * 64
+    eid, _ = mi.put_event(con, {"kind": "call", "source": "sc", "source_id": "1",
+                                "payload": {"ext": "m4a"},
+                                "blob": {"sha256": sha, "ext": "m4a"}})
+    path = mi.blob_path(root, sha, "m4a")
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    open(path, "wb").write(b"x" * 10)
+    вчера = (datetime.now(mi.TZ) - timedelta(days=1)).date().isoformat()
+    con.execute("insert into blobs(sha256,path,bytes,created,audio_until) "
+                "values(?,?,?,?,?)", (sha, path, 10, mi.now_iso(), вчера))
+    mi.write_json(mi.manifest_path(root, eid), {"id": eid, "purged": None})
+    assert sweep(con, root, dry=True)["purged"] == 1, "холостой прогон не увидел срок"
+    assert os.path.exists(path), "холостой прогон удалил файл"
+    assert sweep(con, root)["purged"] == 1
+    assert not os.path.exists(path), "файл не удалён"
+    with open(mi.manifest_path(root, eid), encoding="utf-8") as fh:
+        assert json.load(fh)["purged"]["reason"] == "retention", "манифест не помечен"
+    assert sweep(con, root) == {"purged": 0, "bytes": 0, "errors": []}, "повтор убрал ещё раз"
+    print("blob_retention self-check: ок")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
