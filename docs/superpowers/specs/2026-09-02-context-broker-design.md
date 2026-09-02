@@ -178,11 +178,15 @@ _system/context/now.md ──► contextd GET /v1/context/bootstrap
 пишется. `source_id` — sha256 содержимого плюс минута: повтор вызова моделью в
 ту же минуту — дубль, та же правка через час — новое событие.
 
-Инструмент живёт в своём toolset `mara`. Так задумано в Hermes:
-`hermes plugins enable <имя>` дописывает toolset плагина во все списки
-`platform_toolsets`, но только на переходе выключен→включён. Плагин уже
-включён, поэтому после обновления —
-`hermes plugins disable mara-context && hermes plugins enable mara-context`.
+Инструмент живёт в своём toolset `mara`. В Hermes toolset плагина дописывает
+во все списки `platform_toolsets` только дашборд
+(`dashboard_set_agent_plugin_enabled`); CLI `hermes plugins enable` этого не
+делает — проверено на маке, списки остались как были. Поэтому `mara` вписан
+руками в `platform_toolsets.cli` и `.telegram` в `~/.hermes/config.yaml`
+(бэкап рядом: `config.yaml.bak-slice-b`). Неизвестный ключ там молча даёт
+пустой список инструментов, так что после любой правки конфига —
+`hermes -z` с просьбой позвать `mara_correction` по несуществующему
+обязательству: инструмент виден, событие доходит, в волт ничего не пишется.
 Регистрировать в чужой `hermes-telegram` не нужно и не стоит.
 
 ## Тесты

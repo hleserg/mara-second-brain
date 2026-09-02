@@ -225,8 +225,9 @@ def register(ctx) -> None:
             return "не вышло: %s" % type(e).__name__
 
     ctx.register_hook("pre_llm_call", hook)
-    # свой toolset: `hermes plugins enable mara-context` дописывает его во все
-    # platform_toolsets, иначе на телеграме инструмента не видно
+    # свой toolset. В platform_toolsets конфига его дописывает только дашборд
+    # Hermes, CLI enable — нет; на маке `mara` вписан в cli и telegram руками,
+    # иначе инструмента в сессии просто не видно (см. спеку брокера)
     ctx.register_tool("mara_correction", toolset="mara", schema=СХЕМА, handler=tool,
                       description="Правка обязательства по слову Серёги", emoji="✍️")
     log.info("mara-context: пакет обязательств беру с %s", брокер.url)
