@@ -73,6 +73,8 @@ class Сквозной(unittest.TestCase):
         cls.vault = tempfile.mkdtemp(prefix="mara-vault-")
         os.makedirs(os.path.join(cls.vault, ".git"))
         cls.env0 = dict(os.environ)
+        for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"):
+            os.environ.pop(k, None)   # транспорта в тесте нет и не должно быть
         os.environ.update({
             "MARA_BLOBS": cls.blobs, "VAULT": cls.vault,
             "MARA_ASR_URL": base, "MARA_LLM_URL": base,

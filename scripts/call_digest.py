@@ -32,9 +32,20 @@ SECTIONS = [("requests", "Попросили"), ("commitments", "Ты обеща
             ("open_questions", "Неясно")]
 
 
+КЛЮЧИ = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL")
+
+
 def env(path=None):
-    """Переменные из env-файла systemd. Ключи в лог не печатаются."""
-    out = {}
+    """Токен и канал: сначала из окружения, потом из env-файла.
+
+    Окружение первым не для красоты: systemd читает EnvironmentFile от root и
+    передаёт переменные процессу, а сам файл может быть недоступен sergey. Без
+    этой строки открытие файла падало бы в OSError, словарь оставался пустым, и
+    каждый дайджест молча становился no-transport — без единой ошибки в логе.
+
+    Ключи не печатаются никуда.
+    """
+    out = {k: os.environ[k] for k in КЛЮЧИ if os.environ.get(k)}
     try:
         with open(path or ENV_FILE, encoding="utf-8") as fh:
             for line in fh:
@@ -42,7 +53,7 @@ def env(path=None):
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, _, v = line.partition("=")
-                out[k.strip()] = v.strip().strip('"').strip("'")
+                out.setdefault(k.strip(), v.strip().strip('"').strip("'"))
     except OSError:
         pass
     return out
@@ -115,14 +126,17 @@ def run(event_id, root=None, env_file=None):
     e = env(env_file)
     state = deliver(text, e.get("TELEGRAM_BOT_TOKEN"), e.get("TELEGRAM_HOME_CHANNEL"))
     did = str(uuid.uuid4())
+    # один дайджест на событие: сбой отправки уводит работу в ретрай, и вторая
+    # попытка должна заменить строку, а не положить рядом ещё одну
+    con.execute("delete from digests where event_id=?", (event_id,))
     con.execute("insert into digests(id,event_id,chat_id,text,items_json,sent_at,state) "
                 "values(?,?,?,?,?,?,?)",
                 (did, event_id, e.get("TELEGRAM_HOME_CHANNEL"), text,
                  json.dumps(items, ensure_ascii=False), mi.now_iso(), state))
-    con.execute("update events set state='done' where id=?", (event_id,))
     print("call_digest: %s — %s, пунктов %d" % (event_id, state, len(items)))
     if state == "failed":
         raise RuntimeError("телеграм не принял дайджест")
+    con.execute("update events set state='done' where id=?", (event_id,))
     return did
 
 

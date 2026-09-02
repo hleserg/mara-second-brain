@@ -100,6 +100,20 @@ def describe(body):
     return cut(clean(" ".join(para)), MAX_DESC), cut(status, MAX_STATUS)
 
 
+def контакт(alias):
+    """Похож ли алиас на способ связи, а не на имя.
+
+    Номер телефона из карточки, заведённой по журналу звонков, — контактные
+    данные, а не знание. SOUL.md уезжает провайдеру модели (ТЗ §11), и вместе
+    с ним уехал бы личный номер. В самой карточке номер остаётся: он нужен
+    локально, чтобы узнать входящий звонок.
+    """
+    if "@" in alias:
+        return True
+    цифры = re.sub(r"[\s()\-+.]", "", alias)
+    return цифры.isdigit() and len(цифры) >= 7
+
+
 def card(path):
     fm, body = frontmatter(open(path, encoding="utf-8").read())
     if str(fm.get("sensitive", "false")).lower() == "true":
@@ -110,7 +124,8 @@ def card(path):
         aliases = [aliases]
     seen, keep = {title.lower()}, []
     for a in aliases:
-        if a.lower() not in seen and "/" not in a and len(keep) < MAX_ALIASES:
+        if (a.lower() not in seen and "/" not in a and not контакт(a)
+                and len(keep) < MAX_ALIASES):
             keep.append(a)
             seen.add(a.lower())
     desc, status = describe(body)
@@ -200,9 +215,15 @@ def self_check():
         open(os.path.join(v, "entities/people/x.md"), "w", encoding="utf-8").write(
             "---\ntitle: Тайный Человек\ntype: person\nsensitive: true\n---\n# Тайный\nне для облака\n")
         open(os.path.join(v, "entities/people/y.md"), "w", encoding="utf-8").write(
-            "---\ntitle: Катя\ntype: person\nsensitive: false\n---\n# Катя\nПодруга.\n")
+            "---\ntitle: Катя\ntype: person\naliases:\n- Катюша\n- +79990000000\n"
+            "sensitive: false\n---\n# Катя\nПодруга.\n")
         block, n = build(v)
         assert n == 2, n
+        assert "+79990000000" not in block and "79990000000" not in block, \
+            "номер телефона уехал бы провайдеру модели вместе с SOUL.md"
+        assert "Катюша" in block, "обычный алиас отбрасывать не надо"
+        assert контакт("+7 (999) 000-00-00") and контакт("anna@example.com")
+        assert not контакт("Катюша") and not контакт("Atta-Dipa")
         assert "Atta-dipa** (Attadipa)" in block, block          # алиас-дубль и repo-slug отброшены
         assert "ESP32, меш и навигация. Вторая строка абзаца." in block, block
         assert "Статус: ранняя реализация." in block and "Где живёт" not in block

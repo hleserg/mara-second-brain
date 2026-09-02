@@ -68,6 +68,30 @@ class ПорядокПолей(unittest.TestCase):
             self.assertIn(key, fm.ORDER, "ключ %s уедет в хвост при миграции" % key)
 
 
+class СводкаДляМодели(unittest.TestCase):
+    """SOUL.md уезжает провайдеру модели, а карточку человека заводит журнал
+    звонков — вместе с номером в алиасах. Номер туда попасть не должен."""
+
+    def test_номер_из_журнала_звонков_не_едет_в_soul(self):
+        import call_project as cp
+        событие = {"id": "call_1", "occurred": "2026-09-02T14:05:00+03:00",
+                   "payload": {"contact_name": "Анна Петрова", "number": "+79990000000",
+                               "contact_source": "call-log"}}
+        rel, text = cp.person_card(событие, {})
+        self.assertIn("+79990000000", text, "в самой карточке номер нужен локально")
+
+        v = tempfile.mkdtemp()
+        os.makedirs(os.path.join(v, "entities/people"))
+        with open(os.path.join(v, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        mb = load("mara-brief.py")
+        block, n = mb.build(v)
+        self.assertEqual(n, 1, "карточка человека в сводку попасть должна")
+        self.assertIn("Анна Петрова", block)
+        self.assertNotIn("79990000000", block,
+                         "личный номер уехал бы провайдеру модели (ТЗ §11)")
+
+
 class Линкер(unittest.TestCase):
     def test_карточки_разговоров_попадают_в_обход(self):
         el = load("entity-link.py")
