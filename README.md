@@ -51,9 +51,27 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 | Сторож тикера Мары | крон `*/10`, `scripts/mara-watchdog.sh` |
 | Сводка сущностей для Мары | крон `20 4 * * *`, `scripts/mara-brief.py` — блок «Что ты уже знаешь о Серёге» в `_system/mara-brief.md` и в `SOUL.md` на маке |
 | Туннель к Маре | systemd `mara-mac-tunnel.service` — обратный форвард 8787 на мак |
+| Приём звонков и сообщений | systemd `contextd.service`, `127.0.0.1:8788` — очередь, ASR на bigpc, извлечение, карточки в `kb/conversations` и `kb/commitments`, дайджест в телеграм |
+| Релей телефона | launchd `com.mara.relay` на маке — форвард `100.64.0.1:8788` в contextd на doctor |
+| Сверка приёма | крон `7 * * * *`, `scripts/contextd_reconcile.py` — чинит однозначное, докладывает остальное |
+| Уборка записей звонков | крон `40 4 * * *`, `scripts/blob_retention.py` — аудио живёт 90 дней, манифест навсегда |
 | Расход лимитов Claude Code | крон `3-58/5`, `scripts/claude-usage-agg.py` — отчёты в `Claude Usage/` |
 | Бэкап волта | крон `0 4 * * 1`, `scripts/vault-backup.sh` — зашифрованный бандл на два носителя |
 | Тест восстановления | крон `0 5 1 1,4,7,10 *`, `scripts/vault-restore-test.sh` |
+
+### Где лежат записи звонков
+
+Не в волте. `/srv/mara-blobs` на doctor, права 0700, дерево `calls/ГГГГ/ММ/`,
+имя файла — sha256 содержимого. Это вне волта осознанно: волт синкается в R2 и
+лежит в git, а запись личного разговора не должна попасть ни туда, ни туда.
+Поэтому в `config/r2-filters.txt` блобов нет и быть не должно — исключать
+нечего, они просто не в том дереве. В волт из звонка попадают только карточка
+разговора и карточки обязательств, с `sensitive: true` и `cloud_allowed: false`.
+
+Аудио удаляется через 90 дней, манифест в `/srv/mara-blobs/manifests/` остаётся
+навсегда: по нему видно, что звонок был и куда делась запись.
+
+Ручные шаги владельца — `docs/USER-MANUAL-STEPS.md`.
 
 ## Ingest сессий (этап 2)
 

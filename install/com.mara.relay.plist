@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Релей телефон → contextd. Ставится на мак:
+      cp install/com.mara.relay.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mara.relay.plist
+
+  Почему форвард идёт с мака, а не с doctor, как туннель basic-memory:
+  слушающий сокет должен висеть на адресе тайлнета 100.64.0.1, иначе телефон
+  до него не достучится. Удалённый форвард (-R) с doctor привязать сокет к
+  не-loopback адресу мака не может — для этого нужен GatewayPorts yes в sshd
+  мака, то есть sudo с паролем. Локальный форвард (-L) выбирает адрес на
+  стороне клиента, и GatewayPorts к нему отношения не имеет: нужен только
+  ключ, который уже есть.
+
+  ExitOnForwardFailure: без него ssh висит живым с непроброшенным портом, и
+  launchd считает, что всё хорошо, а телефон льёт записи в никуда. KeepAlive
+  поднимает процесс заново, когда тайлнет ещё не встал после загрузки.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>            <string>com.mara.relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=30</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-L</string><string>100.64.0.1:8788:127.0.0.1:8788</string>
+    <string>doctor</string>
+  </array>
+  <key>RunAtLoad</key>        <true/>
+  <key>KeepAlive</key>        <true/>
+  <key>ThrottleInterval</key> <integer>10</integer>
+  <key>StandardOutPath</key>  <string>/tmp/mara-relay.log</string>
+  <key>StandardErrorPath</key><string>/tmp/mara-relay.log</string>
+</dict>
+</plist>
