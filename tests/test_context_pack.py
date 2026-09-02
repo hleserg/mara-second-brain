@@ -118,6 +118,35 @@ class Граница(unittest.TestCase):
         self.assertIn("ещё", text, "хвост должен быть назван, а не молча пропасть")
 
 
+class ЧужойПисатель(unittest.TestCase):
+    """Basic Memory синкает волт и дописывает свой фронтматтер в каждый .md."""
+
+    def test_чужой_фронтматтер_не_уезжает(self):
+        v = волт()
+        cp.build_now(v)
+        p = os.path.join(v, "_system/context/now.md")
+        with open(p, encoding="utf-8") as fh:
+            было = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: now\ntype: note\npermalink: vault/system/"
+                     "context/now\n---\n\n" + было)
+        with open(p, encoding="utf-8") as fh:
+            взято = cp.выделить(fh.read())
+        self.assertIn("прислать смету", взято)
+        self.assertNotIn("permalink", взято, "чужой фронтматтер провайдеру не нужен")
+        self.assertTrue(взято.startswith(cp.MARK_OPEN))
+
+    def test_пустой_пакет_остаётся_пустым_после_чужой_правки(self):
+        v = волт(пусто=True)
+        cp.build_now(v)
+        p = os.path.join(v, "_system/context/now.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: now\ntype: note\n---\n\n")
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(cp.выделить(fh.read()), "",
+                             "иначе пустой список стоил бы токенов каждой сессии")
+
+
 class Запись(unittest.TestCase):
     def test_файлы_пишутся_атомарно(self):
         v = волт()

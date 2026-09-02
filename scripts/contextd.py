@@ -289,14 +289,17 @@ def now_pack(vault=None):
     хранения — лишняя причина однажды отдать вчерашний список. Нет файла —
     None, а не ошибка: контекст-брокер может быть ещё не собран.
     """
+    import context_pack
     d = os.path.join(vault or VAULT, "_system/context")
     try:
         with open(os.path.join(d, "now.md"), encoding="utf-8") as fh:
-            text = fh.read()
+            text = context_pack.выделить(fh.read())
         with open(os.path.join(d, "manifest.json"), encoding="utf-8") as fh:
             m = json.load(fh)
     except (OSError, ValueError):
         return None
+    if not text:
+        return None                      # пусто или один чужой фронтматтер
     return {"text": text, "sha256": m.get("sha256"),
             "generated": m.get("generated"), "items": m.get("items")}
 
