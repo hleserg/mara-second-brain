@@ -195,22 +195,26 @@ class Демон:
         """Вход для апдейтов. Исключение не роняет демон: воркер python-telegram
         ловит и пишет в журнал, следующий апдейт идёт своим чередом."""
         t = update.get("@type")
+        if t == "updateConnectionState":
+            self.connected = (update.get("state") or {}).get("@type") == "connectionStateReady"
+            if self.connected:
+                self.beat()
+            return
+        cid = update.get("chat_id") or (update.get("message") or {}).get("chat_id")
+        if cid is None:
+            return
+        if self.kind(self.chat(cid)) in ПРОПУСКАЕМ:
+            return          # ни в raw, ни getMessage: канал и бот не читаем вовсе
         self.raw(update)
         if t in ("updateNewMessage", "updateMessageSendSucceeded"):
             self.message(update["message"], revision=False)
         elif t == "updateMessageEdited":
-            msg = self.call("getMessage", chat_id=update["chat_id"],
-                            message_id=update["message_id"])
+            msg = self.call("getMessage", chat_id=cid, message_id=update["message_id"])
             msg["edit_date"] = update.get("edit_date") or msg.get("edit_date")
             self.message(msg, revision=True)
         elif t == "updateDeleteMessages":
-            if self.kind(self.chat(update["chat_id"])) not in ПРОПУСКАЕМ:
-                for ev in tombstones(update):
-                    self.send(ev)
-        elif t == "updateConnectionState":
-            self.connected = (update.get("state") or {}).get("@type") == "connectionStateReady"
-            if self.connected:
-                self.beat()
+            for ev in tombstones(update):
+                self.send(ev)
 
     def message(self, msg, revision):
         if msg.get("sending_state"):
@@ -269,6 +273,13 @@ class Демон:
 
     def catch_up(self):
         """TDLib апдейты второй раз не шлёт: что пропустили лёжа — берём из истории."""
+        # getChats отдаёт только то, что уже в локальной базе: после --login там
+        # почти пусто. loadChats тянет список с сервера, 404 — «всё загружено».
+        for _ in range(50):
+            try:
+                self.call("loadChats", limit=ЧАТОВ)
+            except RuntimeError:
+                break
         n = 0
         for cid in self.call("getChats", limit=ЧАТОВ).get("chat_ids") or []:
             chat = self.chat(cid)
@@ -432,6 +443,11 @@ class _Фальшивый:
         self.chats, self.users, self.history = chats, users, history
 
     def call_method(self, m, params, block=False):
+        if m == "loadChats":
+            self.loaded = getattr(self, "loaded", 0) + 1
+            if self.loaded > 1:
+                raise RuntimeError("Telegram error: 404 all chats loaded")
+            return _Ответ({"@type": "ok"})
         if m == "getChat":
             return _Ответ(self.chats[params["chat_id"]])
         if m == "getUser":
@@ -515,7 +531,9 @@ def self_check():
     assert Демон(_Фальшивый(chats, users, history), post, home, log=lambda s: None).cursor == {"7": 3}
     # сырой поток дописан построчно
     raw = open(os.path.join(home, "raw", time.strftime("%Y-%m-%d") + ".jsonl"), encoding="utf-8").read().splitlines()
-    assert len(raw) == 7 and json.loads(raw[0])["@type"] == "updateNewMessage"
+    assert len(raw) == 5 and json.loads(raw[0])["@type"] == "updateNewMessage", \
+        "бот и канал не должны попасть даже в сырой поток"
+    assert d.c.loaded == 3, "loadChats крутится до 404: два вызова в первом догоне, один во втором"
     # 4xx — наша ошибка, не крутимся вечно
     def post400(ev):
         raise urllib.error.HTTPError("u", 400, "bad", {}, None)
