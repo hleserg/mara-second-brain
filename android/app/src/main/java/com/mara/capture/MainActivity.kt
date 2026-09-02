@@ -48,7 +48,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(saved)
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
-        s = Settings(this)
+        // Keystore на некоторых сборках Huawei падает при первом обращении.
+        // Без этого первый отчёт владельца был бы «оно вылетает» и ни строки,
+        // которую можно прислать.
+        s = try {
+            Settings(this)
+        } catch (e: Exception) {
+            покажи("Keystore не завёлся — пришли эту строку:\n${e.javaClass.name}: ${e.message}")
+            return
+        }
 
         b.url.setText(s.baseUrl)
         b.token.setText(s.token)
@@ -57,6 +65,8 @@ class MainActivity : AppCompatActivity() {
             s.baseUrl = b.url.text.toString()
             s.token = b.token.text.toString()
             if (s.paired) {
+                // чужой токен клал работы в FAILED; новый токен — новая попытка
+                Queue(this).retryFailed()
                 SyncWorker.schedule(this)
                 SyncWorker.kick(this)
                 Toast.makeText(this, "запущено", Toast.LENGTH_SHORT).show()
@@ -77,29 +87,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        здоровье()
+        if (::s.isInitialized) здоровье()   // иначе на экране сообщение про Keystore
     }
 
     // ── здоровье ─────────────────────────────────────────────────────────
 
-    private fun здоровье() {
+    private fun здоровье() = фоном {
         val q = Queue(this)
         val последняя = Device.scan(this, s).maxByOrNull { it.modifiedMs }
-        покажи(
-            listOf(
-                "спарено: " + if (s.paired) "да, " + s.baseUrl else "нет",
-                "папка: " + (s.folderUri.ifEmpty { "не выбрана, смотрю медиатеку" }),
-                "последняя запись: " + (последняя?.let { "${it.name} · ${когда(it.modifiedMs)}" }
-                    ?: "не вижу ни одной"),
-                "в очереди: ${q.depth()}, отправлено: ${q.count(JobState.DONE)}, " +
-                    "сдалось: ${q.count(JobState.FAILED)}",
-                "последняя отправка: " + когда(s.lastUploadMs),
-                "последний контакт с сервером: " + когда(s.lastContactMs),
-                "разрешения: " + НУЖНЫ.filter { Device.granted(this, it) }
-                    .joinToString(", ") { it.substringAfterLast('.') }.ifEmpty { "нет" },
-                "батарея не ограничена: " + if (безОграничений()) "да" else "нет, нажми кнопку",
-            ).joinToString("\n")
-        )
+        listOf(
+            "спарено: " + if (s.paired) "да, " + s.baseUrl else "нет",
+            "папка: " + (s.folderUri.ifEmpty { "не выбрана, смотрю медиатеку" }),
+            "последняя запись: " + (последняя?.let { "${it.name} · ${когда(it.modifiedMs)}" }
+                ?: "не вижу ни одной"),
+            "в очереди: ${q.depth()}, отправлено: ${q.count(JobState.DONE)}, " +
+                "сдалось: ${q.count(JobState.FAILED)}",
+            "последняя отправка: " + когда(s.lastUploadMs),
+            "последний контакт с сервером: " + когда(s.lastContactMs),
+            "разрешения: " + НУЖНЫ.filter { Device.granted(this, it) }
+                .joinToString(", ") { it.substringAfterLast('.') }.ifEmpty { "нет" },
+            "батарея не ограничена: " + if (безОграничений()) "да" else "нет, нажми кнопку",
+        ).joinToString("\n")
     }
 
     // ── самопроверка ─────────────────────────────────────────────────────
@@ -133,31 +141,37 @@ class MainActivity : AppCompatActivity() {
      * копирует кнопкой и присылает текстом — это и есть материал для пункта
      * §24 про ограничения конкретной Huawei.
      */
-    private fun мастер() {
+    private fun мастер() = фоном {
         val медиатека = Device.mediaStore(this)
         val папка = Device.folder(this, s.folderUri)
         val последняя = (медиатека + папка).maxByOrNull { it.modifiedMs }
         val журнал = Device.callLog(this, System.currentTimeMillis() - 7 * 24 * 3600_000L)
         val совпало = последняя?.let { CallLogMatcher.nearest(журнал, it.modifiedMs) }
-        покажи(
-            listOf(
-                "модель: ${Build.MODEL} (${Build.MANUFACTURER})",
-                "сборка: ${Build.DISPLAY}, Android ${Build.VERSION.RELEASE}",
-                "рекордеры: " + Device.producers(this).joinToString("; ").ifEmpty { "ни одного из известных" },
-                "в медиатеке записей: ${медиатека.size}",
-                "в выбранной папке: " + if (s.folderUri.isEmpty()) "папка не выбрана" else "${папка.size}",
-                "последний файл: " + (последняя?.let { "${it.name}, ${it.sizeBytes} Б, ${когда(it.modifiedMs)}" }
-                    ?: "нет"),
-                "читается: " + (последняя?.let {
-                    if (Device.open(this, it) != null) "да" else "нет"
-                } ?: "-"),
-                "звук: " + (последняя?.let { Device.audioInfo(this, it) } ?: "-"),
-                "звонков в журнале за неделю: ${журнал.size}",
-                "сопоставился с: " + (совпало?.let {
-                    "${it.name ?: it.number} · ${it.direction} · ${it.durationS} с"
-                } ?: "ни с чем"),
-            ).joinToString("\n")
-        )
+        listOf(
+            "модель: ${Build.MODEL} (${Build.MANUFACTURER})",
+            "сборка: ${Build.DISPLAY}, Android ${Build.VERSION.RELEASE}",
+            "рекордеры: " + Device.producers(this).joinToString("; ").ifEmpty { "ни одного из известных" },
+            "в медиатеке записей: ${медиатека.size}",
+            "в выбранной папке: " + if (s.folderUri.isEmpty()) "папка не выбрана" else "${папка.size}",
+            "последний файл: " + (последняя?.let { "${it.name}, ${it.sizeBytes} Б, ${когда(it.modifiedMs)}" }
+                ?: "нет"),
+            "читается: " + (последняя?.let {
+                if (Device.open(this, it) != null) "да" else "нет"
+            } ?: "-"),
+            "звук: " + (последняя?.let { Device.audioInfo(this, it) } ?: "-"),
+            "звонков в журнале за неделю: ${журнал.size}",
+            "сопоставился с: " + (совпало?.let {
+                "${it.name ?: it.number} · ${it.direction} · ${it.durationS} с"
+            } ?: "ни с чем"),
+        ).joinToString("\n")
+    }
+
+    /** Скан медиатеки, обход SAF и разбор кодека — не на главном потоке. */
+    private fun фоном(сбор: () -> String) {
+        Thread {
+            val t = runCatching(сбор).getOrElse { "не собралось: ${it.javaClass.simpleName}: ${it.message}" }
+            runOnUiThread { покажи(t) }
+        }.start()
     }
 
     // ── мелочи ───────────────────────────────────────────────────────────

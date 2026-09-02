@@ -36,7 +36,7 @@ object Device {
         val cols = arrayOf(
             MediaStore.Audio.Media._ID, MediaStore.Audio.Media.DISPLAY_NAME,
             MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.DATE_MODIFIED,
-            MediaStore.Audio.Media.RELATIVE_PATH,
+            MediaStore.Audio.Media.RELATIVE_PATH, MediaStore.Audio.Media.OWNER_PACKAGE_NAME,
         )
         val c: Cursor = ctx.contentResolver.query(
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cols, null, null,
@@ -51,7 +51,7 @@ object Device {
                 out += Recording(
                     Uri.withAppendedPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
                         it.getLong(0).toString()).toString(),
-                    it.getString(1) ?: "?", it.getLong(2), mtime,
+                    it.getString(1) ?: "?", it.getLong(2), mtime, it.getString(5),
                 )
             }
         }

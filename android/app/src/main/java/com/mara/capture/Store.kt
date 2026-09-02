@@ -63,8 +63,9 @@ data class Job(
     val seenMtime: Long = -1,
     val seenAtMs: Long = 0,
     val error: String? = null,
+    val producer: String? = null,
 ) {
-    fun recording() = Recording(id, name, sizeBytes, modifiedMs)
+    fun recording() = Recording(id, name, sizeBytes, modifiedMs, producer)
 }
 
 /**
@@ -73,7 +74,7 @@ data class Job(
  * Очередь обязана пережить reboot и force-stop (ТЗ §5.1E), поэтому она на
  * диске, а не в памяти воркера.
  */
-class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 1) {
+class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -81,11 +82,14 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
                  id text primary key, name text, size integer, mtime integer,
                  state text, attempts integer default 0, sha256 text, event_id text,
                  seen_size integer default -1, seen_mtime integer default -1,
-                 seen_at integer default 0, error text, updated integer)"""
+                 seen_at integer default 0, error text, producer text, updated integer)"""
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) = Unit
+    /** Очередь — кэш: сервер дедуплицирует по хешу, так что пересобрать её дёшево. */
+    override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
+        db.execSQL("drop table if exists jobs"); onCreate(db)
+    }
 
     /**
      * Файл увиден сканом. Новый — заводим работу; знакомый — обновляем приметы,
@@ -105,11 +109,15 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
                     put("size", rec.sizeBytes); put("mtime", rec.modifiedMs)
                     put("state", JobState.NEW.name)
                     put("seen_size", rec.sizeBytes); put("seen_mtime", rec.modifiedMs)
-                    put("seen_at", nowMs); put("updated", nowMs)
+                    put("seen_at", nowMs); put("producer", rec.producer); put("updated", nowMs)
                 })
                 return
             }
-            if (it.getString(0) !in setOf(JobState.NEW.name, JobState.HASHED.name)) return
+            // POSTED тоже: если файл дорос после того, как событие ушло, надо
+            // упасть в NEW до загрузки — иначе fixed-length поток оборвётся на
+            // клиенте и будет выглядеть как «сети нет» до скончания веков
+            if (it.getString(0) !in setOf(JobState.NEW.name, JobState.HASHED.name,
+                    JobState.POSTED.name)) return
             val прежние = ContentValues().apply {
                 put("size", rec.sizeBytes); put("mtime", rec.modifiedMs); put("updated", nowMs)
             }
@@ -129,13 +137,13 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         val out = mutableListOf<Job>()
         readableDatabase.rawQuery(
             "select id,name,size,mtime,state,attempts,sha256,event_id,seen_size,seen_mtime," +
-                "seen_at,error from jobs where state not in (?,?) order by mtime",
+                "seen_at,error,producer from jobs where state not in (?,?) order by mtime",
             arrayOf(JobState.DONE.name, JobState.FAILED.name)
         ).use { c ->
             while (c.moveToNext()) out += Job(
                 c.getString(0), c.getString(1), c.getLong(2), c.getLong(3),
                 JobState.valueOf(c.getString(4)), c.getInt(5), c.getString(6), c.getString(7),
-                c.getLong(8), c.getLong(9), c.getLong(10), c.getString(11),
+                c.getLong(8), c.getLong(9), c.getLong(10), c.getString(11), c.getString(12),
             )
         }
         return out
@@ -160,4 +168,9 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         ).use { if (it.moveToFirst()) it.getInt(0) else 0 }
 
     fun latest(): Job? = pending().lastOrNull()
+
+    /** Чужой токен вбили — все работы легли в FAILED. Поправили токен — поднимаем. */
+    fun retryFailed(): Int = writableDatabase.compileStatement(
+        "update jobs set state='NEW', sha256=null, error=null, attempts=0 where state='FAILED'"
+    ).executeUpdateDelete()
 }

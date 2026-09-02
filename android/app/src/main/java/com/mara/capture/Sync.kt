@@ -36,16 +36,28 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
         val api = Api(s.baseUrl, s.token)
         val журнал = Device.callLog(ctx, now - 7 * 24 * 3600_000L)
-        var работали = false
+        прогон(ctx, q, api, журнал, now)
+
+        // Первый взгляд на файл готовым быть не может: сравнивать не с чем.
+        // Без второго взгляда здесь запись после отбоя ждала бы четвертьчасовой
+        // сверки, а руководство обещает минуту-две. Ждём тишину и смотрим ещё раз.
+        if (q.pending().any { it.state == JobState.NEW }) {
+            Thread.sleep(FileReady.QUIET_MS + 5_000)
+            val потом = System.currentTimeMillis()
+            Device.scan(ctx, s, потом - 7 * 24 * 3600_000L).forEach { q.seen(it, потом) }
+            прогон(ctx, q, api, журнал, потом)
+        }
+        s.lastContactMs = System.currentTimeMillis()
+        // Result.retry() тут не нужен: сетевые повторы уже размечены в очереди,
+        // а экспонента WorkManager на пустом прогоне только мешала бы.
+        return Result.success()
+    }
+
+    private fun прогон(ctx: Context, q: Queue, api: Api, журнал: List<CallLogEntry>, now: Long) {
         for (job in q.pending()) {
             if (!готов(q, job, now)) continue
-            работали = true
             if (!шаг(ctx, q, api, job, журнал, now)) break   // сеть легла — не долбим
         }
-        s.lastContactMs = now
-        // Ничего не сделали — WorkManager не должен считать это неудачей: при
-        // Result.retry() он бы двигал экспоненту на пустом месте.
-        return if (работали) Result.success() else Result.success()
     }
 
     /** Файл дописан? Решает Core, здесь только приметы из очереди. */
@@ -69,17 +81,18 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             JobState.HASHED -> {
                 val звонок = CallLogMatcher.nearest(журнал, job.modifiedMs)
                 val body = EventJson.build(job.recording(), звонок, job.sha256!!,
-                    Device.ext(job.recording()), Device.producers(ctx).firstOrNull(),
-                    ZoneId.systemDefault())
+                    Device.ext(job.recording()), job.producer, ZoneId.systemDefault())
                 val r = api.postEvent(body)
                 q.save(job.copy(state = JobFlow.next(job.state, r), eventId = r.eventId,
                     attempts = job.attempts + 1, error = ошибка(r)), now)
                 return r.code != 0
             }
             JobState.POSTED -> {
-                val r = api.putAudio(job.eventId!!, job.sizeBytes) {
-                    Device.open(ctx, job.recording())!!
-                }
+                // исчезнувший файл — это не «сети нет», повторять его бессмысленно
+                val поток = Device.open(ctx, job.recording())
+                    ?: return true.also { q.save(job.copy(state = JobState.FAILED,
+                        error = "файл исчез"), now) }
+                val r = api.putAudio(job.eventId!!, job.sizeBytes) { поток }
                 val дальше = JobFlow.next(job.state, r)
                 // 409 значит, что файл дописали, пока мы его читали: считаем
                 // заново, иначе на сервер уедет половина разговора

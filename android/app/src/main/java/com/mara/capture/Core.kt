@@ -20,6 +20,7 @@ data class Recording(
     val name: String,
     val sizeBytes: Long,
     val modifiedMs: Long,
+    val producer: String? = null,   // пакет, записавший файл; медиатека знает, SAF — нет
 )
 
 /** Строка журнала звонков. Адресную книгу целиком не трогаем (ТЗ §5.1B). */
