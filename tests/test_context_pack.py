@@ -71,10 +71,10 @@ class Состав(unittest.TestCase):
         порядок = [text.index(x) for x in ("ранняя", "поздняя", "без срока")]
         self.assertEqual(порядок, sorted(порядок))
 
-    def test_пустой_набор_не_падает(self):
+    def test_пустой_набор_даёт_пустой_пакет(self):
         text, items = cp.собрать(волт(пусто=True))
         self.assertEqual(items, [])
-        self.assertIsInstance(text, str)
+        self.assertEqual(text, "", "шапка над пустотой стоила бы токенов каждый ход")
 
 
 class Граница(unittest.TestCase):
