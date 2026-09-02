@@ -190,6 +190,36 @@ class Api(unittest.TestCase):
         self.assertEqual(снова["event_id"], r["event_id"])
         self.assertFalse(снова["need_blob"], "блоб уже просили, второй раз не надо")
 
+    def test_правка_применяется_синхронно(self):
+        import context_pack
+        with open(os.path.join(self.vault, "kb/commitments", "c.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("---\ntitle: отправить договор\nstatus: open\n---\n")
+        было = context_pack.build_now(self.vault)
+        code, r = self.post("/v1/ingest/event", {
+            "kind": "correction", "source": "mara", "source_id": "k1",
+            "payload": {"item": "отправить договор", "status": "done"}})
+        self.assertEqual(code, 200)
+        self.assertTrue(r["applied"]["found"])
+        self.assertIn("open → done", r["applied"]["text"])
+        self.assertNotEqual(r["applied"]["pack_sha256"], было, "пакет пересобран до ответа")
+        self.assertIn("status: done", open(os.path.join(self.vault, "kb/commitments", "c.md"),
+                                           encoding="utf-8").read())
+        _, снова = self.post("/v1/ingest/event", {
+            "kind": "correction", "source": "mara", "source_id": "k1",
+            "payload": {"item": "отправить договор", "status": "done"}})
+        self.assertTrue(снова["duplicate"])
+        self.assertIsNone(снова["applied"], "дубль второй раз не применяется")
+
+    def test_кривая_правка_400_и_не_в_базе(self):
+        code, r = self.post("/v1/ingest/event", {
+            "kind": "correction", "source": "mara", "source_id": "k2",
+            "payload": {"item": "что-то", "due": "пятница"}})
+        self.assertEqual(code, 400)
+        self.assertIn("YYYY-MM-DD", r["error"])
+        self.assertEqual(self.con.execute("select count(*) from events where source_id='k2'")
+                         .fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

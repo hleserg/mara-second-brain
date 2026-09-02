@@ -215,10 +215,27 @@ class Handler(BaseHTTPRequestHandler):
                     "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
+            if kind == "correction":
+                import call_project
+                err = call_project.check_correction(data.get("payload") or {})
+                if err:
+                    return self.say(400, {"error": err})
             eid, dup = mi.put_event(con, data)
             need = bool((data.get("blob") or {}).get("sha256")) and not dup
+            applied = None
+            if kind == "correction" and not dup:
+                # синхронно, а не через очередь: Серёга ждёт ответа Мары, а не
+                # ночного крона. Писатель карточек один — call_project.
+                try:
+                    applied = call_project.apply_correction(self.server.vault,
+                                                            dict(data, id=eid))
+                except Exception as e:
+                    print("correction %s: %s: %s" % (eid, type(e).__name__, e), flush=True)
+                    applied = {"found": False,
+                               "text": "не применил: %s" % type(e).__name__}
             print(log_line("POST", p.path, 200, data), flush=True)
-            return self.say(200, {"event_id": eid, "duplicate": dup, "need_blob": need})
+            return self.say(200, {"event_id": eid, "duplicate": dup,
+                                  "need_blob": need, "applied": applied})
         if p.path == "/v1/context/query":
             # пакетов по сущностям нет и не заводится, пока now.md влезает в
             # бюджет (docs/superpowers/specs/2026-09-02-context-broker-design.md).

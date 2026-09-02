@@ -14,11 +14,12 @@ SQLite только очередь.
     python3 scripts/call_project.py --event call_<uuid> --vault /srv/vault
     python3 scripts/call_project.py --self-check
 """
-import os, sys, re, json, hashlib, argparse
+import os, sys, re, json, glob, hashlib, argparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
+import context_pack
 from vault_common import canon_map, linkify, locked, scrub, yaml_str
 
 OWNER = os.environ.get("MARA_OWNER", "sergey")
@@ -240,14 +241,17 @@ def write_cards(vault, cards):
     written = []
     with locked(vault):
         for rel, text in cards:
-            path = os.path.join(vault, rel)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(text)
-            os.replace(tmp, path)
+            _atomic(os.path.join(vault, rel), text)
             written.append(rel)
     return written
+
+
+def _atomic(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
 
 
 def run(event_id, vault, root=None):
@@ -268,10 +272,185 @@ def run(event_id, vault, root=None):
     # пакет для Мары пересобираем сразу: обязательство, о котором она узнает
     # только после ночного крона, — это обязательство, о котором она не узнает
     # (ТЗ §15). Писатель у _system/context один — context_pack, кто бы ни звал.
-    import context_pack
     context_pack.build_now(vault)
     print("call_project: %s — карточек %d" % (event_id, len(written)))
     return written
+
+# --- правка обязательства словами Серёги (ТЗ §16) ---------------------------
+#
+# «Это тоже задача, срок пятница», «сделал», «отмени» — Мара зовёт инструмент
+# mara_correction, плагин шлёт событие kind=correction, contextd применяет его
+# здесь синхронно. Историю не переписываем: фронтматтер — текущая проекция,
+# тело — журнал правок с датой и ссылкой на событие. YAML руками никто не
+# правит, и Мара тоже.
+
+СТАТУСЫ = ("open", "done", "cancelled")
+ДАТА = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def check_correction(payload):
+    """Граница доверия: аргументы придумывает модель. Ошибка — строкой, чтобы
+    Мара переспросила Серёгу, а не оставила 500 в логе."""
+    item = str(payload.get("item") or "").strip()
+    if not item or len(item) > 200:
+        return "нужно название обязательства, до 200 знаков"
+    if payload.get("status") not in (None, "") + СТАТУСЫ:
+        return "статус — один из: " + ", ".join(СТАТУСЫ)
+    if payload.get("due") and not ДАТА.match(str(payload["due"])):
+        return "срок нужен как YYYY-MM-DD"
+    if not (payload.get("status") or payload.get("due") or payload.get("note")):
+        return "нечего править: ни статуса, ни срока, ни заметки"
+    return None
+
+
+def _карточки(vault):
+    out = []
+    for p in sorted(glob.glob(os.path.join(vault, COMM_DIR, "*.md"))):
+        with open(p, encoding="utf-8") as fh:
+            text = fh.read()
+        fm, _ = context_pack.mb.frontmatter(text)
+        out.append({"path": p, "rel": os.path.relpath(p, vault), "fm": fm, "text": text})
+    return out
+
+
+def _слова(s):
+    return set(re.findall(r"\w+", s))
+
+
+def _похожие(item, cards):
+    """Карточки по названию: точное совпадение, потом вхождение, потом общие
+    слова. Внутри яруса открытые важнее закрытых. Два равных кандидата — не
+    «берём первый», а вопрос Серёге: правка не должна лечь в чужую карточку молча."""
+    q = context_pack.mb.clean(item).lower()
+    qw = _слова(q)
+    ярусы = ([], [], [])
+    for c in cards:
+        t = context_pack.mb.clean(c["fm"].get("title") or "").lower()
+        if not t:
+            continue
+        tw = _слова(t)
+        if t == q:
+            ярусы[0].append(c)
+        elif q in t or t in q:
+            ярусы[1].append(c)
+        elif qw and len(qw & tw) / max(len(qw), len(tw)) >= 0.5:
+            ярусы[2].append(c)
+    for ярус in ярусы:
+        if ярус:
+            открытые = [c for c in ярус if c["fm"].get("status") in context_pack.OPEN]
+            return открытые or ярус
+    return []
+
+
+def _шапка(text, **новое):
+    """Строки фронтматтера правим на месте, остальные байты не трогаем: Basic
+    Memory дописывает в карточки свои ключи, и пересборка из словаря их бы
+    выбросила. Нет ключа — дописываем в конец шапки."""
+    m = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    head = m.group(1).split("\n")
+    for k, v in новое.items():
+        line = "%s: %s" % (k, v)
+        for i, l in enumerate(head):
+            if l.startswith(k + ":"):
+                head[i] = line
+                break
+        else:
+            head.append(line)
+    return "---\n" + "\n".join(head) + "\n---\n" + text[m.end():]
+
+
+def _поправить(card, status, due, note, когда, event_id):
+    fm, title = card["fm"], card["fm"].get("title") or "?"
+    новое, журнал = {}, []
+    if status and status != fm.get("status"):
+        новое["status"] = status
+        журнал.append("статус %s → %s" % (fm.get("status") or "?", status))
+    if due and due != fm.get("due"):
+        новое["due"], новое["due_explicit"] = due, "true"
+        журнал.append("срок %s → %s" % (fm.get("due") or "не был", due))
+    if note:
+        журнал.append(note)
+    out = {"found": True, "card": card["rel"], "title": title, "changed": новое}
+    if not журнал:
+        out["text"] = "«%s» уже так" % title
+        return out
+    if новое:
+        новое["valid_from"] = когда
+    text = _шапка(card["text"], **новое) if новое else card["text"]
+    if "\nПравки:\n" not in text:
+        text = text.rstrip("\n") + "\n\nПравки:\n"
+    text += "- %s, Мара, correction/%s: %s\n" % (когда[:16], event_id, "; ".join(журнал))
+    _atomic(card["path"], text)
+    out["text"] = "«%s»: %s" % (title, "; ".join(журнал))
+    return out
+
+
+def _завести(vault, item, due, note, когда, event):
+    """Новая задача словами Серёги. Поля те же, что у карточки из звонка, чтобы
+    context_pack и сводки видели её как любую другую."""
+    day, stem = когда[:10], slug(item)[:40]
+    rel, n = "%s/%s-%s.md" % (COMM_DIR, day, stem), 1
+    while os.path.exists(os.path.join(vault, rel)):
+        n += 1
+        rel = "%s/%s-%s-%d.md" % (COMM_DIR, day, stem, n)
+    fm = frontmatter(
+        [("title", yaml_str(item[:80])),
+         ("type", "commitment"),
+         ("source", "mara"),
+         ("source_id", "correction/%s" % event["id"]),
+         ("created", когда),
+         ("occurred", event.get("occurred_at") or когда),
+         ("sensitive", "true"),
+         ("distilled", "true"),
+         ("status", "open"),
+         ("owner", OWNER),
+         ("due", due),
+         ("due_explicit", "true" if due else "false"),
+         ("origin", "correction/%s" % event["id"]),
+         ("classification", "personal"),
+         ("model_scope", "local-only"),
+         ("cloud_allowed", "false"),
+         ("confidence", "1.00"),
+         ("pipeline_version", str(mi.PIPELINE_VERSION)),
+         ("valid_from", когда)],
+        lists=[("audience", ["mara"])])
+    body = ["- Обещание: %s" % item,
+            "- Откуда: сказано Маре, %s" % когда[:16]]
+    if note:
+        body.append("- Заметка: %s" % note)
+    _atomic(os.path.join(vault, rel), fm + "\n" + "\n".join(body) + "\n")
+    return {"found": False, "created": rel, "title": item,
+            "text": "завёл «%s»%s" % (item, " до " + due if due else "")}
+
+
+def apply_correction(vault, event):
+    """Событие kind=correction → карточка. Возвращает, что сделано, с полем
+    `text` для Мары. Пакет для Мары пересобирается сразу, как после звонка."""
+    p = event.get("payload") or {}
+    item = scrub(str(p.get("item") or "").strip())
+    status, due = p.get("status") or None, p.get("due") or None
+    note = scrub(str(p.get("note") or "").strip()) or None
+    когда = mi.now_iso()
+    with locked(vault):
+        cards = _карточки(vault)
+        found = _похожие(item, cards)
+        if len(found) > 1:
+            names = [c["fm"].get("title") for c in found]
+            out = {"found": False, "ambiguous": names,
+                   "text": "подходят несколько, уточни: " + "; ".join(names)}
+        elif found:
+            out = _поправить(found[0], status, due, note, когда, event.get("id"))
+        elif status == "open":
+            out = _завести(vault, item, due, note, когда, event)
+        else:
+            открытые = [c["fm"].get("title") for c in cards
+                        if c["fm"].get("status") in context_pack.OPEN]
+            out = {"found": False, "open": открытые,
+                   "text": "не нашёл «%s» среди открытых: %s"
+                           % (item, "; ".join(открытые) or "список пуст")}
+    # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
+    out["pack_sha256"] = context_pack.build_now(vault)
+    return out
 
 
 def self_check():

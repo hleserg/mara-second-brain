@@ -155,5 +155,111 @@ class Запись(unittest.TestCase):
         self.assertEqual(len(found), len(first))
 
 
+class Правка(unittest.TestCase):
+    """«Это тоже задача, срок пятница» → карточка, без правки YAML руками (ТЗ §16)."""
+
+    ЧУЖОЕ = "permalink: kb/commitments/smeta"      # Basic Memory дописывает своё
+
+    def волт(self):
+        v = tempfile.mkdtemp()
+        os.makedirs(os.path.join(v, ".git"))
+        os.makedirs(os.path.join(v, "kb/commitments"))
+        return v
+
+    def карточка(self, v, name, title, status="proposed", due="2026-09-04"):
+        text = ("---\ntitle: %s\ntype: commitment\nstatus: %s\n%s%s\n"
+                "origin: call/call_1\naudience:\n  - mara\n---\n\n"
+                "- Обещание: %s\n\nЛюди: [[anna]]\n"
+                % (title, status, "due: %s\n" % due if due else "", self.ЧУЖОЕ, title))
+        p = os.path.join(v, "kb/commitments", name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def правка(self, v, **payload):
+        return cp.apply_correction(v, {"id": "correction_1", "occurred_at": "2026-09-02T18:00:00+03:00",
+                                       "payload": payload})
+
+    def test_сделано_меняет_проекцию_и_пишет_журнал(self):
+        v = self.волт()
+        p = self.карточка(v, "smeta.md", "прислать смету")
+        было = open(p, encoding="utf-8").read()
+        out = self.правка(v, item="прислать смету", status="done")
+        text = open(p, encoding="utf-8").read()
+        self.assertTrue(out["found"])
+        self.assertIn("proposed → done", out["text"])
+        self.assertIn("\nstatus: done\n", text)
+        self.assertNotIn("status: proposed", text)
+        self.assertIn(self.ЧУЖОЕ, text, "чужие ключи фронтматтера пережили правку")
+        self.assertIn("\nПравки:\n- ", text)
+        self.assertIn("correction/correction_1", text, "правка ссылается на событие")
+        # изменились ровно две строки шапки плюс valid_from и хвост тела
+        for line in было.splitlines():
+            if not line.startswith("status:"):
+                self.assertIn(line, text, "нетронутая строка пропала: %r" % line)
+        self.assertNotIn("прислать смету", open(os.path.join(v, "_system/context/now.md"),
+                                                 encoding="utf-8").read(),
+                         "пакет пересобран сразу: сделанное из списка ушло")
+
+    def test_срок_меняется_а_история_остаётся(self):
+        v = self.волт()
+        p = self.карточка(v, "smeta.md", "прислать смету")
+        self.правка(v, item="прислать смету", due="2026-09-05")
+        self.правка(v, item="прислать смету", due="2026-09-06", note="Анна попросила")
+        text = open(p, encoding="utf-8").read()
+        self.assertIn("due: 2026-09-06\n", text)
+        self.assertIn("due_explicit: true", text)
+        self.assertIn("срок 2026-09-04 → 2026-09-05", text, "старый срок в журнале, не стёрт")
+        self.assertIn("срок 2026-09-05 → 2026-09-06; Анна попросила", text)
+        self.assertEqual(text.count("Правки:"), 1)
+
+    def test_не_нашёл_отдаёт_открытые_и_ничего_не_пишет(self):
+        v = self.волт()
+        self.карточка(v, "smeta.md", "прислать смету")
+        self.карточка(v, "old.md", "старое", status="done")
+        out = self.правка(v, item="покрасить забор", status="done")
+        self.assertFalse(out["found"])
+        self.assertEqual(out["open"], ["прислать смету"], "только заголовки, только открытые")
+        self.assertIn("не нашёл", out["text"])
+        self.assertEqual(sorted(os.listdir(os.path.join(v, "kb/commitments"))),
+                         ["old.md", "smeta.md"])
+
+    def test_новая_задача_заводит_карточку(self):
+        v = self.волт()
+        out = self.правка(v, item="покрасить забор", status="open", due="2026-09-05")
+        self.assertIn("created", out)
+        text = open(os.path.join(v, out["created"]), encoding="utf-8").read()
+        for line in ("status: open", "source: mara", "origin: correction/correction_1",
+                     "due: 2026-09-05", "due_explicit: true", "sensitive: true",
+                     "cloud_allowed: false"):
+            self.assertIn(line, text)
+        self.assertIn("покрасить забор — до 2026-09-05",
+                      open(os.path.join(v, "_system/context/now.md"), encoding="utf-8").read())
+
+    def test_два_похожих_не_угадываем(self):
+        v = self.волт()
+        self.карточка(v, "a.md", "позвонить Анне")
+        self.карточка(v, "b.md", "позвонить Пете")
+        out = self.правка(v, item="позвонить", status="done")
+        self.assertEqual(sorted(out["ambiguous"]), ["позвонить Анне", "позвонить Пете"])
+        for name in ("a.md", "b.md"):
+            self.assertIn("status: proposed",
+                          open(os.path.join(v, "kb/commitments", name), encoding="utf-8").read())
+
+    def test_открытая_важнее_закрытой_с_тем_же_названием(self):
+        v = self.волт()
+        self.карточка(v, "old.md", "прислать смету", status="done")
+        self.карточка(v, "new.md", "прислать смету")
+        out = self.правка(v, item="смету прислать", status="cancelled")
+        self.assertEqual(out["card"], "kb/commitments/new.md")
+
+    def test_граница_доверия(self):
+        self.assertIsNone(cp.check_correction({"item": "x", "status": "done"}))
+        self.assertIn("YYYY-MM-DD", cp.check_correction({"item": "x", "due": "пятница"}))
+        self.assertIn("статус", cp.check_correction({"item": "x", "status": "готово"}))
+        self.assertTrue(cp.check_correction({"item": ""}))
+        self.assertIn("нечего", cp.check_correction({"item": "x"}))
+
+
 if __name__ == "__main__":
     unittest.main()
