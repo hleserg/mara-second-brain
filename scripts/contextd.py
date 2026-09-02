@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 
+VAULT = os.environ.get("VAULT", "/srv/vault")
 MAX_BODY = 512 << 20                 # часовой звонок в m4a влезает с запасом
 NEXT = {"asr": "extract", "extract": "project", "project": "digest"}
 STEP = {"asr": "call_asr.py", "extract": "call_extract.py",
@@ -187,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.say(200 if row else 404,
                             dict(row) if row else {"error": "нет такой работы"})
         if p.path == "/v1/context/bootstrap":
-            return self.say(200, bootstrap(con))
+            return self.say(200, bootstrap(con, self.server.vault))
         return self.say(404, {"error": "нет такого пути"})
 
     def do_POST(self):
@@ -281,21 +282,41 @@ def manifest(con, root, event_id):
     }
 
 
-def bootstrap(con):
-    """Минимальный пакет: последний дайджест и глубина очереди. Настоящее
-    наполнение придёт с контекст-брокером (спека 2), но эндпоинт из ТЗ §4
-    существует с самого начала, чтобы клиенты не переписывались потом."""
+def now_pack(vault=None):
+    """Пакет открытых обязательств для инжекта в ход Мары (ТЗ §15).
+
+    Читаем с диска на каждый запрос, без кэша: файл маленький, а лишний слой
+    хранения — лишняя причина однажды отдать вчерашний список. Нет файла —
+    None, а не ошибка: контекст-брокер может быть ещё не собран.
+    """
+    d = os.path.join(vault or VAULT, "_system/context")
+    try:
+        with open(os.path.join(d, "now.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as fh:
+            m = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return {"text": text, "sha256": m.get("sha256"),
+            "generated": m.get("generated"), "items": m.get("items")}
+
+
+def bootstrap(con, vault=None):
+    """Что клиент должен знать, ничего больше не спрашивая: открытые
+    обязательства, последний дайджест, глубина очереди."""
     row = con.execute("select id,event_id,text,items_json,sent_at from digests "
                       "order by sent_at desc limit 1").fetchone()
-    return {"last_digest": dict(row) if row else None,
+    return {"now": now_pack(vault),
+            "last_digest": dict(row) if row else None,
             "queue": con.execute(
                 "select count(*) from jobs where state='ready'").fetchone()[0],
             "pipeline_version": mi.PIPELINE_VERSION}
 
 
-def make_server(root, port=8788):
+def make_server(root, port=8788, vault=None):
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.root = root
+    srv.vault = vault or VAULT
     srv.daemon_threads = True
     return srv
 

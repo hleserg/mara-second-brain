@@ -12,7 +12,10 @@ class Api(unittest.TestCase):
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp()
         mi.ROOT = cls.dir                      # демон и тест смотрят в одну базу
-        cls.srv = contextd.make_server(cls.dir, port=0)
+        cls.vault = tempfile.mkdtemp()
+        os.makedirs(os.path.join(cls.vault, ".git"))
+        os.makedirs(os.path.join(cls.vault, "kb/commitments"))
+        cls.srv = contextd.make_server(cls.dir, port=0, vault=cls.vault)
         cls.base = "http://127.0.0.1:%d" % cls.srv.server_address[1]
         cls.thread = threading.Thread(target=cls.srv.serve_forever, daemon=True)
         cls.thread.start()
@@ -130,6 +133,24 @@ class Api(unittest.TestCase):
         line = contextd.log_line("POST", "/v1/ingest/message", 200,
                                  {"payload": {"text": "секретная фраза"}})
         self.assertNotIn("секретная фраза", line)
+
+    def test_бутстрап_без_пакета_отдаёт_пусто_а_не_ошибку(self):
+        self.assertIsNone(contextd.now_pack(tempfile.mkdtemp()),
+                          "брокер может быть ещё не собран, это не сбой")
+
+    def test_бутстрап_отдаёт_пакет_с_подписью(self):
+        import context_pack
+        with open(os.path.join(self.vault, "kb/commitments", "a.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("---\ntitle: прислать смету\nstatus: proposed\n"
+                     "due: 2026-09-04\n---\n\n- Обещание: тело карточки\n")
+        sha = context_pack.build_now(self.vault)
+        code, d = self.get("/v1/context/bootstrap")
+        self.assertEqual(code, 200)
+        self.assertEqual(d["now"]["sha256"], sha,
+                         "подпись нужна клиенту, чтобы молчать, когда не изменилось")
+        self.assertIn("прислать смету", d["now"]["text"])
+        self.assertNotIn("тело карточки", d["now"]["text"])
 
 
 if __name__ == "__main__":

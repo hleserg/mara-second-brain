@@ -265,6 +265,11 @@ def run(event_id, vault, root=None):
     canon = canon_map(vault)
     written = write_cards(vault, all_cards(ev, extraction, canon))
     con.execute("update events set state='projected' where id=?", (event_id,))
+    # пакет для Мары пересобираем сразу: обязательство, о котором она узнает
+    # только после ночного крона, — это обязательство, о котором она не узнает
+    # (ТЗ §15). Писатель у _system/context один — context_pack, кто бы ни звал.
+    import context_pack
+    context_pack.build_now(vault)
     print("call_project: %s — карточек %d" % (event_id, len(written)))
     return written
 
