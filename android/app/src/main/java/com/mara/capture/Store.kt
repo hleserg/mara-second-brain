@@ -57,6 +57,19 @@ class Settings(ctx: Context) {
         get() = prefs.getLong("sms_notif", 0)
         set(v) = prefs.edit().putLong("sms_notif", v).apply()
 
+    /** Провайдер SMS в последний раз отдал строки. Именно это, а не
+     *  разрешение, решает, кто читает SMS: с разрешением, но с молча
+     *  отказавшим провайдером, слушатель обязан взять SMS на себя. */
+    var smsDirect: Boolean
+        get() = prefs.getBoolean("sms_direct", false)
+        set(v) = prefs.edit().putBoolean("sms_direct", v).apply()
+
+    /** Последняя беседа WhatsApp, как её назвало уведомление — для мастера:
+     *  сойдётся ли с именем файла экспорта, покажет только поле. */
+    var lastChatTitle: String
+        get() = prefs.getString("last_chat", "") ?: ""
+        set(v) = prefs.edit().putString("last_chat", v).apply()
+
     val paired: Boolean get() = baseUrl.isNotEmpty() && token.isNotEmpty()
 }
 
@@ -226,6 +239,8 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         writableDatabase.update("messages", ContentValues().apply {
             put("state", m.state.name); put("attempts", m.attempts); put("error", error)
             put("updated", nowMs)
+            // доставлено — текст на телефоне больше не нужен; ключ остаётся для дедупа
+            if (m.state == JobState.DONE) putNull("body")
         }, "id=?", arrayOf(m.id))
     }
 

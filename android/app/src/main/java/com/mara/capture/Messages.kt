@@ -1,6 +1,5 @@
 package com.mara.capture
 
-import android.Manifest
 import android.app.Notification
 import android.os.Parcelable
 import android.service.notification.NotificationListenerService
@@ -18,29 +17,33 @@ class MessageListener : NotificationListenerService() {
     /** Huawei убивает слушатель. После воскрешения перечитываем то, что ещё
      *  висит в шторке — снятые за время смерти уведомления потеряны, и это
      *  одна из дыр, которые спека признаёт. */
+    /** Хеш и SQLite — не на главном потоке: после воскрешения слушатель
+     *  перечитывает всю шторку разом, а Huawei на ANR скор. */
     override fun onListenerConnected() {
-        runCatching { activeNotifications?.forEach { принять(it) } }
+        val висят = runCatching { activeNotifications?.toList() }.getOrNull() ?: return
+        Thread { висят.forEach { runCatching { принять(it) } } }.start()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        runCatching { принять(sbn) }
+        Thread { runCatching { принять(sbn) } }.start()
     }
 
     private fun принять(sbn: StatusBarNotification) {
         val pkg = sbn.packageName
         if (pkg !in NotificationParse.WHATSAPP && pkg !in NotificationParse.SMS_APPS) return
-        // режимы SMS взаимоисключающие: есть READ_SMS — читаем провайдер,
-        // иначе одно и то же SMS легло бы под двумя ключами
-        if (pkg in NotificationParse.SMS_APPS && Device.granted(this, Manifest.permission.READ_SMS)) return
+        val s = runCatching { Settings(this) }.getOrNull() ?: return
+        // режимы SMS взаимоисключающие, и решает не разрешение, а то, отдал ли
+        // провайдер: иначе одно SMS легло бы под двумя ключами — или ни под одним
+        if (pkg in NotificationParse.SMS_APPS && s.smsDirect) return
         val msgs = NotificationParse.messages(seen(sbn))
         if (msgs.isEmpty()) return
+        msgs.firstOrNull { it.source == "whatsapp" }?.let { s.lastChatTitle = it.chat }
         val q = Queue(this)
         val now = System.currentTimeMillis()
         val zone = ZoneId.systemDefault()
         // WhatsApp на каждое новое перепостит последние несколько — дедуп по ключу
         val новых = msgs.count { q.put(it, MessageJson.build(it, zone), now) }
         if (новых == 0) return
-        val s = runCatching { Settings(this) }.getOrNull() ?: return
         msgs.filter { it.source == "sms" }.maxOfOrNull { it.atMs }
             ?.let { s.lastSmsNotificationMs = maxOf(s.lastSmsNotificationMs, it) }
         if (s.paired) SyncWorker.kick(this, delaySec = 30)   // подождать соседей, слать пачкой

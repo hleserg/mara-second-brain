@@ -127,10 +127,11 @@ def chat_name(path):
 
 def events(msgs, chat, me=None):
     """Группа, если пишут двое и больше, не считая меня. `--me` не дан —
-    свои сообщения идут под именем, как в экспорте; с ключом телефона они
-    тогда не сойдутся, но ответов из шторки и так единицы."""
+    я среди пишущих, значит группа — это трое и больше; свои сообщения
+    тогда идут под именем, как в экспорте, и с ключом телефона не сойдутся,
+    но ответов из шторки и так единицы."""
     другие = {m["sender"] for m in msgs if m["sender"] != me}
-    группа = len(другие) > 1
+    группа = len(другие) > (1 if me else 2)
     for m in msgs:
         own = me is not None and m["sender"] == me
         sender = "" if own else m["sender"]
@@ -154,6 +155,8 @@ def send_all(post, evs, log=print, sleep=time.sleep):
                 n["dup" if r.get("duplicate") else "ok"] += 1
                 break
             except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    raise SystemExit("токен не принят (%d): спарить whatsapp-import заново" % e.code)
                 if 400 <= e.code < 500:
                     log("%s: contextd отверг (%d)" % (ev["source_id"][:12], e.code))
                     n["rejected"] += 1
@@ -204,6 +207,9 @@ def self_check():
     assert evs[0]["source_id"] == message_id(ПАКЕТ, "Семья", "Анна Петрова", "Купи хлеб\nи молоко", 1788347100000)
     один = list(events(parse(ru[:2], tz=tz), "Анна Петрова"))
     assert один[0]["payload"]["chat_type"] == "private"
+    двое = list(events(parse(ru[:3], tz=tz), "Анна Петрова"))
+    assert двое[0]["payload"]["chat_type"] == "private", "без --me двое пишущих — это личный чат"
+    assert list(events(parse(ru, tz=tz), "Семья"))[0]["payload"]["chat_type"] == "group"
 
     assert chat_name("/x/Чат WhatsApp с Анна Петрова.txt") == "Анна Петрова"
     assert chat_name("WhatsApp Chat with Anna.zip") == "Anna"

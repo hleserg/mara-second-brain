@@ -79,6 +79,16 @@ class События(unittest.TestCase):
         ev = list(w.events(self.msgs[:2], "Анна", me="Сергей"))
         self.assertEqual(ev[0]["payload"]["chat_type"], "private")
 
+    def test_без_me_двое_пишущих_тоже_личный(self):
+        self.assertEqual(list(w.events(self.msgs[:2], "Анна"))[0]["payload"]["chat_type"], "private")
+        self.assertEqual(list(w.events(self.msgs, "Семья"))[0]["payload"]["chat_type"], "group")
+
+    def test_плохой_токен_останавливает_импорт(self):
+        def post(ev):
+            raise urllib.error.HTTPError("u", 401, "no", {}, io.BytesIO(b""))
+        with self.assertRaises(SystemExit):
+            w.send_all(post, list(w.events(self.msgs, "Семья")), log=lambda *_: None, sleep=lambda *_: None)
+
     def test_отправка_считает_дубли_и_отвергнутое(self):
         seen = []
 

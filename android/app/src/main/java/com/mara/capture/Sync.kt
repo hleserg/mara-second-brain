@@ -116,10 +116,10 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     private fun сообщения(ctx: Context, q: Queue, api: Api, s: Settings, now: Long) {
         val since = if (s.smsLastId == 0L) maxOf(now - 30L * 24 * 3600_000L, s.lastSmsNotificationMs) else 0L
         val zone = ZoneId.systemDefault()
-        Device.sms(ctx, s.smsLastId, since)?.let { rows ->
-            rows.forEach { (_, m) -> q.put(m, MessageJson.build(m, zone), now) }
-            rows.lastOrNull()?.let { s.smsLastId = it.first }
-        }
+        val rows = Device.sms(ctx, s.smsLastId, since)
+        s.smsDirect = rows != null   // отказал провайдер — слушатель берёт SMS на себя
+        rows?.forEach { (_, m) -> q.put(m, MessageJson.build(m, zone), now) }
+        rows?.lastOrNull()?.let { s.smsLastId = it.first }
         for (m in q.pendingMessages()) {
             val r = api.postMessage(JSONObject(m.body))
             q.saveMessage(m.copy(state = MessageFlow.next(r), attempts = m.attempts + 1), ошибка(r), now)

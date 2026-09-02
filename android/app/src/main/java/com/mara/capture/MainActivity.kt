@@ -113,7 +113,9 @@ class MainActivity : AppCompatActivity() {
             "батарея не ограничена: " + if (безОграничений()) "да" else "нет, нажми кнопку",
             "уведомления (WhatsApp): " + if (слушаем()) "доступ есть" else "нет доступа, нажми кнопку",
             "SMS: " + when {
-                Device.granted(this, Manifest.permission.READ_SMS) -> "напрямую, курсор ${s.smsLastId}"
+                s.smsDirect -> "напрямую, курсор ${s.smsLastId}"
+                слушаем() && Device.granted(this, Manifest.permission.READ_SMS) ->
+                    "провайдер не отдал — через уведомления"
                 слушаем() -> "через уведомления"
                 else -> "нет ни разрешения, ни уведомлений"
             },
@@ -182,6 +184,8 @@ class MainActivity : AppCompatActivity() {
             "SMS в провайдере за неделю: " + (Device.sms(this, 0, System.currentTimeMillis() - 7 * 24 * 3600_000L)
                 ?.size?.toString() ?: "провайдер не отдал (нет разрешения или прошивка)"),
             "слушатель уведомлений: " + if (слушаем()) "включён" else "выключен",
+            // сойдётся ли с именем файла экспорта — вопрос к полю, не к коду
+            "последняя беседа WhatsApp по уведомлению: " + s.lastChatTitle.ifEmpty { "ещё не было" },
         ).joinToString("\n")
     }
 
