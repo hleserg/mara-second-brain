@@ -349,9 +349,9 @@ class Синк:
         return n
 
 
-def poster(url, token):
+def poster(url, token, path="/v1/ingest/email"):
     def post(ev):
-        req = urllib.request.Request(url + "/v1/ingest/email", method="POST",
+        req = urllib.request.Request(url + path, method="POST",
                                      data=json.dumps(ev, ensure_ascii=False).encode("utf-8"))
         req.add_header("Content-Type", "application/json")
         req.add_header("Authorization", "Bearer " + token)
