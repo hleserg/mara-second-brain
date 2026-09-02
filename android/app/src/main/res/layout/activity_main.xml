@@ -62,6 +62,12 @@
             android:text="@string/battery" />
 
         <Button
+            android:id="@+id/notif"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/notif" />
+
+        <Button
             android:id="@+id/copy"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

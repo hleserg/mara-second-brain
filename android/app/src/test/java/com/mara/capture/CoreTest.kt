@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -141,6 +142,114 @@ class CoreTest {
         assertEquals(JobState.FAILED, JobFlow.next(JobState.HASHED, ServerReply(401)))
     }
 
+    // ── сообщения: уведомления и SMS (спека 8–9) ──────────────────────────
+
+    private val ув = NotificationParse.Seen(
+        pkg = "com.whatsapp", postMs = начало, key = "0|com.whatsapp|1|null|10123",
+        summary = false, ongoing = false, title = "Анна Петрова", text = "Купи хлеб",
+        conversationTitle = null, group = false,
+        lines = listOf(NotificationParse.Line("Анна Петрова", "Купи хлеб", начало)),
+    )
+
+    @Test
+    fun `ключ сообщения совпадает с общим фиксом импортёра`() {
+        val f = JSONObject(fixture("whatsapp-message-id.json").readText())
+        assertEquals("разъехались с scripts/whatsapp_import.py — дубли перестанут отсеиваться",
+            f.getString("source_id"),
+            MessageId.of(f.getString("package"), f.getString("chat"), f.getString("sender"),
+                f.getString("text"), f.getLong("at_ms")))
+    }
+
+    @Test
+    fun `сводка группы и постоянное уведомление — не сообщения`() {
+        assertTrue(NotificationParse.messages(ув.copy(summary = true)).isEmpty())
+        assertTrue(NotificationParse.messages(ув.copy(ongoing = true)).isEmpty())
+    }
+
+    @Test
+    fun `WhatsApp без строк MessagingStyle — это «N новых», а не сообщение`() {
+        assertTrue(NotificationParse.messages(ув.copy(lines = emptyList(), text = "3 новых сообщения")).isEmpty())
+    }
+
+    @Test
+    fun `SMS-приложению без стиля разрешён заголовок плюс текст`() {
+        val m = NotificationParse.messages(ув.copy(pkg = "com.huawei.message", lines = emptyList(),
+            title = "+79990000000", text = "код 1234")).single()
+        assertEquals("sms", m.source)
+        assertEquals("+79990000000", m.sender)
+        assertEquals("код 1234", m.text)
+        assertEquals("время — момент показа", начало, m.atMs)
+    }
+
+    @Test
+    fun `чужой пакет не читаем`() {
+        assertTrue(NotificationParse.messages(ув.copy(pkg = "com.example.bank")).isEmpty())
+    }
+
+    @Test
+    fun `группа берёт беседу из conversationTitle, отправителя из строки`() {
+        val m = NotificationParse.messages(ув.copy(conversationTitle = "Семья", group = true)).single()
+        assertEquals("Семья", m.chat)
+        assertEquals("Анна Петрова", m.sender)
+        assertTrue(m.group)
+    }
+
+    @Test
+    fun `строка без отправителя — свой ответ из шторки`() {
+        val m = NotificationParse.messages(ув.copy(lines = listOf(NotificationParse.Line(null, "ок", начало)))).single()
+        assertTrue(m.outgoing)
+        assertEquals("", m.sender)
+    }
+
+    @Test
+    fun `перепост тех же строк даёт тот же ключ`() {
+        val a = NotificationParse.messages(ув).single().id
+        val b = NotificationParse.messages(ув.copy(key = "другой ключ", postMs = начало + 5_000)).single().id
+        assertEquals("WhatsApp перепощивает беседу на каждое новое — дубль должен отсеяться", a, b)
+    }
+
+    @Test
+    fun `пробелы по краям и внутри ключ не меняют, NBSP — меняет`() {
+        val a = MessageId.of("p", "c", "s", " a \n  b ", 0)
+        assertEquals(a, MessageId.of("p", "c", "s", "a b", 0))
+        assertNotEquals("Unicode-нормализации нет: у JVM и Python она разная",
+            a, MessageId.of("p", "c", "s", "a\u00a0b", 0))
+    }
+
+    @Test
+    fun `в теле уведомления только поля §5_1C`() {
+        val p = MessageJson.build(NotificationParse.messages(ув).single(), мск).getJSONObject("payload")
+        assertEquals(setOf("text", "outgoing", "via", "package", "chat_title", "chat_type",
+            "sender_name", "notification_key_hash"), p.keys().asSequence().toSet())
+        assertEquals("хеш ключа, а не сам ключ", 64, p.getString("notification_key_hash").length)
+    }
+
+    @Test
+    fun `SMS из провайдера — номер, имя, направление`() {
+        val m = Message("sms", MessageId.sms("+79990000000", начало, 2, "еду"), chat = "Анна Петрова",
+            sender = "", text = "еду", atMs = начало, outgoing = true, via = "provider",
+            number = "+79990000000", threadId = 3, read = true)
+        val p = MessageJson.build(m, мск).getJSONObject("payload")
+        assertEquals("outgoing", p.getString("direction"))
+        assertEquals("Анна Петрова", p.getString("contact_name"))
+        assertEquals("+79990000000", p.getString("number"))
+        assertFalse(p.has("chat_title"))
+    }
+
+    @Test
+    fun `ключ SMS различает входящее и исходящее с тем же текстом`() {
+        assertNotEquals(MessageId.sms("+7", начало, 1, "ок"), MessageId.sms("+7", начало, 2, "ок"))
+    }
+
+    @Test
+    fun `доставка сообщений — 200 готово, сеть повтор, 401 и 400 сдаёмся`() {
+        assertEquals(JobState.DONE, MessageFlow.next(ServerReply(200, "message_1")))
+        assertEquals(JobState.NEW, MessageFlow.next(ServerReply(0)))
+        assertEquals(JobState.NEW, MessageFlow.next(ServerReply(503)))
+        assertEquals(JobState.FAILED, MessageFlow.next(ServerReply(401)))
+        assertEquals(JobState.FAILED, MessageFlow.next(ServerReply(400)))
+    }
+
     // ── вспомогательное ───────────────────────────────────────────────────
 
     /** Сортируем ключи: JSONObject их порядок не хранит, а сверять надо целиком. */
@@ -152,10 +261,10 @@ class CoreTest {
         else -> o.toString()
     }
 
-    private fun fixture(): File {
+    private fun fixture(name: String = "phone-call-event.json"): File {
         var d: File? = File("").absoluteFile
-        while (d != null && !File(d, "tests/fixtures/phone-call-event.json").exists()) d = d.parentFile
+        while (d != null && !File(d, "tests/fixtures/$name").exists()) d = d.parentFile
         return File(requireNotNull(d) { "не нашёл tests/fixtures — где корень репозитория?" },
-            "tests/fixtures/phone-call-event.json")
+            "tests/fixtures/$name")
     }
 }

@@ -46,8 +46,23 @@ class Settings(ctx: Context) {
         get() = prefs.getLong("last_upload", 0)
         set(v) = prefs.edit().putLong("last_upload", v).apply()
 
+    /** Курсор провайдера SMS: `_id` последнего забранного. 0 — ещё не читали. */
+    var smsLastId: Long
+        get() = prefs.getLong("sms_last_id", 0)
+        set(v) = prefs.edit().putLong("sms_last_id", v).apply()
+
+    /** Последнее SMS, пойманное уведомлением: провайдер при первом заходе
+     *  стартует отсюда, чтобы окно перехода между режимами не дало дублей. */
+    var lastSmsNotificationMs: Long
+        get() = prefs.getLong("sms_notif", 0)
+        set(v) = prefs.edit().putLong("sms_notif", v).apply()
+
     val paired: Boolean get() = baseUrl.isNotEmpty() && token.isNotEmpty()
 }
+
+/** Сообщение в очереди: тело уже собрано, осталось доставить. */
+data class Msg(val id: String, val source: String, val body: String, val state: JobState,
+               val attempts: Int, val atMs: Long)
 
 /** Одна запись очереди: файл плюс всё, что о нём известно на этот момент. */
 data class Job(
@@ -74,21 +89,27 @@ data class Job(
  * Очередь обязана пережить reboot и force-stop (ТЗ §5.1E), поэтому она на
  * диске, а не в памяти воркера.
  */
-class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 2) {
+class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 3) {
 
-    override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL(
-            """create table jobs(
+    private val JOBS = """create table jobs(
                  id text primary key, name text, size integer, mtime integer,
                  state text, attempts integer default 0, sha256 text, event_id text,
                  seen_size integer default -1, seen_mtime integer default -1,
                  seen_at integer default 0, error text, producer text, updated integer)"""
-        )
+    private val MESSAGES = """create table messages(
+                 id text primary key, source text, body text, state text,
+                 attempts integer default 0, error text, at integer, updated integer)"""
+
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL(JOBS); db.execSQL(MESSAGES)
     }
 
-    /** Очередь — кэш: сервер дедуплицирует по хешу, так что пересобрать её дёшево. */
+    /** Миграция добавляющая: снести `jobs` значило бы перехешировать на
+     *  телефоне каждую запись после обновления. Сервер отсеял бы дубли, но
+     *  первое впечатление от обновления было бы «оно всё шлёт заново». */
     override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
-        db.execSQL("drop table if exists jobs"); onCreate(db)
+        if (old < 2) { db.execSQL("drop table if exists jobs"); db.execSQL(JOBS) }
+        if (old < 3) db.execSQL(MESSAGES)
     }
 
     /**
@@ -170,7 +191,45 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
     fun latest(): Job? = pending().lastOrNull()
 
     /** Чужой токен вбили — все работы легли в FAILED. Поправили токен — поднимаем. */
-    fun retryFailed(): Int = writableDatabase.compileStatement(
-        "update jobs set state='NEW', sha256=null, error=null, attempts=0 where state='FAILED'"
-    ).executeUpdateDelete()
+    fun retryFailed(): Int {
+        val db = writableDatabase
+        db.compileStatement("update messages set state='NEW', error=null, attempts=0 where state='FAILED'")
+            .executeUpdateDelete()
+        return db.compileStatement(
+            "update jobs set state='NEW', sha256=null, error=null, attempts=0 where state='FAILED'"
+        ).executeUpdateDelete()
+    }
+
+    // ── сообщения ────────────────────────────────────────────────────────
+
+    /** true — новое. Повтор того же ключа молча отбрасывается: WhatsApp
+     *  перепощивает последние сообщения беседы на каждое новое. */
+    fun put(m: Message, body: org.json.JSONObject, nowMs: Long): Boolean =
+        writableDatabase.insertWithOnConflict("messages", null, ContentValues().apply {
+            put("id", m.id); put("source", m.source); put("body", body.toString())
+            put("state", JobState.NEW.name); put("at", m.atMs); put("updated", nowMs)
+        }, SQLiteDatabase.CONFLICT_IGNORE) != -1L
+
+    fun pendingMessages(limit: Int = 200): List<Msg> {
+        val out = mutableListOf<Msg>()
+        readableDatabase.rawQuery(
+            "select id,source,body,state,attempts,at from messages where state=? order by at limit $limit",
+            arrayOf(JobState.NEW.name)
+        ).use { c ->
+            while (c.moveToNext()) out += Msg(c.getString(0), c.getString(1), c.getString(2),
+                JobState.valueOf(c.getString(3)), c.getInt(4), c.getLong(5))
+        }
+        return out
+    }
+
+    fun saveMessage(m: Msg, error: String?, nowMs: Long) {
+        writableDatabase.update("messages", ContentValues().apply {
+            put("state", m.state.name); put("attempts", m.attempts); put("error", error)
+            put("updated", nowMs)
+        }, "id=?", arrayOf(m.id))
+    }
+
+    fun countMessages(state: JobState): Int =
+        readableDatabase.rawQuery("select count(*) from messages where state=?", arrayOf(state.name))
+            .use { if (it.moveToFirst()) it.getInt(0) else 0 }
 }

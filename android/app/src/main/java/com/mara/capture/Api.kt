@@ -29,8 +29,13 @@ class Api(private val base: String, private val token: String) {
         0
     }
 
-    fun postEvent(body: JSONObject): ServerReply {
-        val c = open("/v1/ingest/event", "POST", auth = true)
+    fun postEvent(body: JSONObject) = post("/v1/ingest/event", body)
+
+    /** Сообщения — тем же путём, что Telegram с doctor'а. */
+    fun postMessage(body: JSONObject) = post("/v1/ingest/message", body)
+
+    private fun post(path: String, body: JSONObject): ServerReply {
+        val c = open(path, "POST", auth = true)
         return try {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")

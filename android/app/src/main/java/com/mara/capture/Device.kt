@@ -7,6 +7,8 @@ import android.database.Cursor
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.CallLog
+import android.provider.ContactsContract
+import android.provider.Telephony
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
 import java.io.InputStream
@@ -134,6 +136,51 @@ object Device {
         } finally {
             runCatching { r.release() }
         }
+    }
+
+    /** Имя по одному номеру — ровно столько, сколько нужно событию (ТЗ §5.1B). */
+    fun contactName(ctx: Context, number: String): String? {
+        if (number.isEmpty() || !granted(ctx, Manifest.permission.READ_CONTACTS)) return null
+        val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+        return runCatching {
+            ctx.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null }
+        }.getOrNull()
+    }
+
+    /**
+     * SMS напрямую из провайдера (ТЗ §14). Курсор — `_id`, ниже него не смотрим;
+     * первый заход ограничен `sinceMs`, чтобы не тащить всю историю аппарата.
+     * SMS-приложением по умолчанию не становимся (§5.1D). Нет разрешения или
+     * прошивка отказала — null, и слушатель уведомлений берёт SMS на себя.
+     */
+    fun sms(ctx: Context, sinceId: Long, sinceMs: Long, limit: Int = 500): List<Pair<Long, Message>>? {
+        if (!granted(ctx, Manifest.permission.READ_SMS)) return null
+        val cols = arrayOf(Telephony.Sms._ID, Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS,
+            Telephony.Sms.DATE, Telephony.Sms.TYPE, Telephony.Sms.BODY, Telephony.Sms.READ)
+        val c = runCatching {
+            ctx.contentResolver.query(Telephony.Sms.CONTENT_URI, cols,
+                "${Telephony.Sms._ID}>? and ${Telephony.Sms.DATE}>=? and ${Telephony.Sms.TYPE} in (?,?)",
+                arrayOf(sinceId.toString(), sinceMs.toString(),
+                    Telephony.Sms.MESSAGE_TYPE_INBOX.toString(), Telephony.Sms.MESSAGE_TYPE_SENT.toString()),
+                "${Telephony.Sms._ID} asc limit $limit")
+        }.getOrNull() ?: return null
+        val имена = HashMap<String, String?>()
+        val out = mutableListOf<Pair<Long, Message>>()
+        c.use {
+            while (it.moveToNext()) {
+                val address = it.getString(2) ?: ""
+                val date = it.getLong(3); val type = it.getInt(4); val body = it.getString(5) ?: ""
+                if (body.isBlank()) continue
+                val своё = type == Telephony.Sms.MESSAGE_TYPE_SENT
+                val имя = имена.getOrPut(address) { contactName(ctx, address) }
+                out += it.getLong(0) to Message("sms", MessageId.sms(address, date, type, body),
+                    chat = имя ?: address, sender = if (своё) "" else (имя ?: address),
+                    text = body, atMs = date, outgoing = своё, via = "provider",
+                    number = address, threadId = it.getLong(1), read = it.getInt(6) != 0)
+            }
+        }
+        return out
     }
 
     /** Кандидаты в производители записи. Список перебираем, показываем найденное. */

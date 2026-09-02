@@ -13,6 +13,7 @@ import android.provider.Settings as AndroidSettings
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.NotificationManagerCompat
 import com.mara.capture.databinding.ActivityMainBinding
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -78,6 +79,9 @@ class MainActivity : AppCompatActivity() {
         b.selftest.setOnClickListener { проверка() }
         b.wizard.setOnClickListener { мастер() }
         b.battery.setOnClickListener { батарея() }
+        b.notif.setOnClickListener {
+            runCatching { startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+        }
         b.copy.setOnClickListener {
             (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                 .setPrimaryClip(ClipData.newPlainText("mara", отчёт))
@@ -107,8 +111,20 @@ class MainActivity : AppCompatActivity() {
             "разрешения: " + НУЖНЫ.filter { Device.granted(this, it) }
                 .joinToString(", ") { it.substringAfterLast('.') }.ifEmpty { "нет" },
             "батарея не ограничена: " + if (безОграничений()) "да" else "нет, нажми кнопку",
+            "уведомления (WhatsApp): " + if (слушаем()) "доступ есть" else "нет доступа, нажми кнопку",
+            "SMS: " + when {
+                Device.granted(this, Manifest.permission.READ_SMS) -> "напрямую, курсор ${s.smsLastId}"
+                слушаем() -> "через уведомления"
+                else -> "нет ни разрешения, ни уведомлений"
+            },
+            "сообщений в очереди: ${q.countMessages(JobState.NEW)}, отправлено: " +
+                "${q.countMessages(JobState.DONE)}, сдалось: ${q.countMessages(JobState.FAILED)}",
         ).joinToString("\n")
     }
+
+    /** Доступ к уведомлениям — не runtime-разрешение, а системный список. */
+    private fun слушаем(): Boolean =
+        NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
 
     // ── самопроверка ─────────────────────────────────────────────────────
 
@@ -163,6 +179,9 @@ class MainActivity : AppCompatActivity() {
             "сопоставился с: " + (совпало?.let {
                 "${it.name ?: it.number} · ${it.direction} · ${it.durationS} с"
             } ?: "ни с чем"),
+            "SMS в провайдере за неделю: " + (Device.sms(this, 0, System.currentTimeMillis() - 7 * 24 * 3600_000L)
+                ?.size?.toString() ?: "провайдер не отдал (нет разрешения или прошивка)"),
+            "слушатель уведомлений: " + if (слушаем()) "включён" else "выключен",
         ).joinToString("\n")
     }
 
@@ -208,6 +227,7 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.READ_CALL_LOG,
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.READ_SMS,
             if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
             else Manifest.permission.READ_EXTERNAL_STORAGE,
         )

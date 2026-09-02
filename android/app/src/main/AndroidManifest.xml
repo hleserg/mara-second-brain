@@ -15,6 +15,9 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- SMS читаем из провайдера (ТЗ §14), SMS-приложением по умолчанию не
+         становимся. Откажет прошивка — те же уведомления, что для WhatsApp. -->
+    <uses-permission android:name="android.permission.READ_SMS" />
 
     <application
         android:allowBackup="false"
@@ -39,6 +42,18 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- WhatsApp без root читается только отсюда (ТЗ §13); из уведомления
+             берутся только поля §5.1C. Доступ включает владелец в системном
+             списке — это не runtime-разрешение. -->
+        <service
+            android:name=".MessageListener"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
         <!-- разговор кончился — через минуту смотрим папку, а не ждём сверки -->
         <receiver

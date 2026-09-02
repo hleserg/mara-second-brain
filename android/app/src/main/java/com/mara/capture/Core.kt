@@ -146,3 +146,130 @@ object JobFlow {
         else -> JobState.FAILED
     }
 }
+
+// ── сообщения: WhatsApp из уведомлений, SMS из провайдера (спека 8–9) ────────
+
+object Sha {
+    fun hex(s: String): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+}
+
+/** Сообщение, каким его видят слушатель уведомлений и провайдер SMS. */
+data class Message(
+    val source: String,          // whatsapp | sms
+    val id: String,              // source_id — ключ, общий с импортёром экспорта
+    val chat: String,            // название беседы; для личной — собеседник
+    val sender: String,          // пусто — своё
+    val text: String,
+    val atMs: Long,
+    val group: Boolean = false,
+    val outgoing: Boolean = false,
+    val via: String = "notification",   // notification | provider
+    val pkg: String? = null,
+    val number: String? = null,
+    val keyHash: String? = null,        // sha256 ключа уведомления, не сам ключ
+    val threadId: Long? = null,
+    val read: Boolean? = null,
+)
+
+object MessageId {
+    /** Только ASCII-пробелы: `\s` у JVM и `str.split()` у Python видят NBSP по-разному. */
+    private val ПРОБЕЛЫ = Regex("[ \\t\\n\\r]+")
+    private const val КРАЯ = " \t\n\r"
+
+    fun normalize(text: String): String =
+        text.trim { it in КРАЯ }.replace(ПРОБЕЛЫ, " ")
+
+    /**
+     * Общий с `scripts/whatsapp_import.py` ключ: одно и то же сообщение из
+     * уведомления и из экспорта чата должно лечь в один `source_id`, иначе
+     * contextd не отсеет дубль. Минута — целым числом эпохи, чтобы зона и
+     * формат не могли разойтись. Пин — tests/fixtures/whatsapp-message-id.json.
+     */
+    fun of(pkg: String, chat: String, sender: String, text: String, atMs: Long): String =
+        Sha.hex("$pkg|$chat|$sender|${normalize(text)}|${Math.floorDiv(atMs, 60_000L)}")
+
+    /** Не `_id` провайдера: dedupe_key на сервере без устройства, и `_id=5`
+     *  нового телефона столкнулся бы с `_id=5` старого. */
+    fun sms(address: String, dateMs: Long, type: Int, body: String): String =
+        Sha.hex("sms|$address|$dateMs|$type|$body")
+}
+
+object NotificationParse {
+    val WHATSAPP = setOf("com.whatsapp", "com.whatsapp.w4b")
+    val SMS_APPS = setOf("com.huawei.message", "com.android.mms",
+        "com.google.android.apps.messaging", "com.samsung.android.messaging")
+
+    /** Одна строка MessagingStyle. sender null — своё: ответ из шторки. */
+    data class Line(val sender: String?, val text: String?, val atMs: Long)
+
+    /** Уведомление, сведённое к значениям ТЗ §5.1C. Bundle сюда не попадает. */
+    data class Seen(
+        val pkg: String, val postMs: Long, val key: String,
+        val summary: Boolean, val ongoing: Boolean,
+        val title: String?, val text: String?, val conversationTitle: String?,
+        val group: Boolean, val lines: List<Line>,
+    )
+
+    /**
+     * Пусто — уведомление не про сообщение: сводка группы, постоянное, WhatsApp
+     * без `EXTRA_MESSAGES` («проверяю сообщения», «N новых» при выключенных
+     * превью — по локалям их регэкспом не ловим). SMS-приложению без
+     * MessagingStyle разрешён простой «заголовок — кто, текст — что».
+     */
+    fun messages(n: Seen): List<Message> {
+        if (n.summary || n.ongoing) return emptyList()
+        val source = when (n.pkg) {
+            in WHATSAPP -> "whatsapp"
+            in SMS_APPS -> "sms"
+            else -> return emptyList()
+        }
+        val chat = (n.conversationTitle ?: n.title ?: "").trim()
+        if (chat.isEmpty()) return emptyList()
+        val lines = when {
+            n.lines.isNotEmpty() -> n.lines
+            source == "sms" && !n.text.isNullOrBlank() -> listOf(Line(n.title, n.text, n.postMs))
+            else -> emptyList()
+        }
+        val keyHash = Sha.hex(n.key)
+        return lines.filter { !it.text.isNullOrBlank() }.map { l ->
+            val own = l.sender == null
+            val sender = if (own) "" else l.sender!!.trim()
+            Message(source, MessageId.of(n.pkg, chat, sender, l.text!!, l.atMs), chat, sender,
+                l.text.trim(), l.atMs, group = n.group, outgoing = own,
+                via = "notification", pkg = n.pkg, keyHash = keyHash)
+        }
+    }
+}
+
+object MessageJson {
+    /** Тело для `POST /v1/ingest/message` — тот же путь, что у Telegram. */
+    fun build(m: Message, zone: ZoneId): JSONObject {
+        val p = JSONObject().put("text", m.text).put("outgoing", m.outgoing).put("via", m.via)
+        m.pkg?.let { p.put("package", it) }
+        if (m.source == "sms") {
+            m.number?.let { p.put("number", it) }
+            if (m.chat.isNotEmpty() && m.chat != m.number) p.put("contact_name", m.chat)
+            p.put("direction", if (m.outgoing) "outgoing" else "incoming")
+            m.threadId?.let { p.put("thread_id", it) }
+            m.read?.let { p.put("read", it) }
+        } else {
+            p.put("chat_title", m.chat).put("chat_type", if (m.group) "group" else "private")
+                .put("sender_name", m.sender)
+        }
+        m.keyHash?.let { p.put("notification_key_hash", it) }
+        return JSONObject().put("source", m.source).put("source_id", m.id)
+            .put("occurred_at", Iso.at(m.atMs, zone)).put("classification", "personal")
+            .put("payload", p)
+    }
+}
+
+object MessageFlow {
+    /** 200 — доставлено (дубль тоже); токен — сдаёмся; сеть и 5xx — повторим;
+     *  прочие 4xx — сервер отверг тело, повтор не поможет. */
+    fun next(reply: ServerReply): JobState = when {
+        reply.code == 200 -> JobState.DONE
+        reply.code == 0 || reply.code >= 500 -> JobState.NEW
+        else -> JobState.FAILED
+    }
+}

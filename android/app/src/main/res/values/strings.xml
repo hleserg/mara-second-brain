@@ -8,5 +8,6 @@
     <string name="selftest">Проверка связи</string>
     <string name="wizard">Мастер: что видит приложение</string>
     <string name="battery">Снять ограничение батареи</string>
+    <string name="notif">Доступ к уведомлениям (WhatsApp, SMS)</string>
     <string name="copy">Скопировать отчёт</string>
 </resources>

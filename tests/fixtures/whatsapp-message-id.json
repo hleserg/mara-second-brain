@@ -1,0 +1,9 @@
+{
+  "package": "com.whatsapp",
+  "chat": "Семья",
+  "sender": "Анна Петрова",
+  "text": "  Купи   хлеб\nи молоко ",
+  "at_ms": 1788347100000,
+  "source_id": "035dddf64d7dd2d065cfb6c164188681d433fe6daad27b662ccba72e2696ec80",
+  "_note": "ключ = sha256(package|chat|sender|text'|floor(at_ms/60000)); text' — trim и схлопнутые ASCII-пробелы, NBSP не трогаем. Сверяют CoreTest (Kotlin) и tests/test_whatsapp_import.py"
+}
