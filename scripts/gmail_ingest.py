@@ -27,6 +27,30 @@ SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 МАКС_ЗАБОР = 3000    # писем за один прогон догона
 ТЕКСТ = 100_000      # символов тела в событии; полное письмо лежит в raw/
 ПОРТ = 8765
+ENV = "/etc/mara/gmail.env"
+
+
+def load_env(path, environ=None):
+    """KEY=VALUE из файла в окружение: у крона нет EnvironmentFile, как у
+    systemd, а `set -a; . файл` перед каждым запуском забудется. Уже
+    выставленное не трогаем. Нет файла — нет входа, ошибки не бывает."""
+    environ = os.environ if environ is None else environ
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return 0
+    n = 0
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip("'\"")
+        if k and v and k not in environ:
+            environ[k] = v
+            n += 1
+    return n
 
 
 def state_dir(root=ROOT):
@@ -588,6 +612,17 @@ def self_check():
             "body": {"data": _b64("Привет", "cp1251")}}
         assert email_event(m)["payload"]["text"] == "Привет"
         assert личный("Me@Gmail.com") and not личный("me@example.com") and not личный("")
+        # env-файл: крон читает его через скрипт, а не через set -a
+        envf = os.path.join(tmp, "gmail.env")
+        with open(envf, "w") as fh:
+            fh.write("# к\nGMAIL_CLIENT_ID=id.apps\nGMAIL_CLIENT_SECRET='sec'\nMARA_CONTEXT_TOKEN=tok\nПУСТО=\n")
+        e = {"GMAIL_CLIENT_ID": "своё"}
+        assert load_env(envf, e) == 2 and e == {"GMAIL_CLIENT_ID": "своё", "GMAIL_CLIENT_SECRET": "sec",
+                                                "MARA_CONTEXT_TOKEN": "tok"}, e
+        e = {}
+        load_env(os.path.join(os.path.dirname(__file__), "..", "install", "gmail.env.example"), e)
+        assert e == {}, "пример без значений ничего не выставляет"
+        assert load_env(os.path.join(tmp, "нет"), {}) == 0
     print("ok: gmail_ingest")
     return 0
 
@@ -595,6 +630,7 @@ def self_check():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--root", default=ROOT)
+    ap.add_argument("--env", default=ENV, help="файл с GMAIL_CLIENT_ID/SECRET и MARA_CONTEXT_TOKEN")
     ap.add_argument("--login", action="store_true", help="одноразовый вход через браузер")
     ap.add_argument("--sync", action="store_true", help="прогон по history (крон)")
     ap.add_argument("--backfill", action="store_true", help="забор истории за --days")
@@ -606,6 +642,7 @@ def main():
     try:
         if a.self_check:
             return self_check()
+        load_env(a.env)
         if a.login:
             login(home, _env("GMAIL_CLIENT_ID"), _env("GMAIL_CLIENT_SECRET"))
             return 0

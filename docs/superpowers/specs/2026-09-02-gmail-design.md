@@ -104,9 +104,11 @@ Google убрал OOB-редирект в 2022; на безголовом doctor
 
 ```
 ssh -L 8765:127.0.0.1:8765 doctor
-set -a; . /etc/mara/gmail.env; set +a
 ~/mara-second-brain/scripts/gmail_ingest.py --login
 ```
+
+Скрипт читает `/etc/mara/gmail.env` сам (`--env`): у крона нет
+`EnvironmentFile`, а «экспортируй перед запуском» забывается.
 
 Скрипт печатает ссылку, слушает 8765 на doctor, браузер ноутбука через
 проброс возвращает код. PKCE S256, `access_type=offline`, `prompt=consent`
@@ -141,7 +143,9 @@ history с добавлением/удалением/корзиной, два о
    Credentials → OAuth client ID → Desktop app; включить Gmail API; в
    `/etc/mara/gmail.env` вписать `GMAIL_CLIENT_ID` и `GMAIL_CLIENT_SECRET`.
    Consent screen перевести в Production (Publish app): в режиме Testing
-   refresh token живёт 7 дней. Проверку Google проходить не нужно.
+   refresh token живёт 7 дней. Проверку Google проходить не нужно; если
+   для restricted scope `gmail.readonly` публикацию не дадут — остаться в
+   Testing и повторять `--login` еженедельно.
 2. `--login` через `ssh -L`, как выше.
 3. Брать ли `CATEGORY_PROMOTIONS` и `CATEGORY_SOCIAL`. Сейчас берутся.
 4. Глубина первого забора: 30 дней по умолчанию, `--backfill --days N`

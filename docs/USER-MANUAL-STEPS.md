@@ -200,7 +200,10 @@ printf 'nat on en1 from 100.64.0.0/10 to any -> (en1)\n' | sudo pfctl -ef -
    screen (External; после заполнения нажать **Publish app** — в режиме
    Testing Google убивает refresh token через 7 дней, и вход пришлось бы
    повторять еженедельно; проверку приложения проходить не нужно, останется
-   лишь экран «не проверено») → Credentials → Create credentials →
+   лишь экран «не проверено». `gmail.readonly` — restricted scope: если
+   Google откажется публиковать без проверки, остаться в Testing, добавить
+   свой адрес в Test users и повторять `--login` раз в неделю) →
+   Credentials → Create credentials →
    OAuth client ID → тип **Desktop app**.
    `Client ID` и `Client secret` вписать в `/etc/mara/gmail.env` в строки
    `GMAIL_CLIENT_ID=` и `GMAIL_CLIENT_SECRET=`.
@@ -209,9 +212,10 @@ printf 'nat on en1 from 100.64.0.0/10 to any -> (en1)\n' | sudo pfctl -ef -
 
    ```bash
    ssh -L 8765:127.0.0.1:8765 doctor
-   set -a; . /etc/mara/gmail.env; set +a
    ~/mara-second-brain/scripts/gmail_ingest.py --login
    ```
+
+   Скрипт сам читает `/etc/mara/gmail.env`, ничего экспортировать не надо.
 
    Скрипт напечатает ссылку — открыть в браузере ноутбука, выбрать личный
    аккаунт, разрешить «читать письма». Google покажет «приложение не
