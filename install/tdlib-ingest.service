@@ -1,0 +1,23 @@
+[Unit]
+Description=Mara tdlib-ingest: личный Telegram через TDLib в contextd
+After=network-online.target contextd.service
+Wants=contextd.service
+
+[Service]
+Type=simple
+User=sergey
+Environment=MARA_BLOBS=/srv/mara-blobs
+# api_id/api_hash с my.telegram.org и токен устройства tdlib — только здесь
+EnvironmentFile=/etc/mara/tdlib.env
+ExecStart=/home/sergey/.local/share/mara/venv-tdlib/bin/python /home/sergey/mara-second-brain/scripts/tdlib_ingest.py --serve
+# без входа демон выходит с кодом 2; минута между попытками, чтобы это не был шторм
+Restart=always
+RestartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/srv/mara-blobs
+
+[Install]
+WantedBy=multi-user.target

@@ -194,6 +194,24 @@ def event_row(con, event_id):
     return d
 
 
+def message_state(con, source, key):
+    """Сообщение с учётом правок и удалений (ТЗ §11): в базе три события,
+    наружу одно состояние. Последняя ревизия побеждает, надгробие — None.
+    Единственный вход для чтения переписки: сырые строки events — не интерфейс.
+    """
+    rows = con.execute("select source_id, payload_json from events where source=? "
+                       "and (source_id=? or source_id like ?) order by occurred, received",
+                       (source, key, key + "/%")).fetchall()
+    state = None
+    for r in rows:
+        p = json.loads(r["payload_json"] or "{}")
+        if p.get("tombstone_of") == key:
+            return None
+        if r["source_id"] == key or p.get("revision_of") == key:
+            state = p
+    return state
+
+
 def self_check():
     import tempfile
     d = tempfile.mkdtemp()

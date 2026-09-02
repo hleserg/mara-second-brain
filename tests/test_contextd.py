@@ -211,6 +211,38 @@ class Api(unittest.TestCase):
         self.assertTrue(снова["duplicate"])
         self.assertIsNone(снова["applied"], "дубль второй раз не применяется")
 
+    def test_правка_и_удаление_сообщения_ревизии_а_не_потери(self):
+        """ТЗ §11: правки и удаления — ревизии и надгробия. Три события в базе,
+        одно состояние наружу через mara_ingest.message_state."""
+        новое = {"source": "telegram", "source_id": "7/1", "occurred_at": "2026-09-02T10:00:00+03:00",
+                 "payload": {"chat_id": 7, "message_id": 1, "text": "приду в пять"}}
+        правка = {"source": "telegram", "source_id": "7/1/edit/1756800600",
+                  "occurred_at": "2026-09-02T10:10:00+03:00",
+                  "payload": {"chat_id": 7, "message_id": 1, "text": "приду в шесть", "revision_of": "7/1"}}
+        удаление = {"source": "telegram", "source_id": "7/1/deleted",
+                    "occurred_at": "2026-09-02T10:20:00+03:00",
+                    "payload": {"chat_id": 7, "message_id": 1, "tombstone_of": "7/1"}}
+        ids = set()
+        for ev in (новое, правка):
+            code, r = self.post("/v1/ingest/message", ev)
+            self.assertEqual(code, 200)
+            self.assertFalse(r["duplicate"], "правка с тем же ключом пропала бы как дубль")
+            ids.add(r["event_id"])
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(mi.message_state(self.con, "telegram", "7/1")["text"], "приду в шесть")
+        _, r = self.post("/v1/ingest/message", удаление)
+        self.assertFalse(r["duplicate"])
+        self.assertIsNone(mi.message_state(self.con, "telegram", "7/1"), "надгробие гасит сообщение")
+        self.assertEqual(self.con.execute("select count(*) from events where source='telegram' "
+                                          "and source_id like '7/1%'").fetchone()[0], 3)
+        self.assertIsNone(mi.message_state(self.con, "telegram", "7/2"), "чужого ключа нет — None")
+        _, снова = self.post("/v1/ingest/message", новое)
+        self.assertTrue(снова["duplicate"], "повторная доставка того же сообщения — дубль")
+
+    def test_метрика_tdlib_без_демона_минус_один(self):
+        with urllib.request.urlopen(self.base + "/metrics", timeout=5) as r:
+            self.assertIn("mara_tdlib_lag_seconds -1", r.read().decode("utf-8"))
+
     def test_кривая_правка_400_и_не_в_базе(self):
         code, r = self.post("/v1/ingest/event", {
             "kind": "correction", "source": "mara", "source_id": "k2",

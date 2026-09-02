@@ -80,8 +80,17 @@ def log_line(method, path, code, payload=None):
     return "%s %s %s -> %s%s" % (mi.now_iso(), method, path, code, extra)
 
 
-def metrics(con):
+def tdlib_lag(root):
+    """Возраст сердцебиения демона TDLib; −1 — демона ещё не запускали."""
+    try:
+        return int(time.time() - os.stat(os.path.join(root, "tdlib", "heartbeat")).st_mtime)
+    except OSError:
+        return -1
+
+
+def metrics(con, root=None):
     """Считаем запросом, а не копим в памяти: перезапуск не теряет счётчики."""
+    root = root or mi.ROOT
     q = lambda sql, *a: con.execute(sql, a).fetchone()[0]
     last = con.execute("select received from events order by received desc limit 1").fetchone()
     lag = 0
@@ -111,6 +120,7 @@ def metrics(con):
         ("mara_mobile_last_seen_seconds", mobile),
         ("mara_mobile_pending_uploads",
          q("select count(*) from events where state='new' and blob_sha256 is not null")),
+        ("mara_tdlib_lag_seconds", tdlib_lag(root)),
     ]
     return "".join("%s %s\n" % (k, v) for k, v in rows)
 
@@ -181,7 +191,7 @@ class Handler(BaseHTTPRequestHandler):
         if p.path == "/healthz":
             return self.say(200, health(con, self.server.root))
         if p.path == "/metrics":
-            return self.say(200, metrics(con), ctype="text/plain; version=0.0.4")
+            return self.say(200, metrics(con, self.server.root), ctype="text/plain; version=0.0.4")
         if p.path.startswith("/v1/jobs/"):
             row = con.execute("select id,kind,state,attempts,next_at,last_error "
                               "from jobs where id=?", (p.path[9:],)).fetchone()
