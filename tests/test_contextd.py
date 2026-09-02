@@ -239,9 +239,11 @@ class Api(unittest.TestCase):
         _, снова = self.post("/v1/ingest/message", новое)
         self.assertTrue(снова["duplicate"], "повторная доставка того же сообщения — дубль")
 
-    def test_метрика_tdlib_без_демона_минус_один(self):
+    def test_метрики_источников_без_подключения_минус_один(self):
         with urllib.request.urlopen(self.base + "/metrics", timeout=5) as r:
-            self.assertIn("mara_tdlib_lag_seconds -1", r.read().decode("utf-8"))
+            body = r.read().decode("utf-8")
+        for m in ("mara_tdlib_lag_seconds -1", "mara_gmail_lag_seconds -1"):
+            self.assertIn(m, body)
 
     def test_кривая_правка_400_и_не_в_базе(self):
         code, r = self.post("/v1/ingest/event", {

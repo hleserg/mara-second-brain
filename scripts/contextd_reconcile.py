@@ -131,16 +131,21 @@ def ретеншен_просрочен(con):
                     "записей ждут уборки: %d" % len(late), count=len(late))]
 
 
-def телеграм_жив(root):
-    """Сердцебиение демона TDLib старше часа — связи нет или демон лежит.
-    Файла нет вовсе — демон ещё не подключали, это состояние, а не находка."""
-    p = os.path.join(root, "tdlib", "heartbeat")
-    if not os.path.exists(p):
-        return []
-    age = int(time.time() - os.stat(p).st_mtime)
-    if age <= 3600:
-        return []
-    return [находка("telegram-tdlib", "warn", "демон TDLib молчит %d мин" % (age // 60))]
+ИСТОЧНИКИ = (("telegram-tdlib", "tdlib", "демон TDLib"), ("gmail", "gmail", "синк Gmail"))
+
+
+def сердцебиение(root):
+    """Сердцебиение источника старше часа — связи нет или процесс лежит.
+    Файла нет вовсе — источник ещё не подключали, это состояние, а не находка."""
+    out = []
+    for check, name, кто in ИСТОЧНИКИ:
+        p = os.path.join(root, name, "heartbeat")
+        if not os.path.exists(p):
+            continue
+        age = int(time.time() - os.stat(p).st_mtime)
+        if age > 3600:
+            out.append(находка(check, "warn", "%s молчит %d мин" % (кто, age // 60)))
+    return out
 
 
 def dlq(con):
@@ -161,7 +166,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB):
     out += транскрипт_без_извлечения(con, root)
     out += лаг_индекса(vault, bm_db)
     out += ретеншен_просрочен(con)
-    out += телеграм_жив(root)
+    out += сердцебиение(root)
     out += dlq(con)
     return out
 
@@ -213,9 +218,13 @@ def self_check():
                        (eid,)).fetchone()["state"] == "dlq", "работа осталась в ретраях"
     hb = os.path.join(root, "tdlib", "heartbeat")
     os.makedirs(os.path.dirname(hb)); open(hb, "w").close()
-    assert телеграм_жив(root) == [], "свежее сердцебиение — не находка"
+    assert сердцебиение(root) == [], "свежее сердцебиение — не находка"
     os.utime(hb, (time.time() - 7200, time.time() - 7200))
-    assert телеграм_жив(root)[0]["check"] == "telegram-tdlib", "молчание два часа — warn"
+    assert [f["check"] for f in сердцебиение(root)] == ["telegram-tdlib"], "молчание два часа — warn"
+    gh = os.path.join(root, "gmail", "heartbeat")
+    os.makedirs(os.path.dirname(gh)); open(gh, "w").close()
+    os.utime(gh, (time.time() - 7200, time.time() - 7200))
+    assert [f["check"] for f in сердцебиение(root)] == ["telegram-tdlib", "gmail"], "второй источник — вторая находка"
     tp = mi.transcript_path(root, eid)
     os.makedirs(os.path.dirname(tp), mode=0o700, exist_ok=True)
     open(tp, "w").close()

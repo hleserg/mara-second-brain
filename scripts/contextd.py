@@ -80,10 +80,10 @@ def log_line(method, path, code, payload=None):
     return "%s %s %s -> %s%s" % (mi.now_iso(), method, path, code, extra)
 
 
-def tdlib_lag(root):
-    """Возраст сердцебиения демона TDLib; −1 — демона ещё не запускали."""
+def heartbeat_lag(root, name):
+    """Возраст сердцебиения источника (tdlib, gmail); −1 — его ещё не подключали."""
     try:
-        return int(time.time() - os.stat(os.path.join(root, "tdlib", "heartbeat")).st_mtime)
+        return int(time.time() - os.stat(os.path.join(root, name, "heartbeat")).st_mtime)
     except OSError:
         return -1
 
@@ -120,7 +120,8 @@ def metrics(con, root=None):
         ("mara_mobile_last_seen_seconds", mobile),
         ("mara_mobile_pending_uploads",
          q("select count(*) from events where state='new' and blob_sha256 is not null")),
-        ("mara_tdlib_lag_seconds", tdlib_lag(root)),
+        ("mara_tdlib_lag_seconds", heartbeat_lag(root, "tdlib")),
+        ("mara_gmail_lag_seconds", heartbeat_lag(root, "gmail")),
     ]
     return "".join("%s %s\n" % (k, v) for k, v in rows)
 
