@@ -151,6 +151,16 @@ class Api(unittest.TestCase):
                          "подпись нужна клиенту, чтобы молчать, когда не изменилось")
         self.assertIn("прислать смету", d["now"]["text"])
         self.assertNotIn("тело карточки", d["now"]["text"])
+    def test_запрос_контекста_отдаёт_то_что_есть_а_не_обещание(self):
+        import context_pack
+        with open(os.path.join(self.vault, "kb/commitments", "b.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("---\ntitle: позвонить в банк\nstatus: open\n---\n")
+        context_pack.build_now(self.vault)
+        code, d = self.post("/v1/context/query", {"text": "что там с банком"})
+        self.assertEqual(code, 200)
+        self.assertEqual(len(d["packs"]), 1, "пакет ровно один и это now")
+        self.assertIn("позвонить в банк", d["packs"][0]["text"])
 
 
 if __name__ == "__main__":

@@ -220,8 +220,12 @@ class Handler(BaseHTTPRequestHandler):
             print(log_line("POST", p.path, 200, data), flush=True)
             return self.say(200, {"event_id": eid, "duplicate": dup, "need_blob": need})
         if p.path == "/v1/context/query":
-            return self.say(200, {"packs": [], "entities": [],
-                                  "note": "наполняется контекст-брокером, спека 2"})
+            # пакетов по сущностям нет и не заводится, пока now.md влезает в
+            # бюджет (docs/superpowers/specs/2026-09-02-context-broker-design.md).
+            # Отдаём единственный существующий, чтобы клиент не гадал.
+            пакет = now_pack(self.server.vault)
+            return self.say(200, {"packs": [пакет] if пакет else [], "entities": [],
+                                  "note": "пакет один — now; по сущностям их нет"})
         return self.say(404, {"error": "нет такого пути"})
 
 
