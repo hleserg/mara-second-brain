@@ -2,3 +2,5 @@ name: mara-context
 version: 1.0.0
 description: "Открытые обязательства Серёги приезжают в ход Мары до первого вызова инструмента."
 author: "Клод"
+provides_hooks:
+  - pre_llm_call
