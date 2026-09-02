@@ -19,8 +19,11 @@
          становимся. Откажет прошивка — те же уведомления, что для WhatsApp. -->
     <uses-permission android:name="android.permission.READ_SMS" />
 
+    <!-- http без TLS: сервер виден только через WireGuard тайлнета, а без этого
+         флага с targetSdk 28+ любой запрос падает исключением ещё до сети -->
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.DayNight">

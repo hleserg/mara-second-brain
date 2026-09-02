@@ -22,10 +22,14 @@ class Api(private val base: String, private val token: String) {
             if (auth) setRequestProperty("Authorization", "Bearer $token")
         }
 
+    /** Почему был ноль: класс и начало сообщения; токена в них не бывает. */
+    @Volatile var lastError: String? = null
+
     /** Код ответа, либо 0 — «сети не было». Ноль отличается от 5xx только в логе. */
     private fun code(c: HttpURLConnection): Int = try {
-        c.responseCode
+        c.responseCode.also { lastError = null }
     } catch (e: Exception) {
+        lastError = e.javaClass.simpleName + (e.message?.let { ": " + it.take(100) } ?: "")
         0
     }
 

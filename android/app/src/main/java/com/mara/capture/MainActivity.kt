@@ -139,10 +139,11 @@ class MainActivity : AppCompatActivity() {
         Thread {
             val api = Api(s.baseUrl, s.token)
             val жив = api.health()
+            val почему = api.lastError   // до tokenOk, тот перезапишет
             val токен = api.tokenOk()
             s.lastContactMs = System.currentTimeMillis()
             val текст = listOf(
-                "сервер жив: " + if (жив == 200) "да" else "нет (ответ $жив)",
+                "сервер жив: " + if (жив == 200) "да" else "нет (ответ $жив${почему?.let { ", $it" } ?: ""})",
                 "токен принят: " + when (токен) {
                     404 -> "да"
                     401 -> "нет, токен не тот"
