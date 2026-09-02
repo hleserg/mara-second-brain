@@ -52,6 +52,22 @@ def load_env(path):
             k, v = l.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
+def holds_from_cloud(head):
+    """Причина, по которой карточку нельзя отдавать облачной модели, или None.
+
+    `sensitive: true` был единственным рычагом с настоящим исполнением, поля из
+    ТЗ §10 (`cloud_allowed`, `model_scope`) оставались декларацией. Теперь все
+    три живут в одной функции: разъехавшись по разным местам, они разошлись бы
+    и по смыслу, а заметил бы это только тот, чей звонок уехал в OpenRouter.
+    """
+    if re.search(r"(?m)^sensitive:\s*['\"]?true", head):
+        return "sensitive: true"
+    if re.search(r"(?m)^cloud_allowed:\s*['\"]?false", head):
+        return "cloud_allowed: false"
+    if re.search(r"(?m)^model_scope:\s*['\"]?local-only", head):
+        return "model_scope: local-only"
+    return None
+
 def index(vault):
     """Реестр сущностей. Нет файла — пустой список: и промпт останется с
     запретом на любые ссылки, и links от модели отфильтруются в ноль."""
@@ -183,7 +199,8 @@ def main():
         # Только фронтматтер: карточка про работу с фронтматтером легко
         # содержит строку "sensitive: true" в теле, и задача висела бы вечно.
         head = open(card, encoding="utf-8").read().split("\n---", 2)[0]
-        if re.search(r"(?m)^sensitive:\s*['\"]?true", head):
+        hold = holds_from_cloud(head)
+        if hold:
             held += 1; continue                        # §8.3.3 — облако не трогает
         if re.search(r"(?m)^distilled:\s*['\"]?true", head):
             # Задача пережила карточку: bisync мог воскресить её с устройства,
