@@ -61,7 +61,7 @@
 **Интерфейсы:**
 - Даёт: `queue_worker.holds_from_cloud(head: str) -> str | None` — возвращает причину, по которой карточку нельзя слать в облако, или `None`.
 
-- [ ] **Шаг 1: фикстура приватной карточки**
+- [x] **Шаг 1: фикстура приватной карточки**
 
 ```bash
 mkdir -p tests/fixtures
@@ -88,7 +88,7 @@ EOF
 
 Заметь: `sensitive: false`. Смысл фикстуры в том, что старая защита её пропускает, а новая обязана удержать.
 
-- [ ] **Шаг 2: падающий тест**
+- [x] **Шаг 2: падающий тест**
 
 ```python
 # tests/test_cloud_boundary.py
@@ -129,12 +129,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 3: убедиться, что тест падает**
+- [x] **Шаг 3: убедиться, что тест падает**
 
 Запуск: `python3 -m unittest tests.test_cloud_boundary -v`
 Ожидание: FAIL, `module 'queue_worker' has no attribute 'holds_from_cloud'`.
 
-- [ ] **Шаг 4: минимальная реализация в `scripts/queue-worker.py`**
+- [x] **Шаг 4: минимальная реализация в `scripts/queue-worker.py`**
 
 Рядом с существующей проверкой `sensitive` (около строки 186) появляется функция, и существующая ветка начинает звать её:
 
@@ -164,12 +164,12 @@ def holds_from_cloud(head):
             continue
 ```
 
-- [ ] **Шаг 5: тесты зелёные**
+- [x] **Шаг 5: тесты зелёные**
 
 Запуск: `python3 -m unittest tests.test_cloud_boundary -v`
 Ожидание: PASS, три теста.
 
-- [ ] **Шаг 6: скрипт прогона**
+- [x] **Шаг 6: скрипт прогона**
 
 ```bash
 cat > scripts/run-tests.sh <<'EOF'
@@ -191,7 +191,7 @@ EOF
 chmod +x scripts/run-tests.sh
 ```
 
-- [ ] **Шаг 7: прогон и коммит**
+- [x] **Шаг 7: прогон и коммит**
 
 Запуск: `./scripts/run-tests.sh`
 Ожидание: unittest зелёный; `self-check` части скриптов может ругаться на отсутствие волта на этой машине — это фиксируется в выводе, но не правится в этой задаче.
@@ -220,7 +220,7 @@ git commit -m "тесты: cloud_allowed держит карточку так ж
   - `next_delay(attempts) -> int` — секунды до следующей попытки с джиттером.
   - `blob_path(root, sha256, ext) -> str`
 
-- [ ] **Шаг 1: падающие тесты**
+- [x] **Шаг 1: падающие тесты**
 
 ```python
 # tests/test_mara_ingest.py
@@ -290,12 +290,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 2: убедиться, что падает**
+- [x] **Шаг 2: убедиться, что падает**
 
 Запуск: `python3 -m unittest tests.test_mara_ingest -v`
 Ожидание: FAIL, `No module named 'mara_ingest'`.
 
-- [ ] **Шаг 3: реализация**
+- [x] **Шаг 3: реализация**
 
 ```python
 #!/usr/bin/env python3
@@ -448,12 +448,12 @@ if __name__ == "__main__":
                      print("библиотека, запускать нечего") or 0)
 ```
 
-- [ ] **Шаг 4: тесты зелёные**
+- [x] **Шаг 4: тесты зелёные**
 
 Запуск: `python3 -m unittest tests.test_mara_ingest -v`
 Ожидание: PASS, семь тестов.
 
-- [ ] **Шаг 5: коммит**
+- [x] **Шаг 5: коммит**
 
 ```bash
 git add scripts/mara_ingest.py tests/test_mara_ingest.py
@@ -472,7 +472,7 @@ git commit -m "приём: дедуп по содержимому, аренда 
 - Потребляет: всё из `mara_ingest`.
 - Даёт: `make_server(root, port=0) -> ThreadingHTTPServer` для тестов; `pair(con, name) -> (device_id, token)`; конвейер `NEXT = {"asr": "extract", "extract": "project", "project": "digest"}`.
 
-- [ ] **Шаг 1: падающие тесты**
+- [x] **Шаг 1: падающие тесты**
 
 ```python
 # tests/test_contextd.py
@@ -553,12 +553,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 2: убедиться, что падает**
+- [x] **Шаг 2: убедиться, что падает**
 
 Запуск: `python3 -m unittest tests.test_contextd -v`
 Ожидание: FAIL, `No module named 'contextd'`.
 
-- [ ] **Шаг 3: реализация демона**
+- [x] **Шаг 3: реализация демона**
 
 Ключевые куски (полный файл собирается из них):
 
@@ -685,12 +685,12 @@ def metrics(con):
     return "".join("%s %s\n" % (k, v) for k, v in lines)
 ```
 
-- [ ] **Шаг 4: тесты зелёные**
+- [x] **Шаг 4: тесты зелёные**
 
 Запуск: `python3 -m unittest tests.test_contextd -v`
 Ожидание: PASS, шесть тестов.
 
-- [ ] **Шаг 5: юнит systemd и .gitignore**
+- [x] **Шаг 5: юнит systemd и .gitignore**
 
 ```bash
 cat > install/contextd.service <<'EOF'
@@ -715,7 +715,7 @@ EOF
 printf '%s\n' '' '# приёмник ambient memory: база и блобы живут вне репо' 'contextd.db' '*.part' >> .gitignore
 ```
 
-- [ ] **Шаг 6: коммит**
+- [x] **Шаг 6: коммит**
 
 ```bash
 git add scripts/contextd.py tests/test_contextd.py install/contextd.service .gitignore
@@ -736,7 +736,7 @@ git commit -m "contextd: приём, аренда работ, конвейер �
   - `transcribe(wav_path, base_url) -> list[dict]` — сегменты со спанами.
   - `run(event_id) -> str` — путь к записанному `transcripts/<event_id>.jsonl`.
 
-- [ ] **Шаг 1: падающие тесты**
+- [x] **Шаг 1: падающие тесты**
 
 ```python
 # tests/test_call_asr.py
@@ -790,12 +790,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 2: убедиться, что падает**
+- [x] **Шаг 2: убедиться, что падает**
 
 Запуск: `python3 -m unittest tests.test_call_asr -v`
 Ожидание: FAIL, модуля нет.
 
-- [ ] **Шаг 3: реализация**
+- [x] **Шаг 3: реализация**
 
 ```python
 #!/usr/bin/env python3
@@ -888,12 +888,12 @@ def run(event_id, root=None):
 
 `--self-check` проверяет `slice_plan` на трёх длительностях и наличие `ffmpeg`/`ffprobe`, наружу не ходит.
 
-- [ ] **Шаг 4: тесты зелёные**
+- [x] **Шаг 4: тесты зелёные**
 
 Запуск: `python3 -m unittest tests.test_call_asr -v`
 Ожидание: PASS, четыре теста.
 
-- [ ] **Шаг 5: коммит**
+- [x] **Шаг 5: коммит**
 
 ```bash
 git add scripts/call_asr.py tests/test_call_asr.py
@@ -915,7 +915,7 @@ git commit -m "asr: режем по 25 секунд с перекрытием, �
   - `normalize(raw: dict, occurred_at: str) -> dict` — правила порогов, спанов, дедлайнов.
   - `run(event_id) -> str` — путь к `extractions/<event_id>.json`.
 
-- [ ] **Шаг 1: фикстуры**
+- [x] **Шаг 1: фикстуры**
 
 ```bash
 cat > tests/fixtures/transcript-anna.jsonl <<'EOF'
@@ -924,7 +924,7 @@ cat > tests/fixtures/transcript-anna.jsonl <<'EOF'
 EOF
 ```
 
-- [ ] **Шаг 2: падающие тесты**
+- [x] **Шаг 2: падающие тесты**
 
 ```python
 # tests/test_call_extract.py
@@ -988,12 +988,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 3: убедиться, что падает**
+- [x] **Шаг 3: убедиться, что падает**
 
 Запуск: `python3 -m unittest tests.test_call_extract -v`
 Ожидание: FAIL, модуля нет.
 
-- [ ] **Шаг 4: реализация**
+- [x] **Шаг 4: реализация**
 
 ```python
 #!/usr/bin/env python3
@@ -1073,12 +1073,12 @@ def normalize(raw, occurred_at):
 
 Вызов модели: `POST /api/chat`, `"format": SCHEMA`, `"options": {"temperature": 0}`, промпт из волта `_system/prompts/call-extract.md`, текст транскрипта с явными пометками спанов `[s0001 00:00–00:25]`, чтобы модели было чем заполнить `evidence`.
 
-- [ ] **Шаг 5: тесты зелёные**
+- [x] **Шаг 5: тесты зелёные**
 
 Запуск: `python3 -m unittest tests.test_call_extract -v`
 Ожидание: PASS, семь тестов.
 
-- [ ] **Шаг 6: коммит**
+- [x] **Шаг 6: коммит**
 
 ```bash
 git add scripts/call_extract.py tests/test_call_extract.py tests/fixtures
@@ -1099,7 +1099,7 @@ git commit -m "извлечение: модель предлагает, прав
   - `commitment_cards(event, extraction, canon) -> list[tuple[str, str]]`
   - `run(event_id, vault) -> list[str]` — записанные пути.
 
-- [ ] **Шаг 1: падающие тесты**
+- [x] **Шаг 1: падающие тесты**
 
 ```python
 # tests/test_call_project.py
@@ -1157,12 +1157,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 2: убедиться, что падает**
+- [x] **Шаг 2: убедиться, что падает**
 
 Запуск: `python3 -m unittest tests.test_call_project -v`
 Ожидание: FAIL.
 
-- [ ] **Шаг 3: реализация**
+- [x] **Шаг 3: реализация**
 
 Ключевое — сборка фронтматтера ровно в том виде, который понимает `vault_common`:
 
@@ -1205,12 +1205,12 @@ def stamp(ms):
             os.replace(tmp, path)
 ```
 
-- [ ] **Шаг 4: тесты зелёные**
+- [x] **Шаг 4: тесты зелёные**
 
 Запуск: `python3 -m unittest tests.test_call_project -v`
 Ожидание: PASS, шесть тестов.
 
-- [ ] **Шаг 5: коммит**
+- [x] **Шаг 5: коммит**
 
 ```bash
 git add scripts/call_project.py tests/test_call_project.py
@@ -1227,7 +1227,7 @@ git commit -m "проекция: карточка разговора и обяз
 - Изменить: `scripts/daily-page.py`, `scripts/daily-summary.py`, `scripts/entity-link.py`
 - Создать: `tests/test_existing_scripts.py`
 
-- [ ] **Шаг 1: падающие тесты**
+- [x] **Шаг 1: падающие тесты**
 
 ```python
 # tests/test_existing_scripts.py
@@ -1255,12 +1255,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 2: убедиться, что падает**
+- [x] **Шаг 2: убедиться, что падает**
 
 Запуск: `python3 -m unittest tests.test_existing_scripts -v`
 Ожидание: FAIL, три теста.
 
-- [ ] **Шаг 3: правки**
+- [x] **Шаг 3: правки**
 
 В `daily-page.py` список сканируемых папок (строка около 59) дополняется:
 
@@ -1287,12 +1287,12 @@ def from_contact(idx, name, phone):
     защищающее от фантомов, здесь не нужно — фантома не будет."""
 ```
 
-- [ ] **Шаг 4: тесты зелёные, старые self-check не сломаны**
+- [x] **Шаг 4: тесты зелёные, старые self-check не сломаны**
 
 Запуск: `python3 -m unittest tests.test_existing_scripts -v && python3 scripts/daily-page.py --self-check && python3 scripts/daily-summary.py --self-check && python3 scripts/entity-link.py --self-check`
 Ожидание: PASS и три «ок».
 
-- [ ] **Шаг 5: коммит**
+- [x] **Шаг 5: коммит**
 
 ```bash
 git add scripts/daily-page.py scripts/daily-summary.py scripts/entity-link.py tests/test_existing_scripts.py
@@ -1312,7 +1312,7 @@ git commit -m "старые скрипты видят разговоры и об
   - `send(text, token, chat_id) -> bool`
   - `run(event_id) -> str` — id записи в `digests`.
 
-- [ ] **Шаг 1: падающие тесты**
+- [x] **Шаг 1: падающие тесты**
 
 ```python
 # tests/test_call_digest.py
@@ -1352,12 +1352,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Шаг 2: убедиться, что падает**
+- [x] **Шаг 2: убедиться, что падает**
 
 Запуск: `python3 -m unittest tests.test_call_digest -v`
 Ожидание: FAIL.
 
-- [ ] **Шаг 3: реализация**
+- [x] **Шаг 3: реализация**
 
 Рендер чистый шаблон, модель не зовётся. Отправка:
 
@@ -1376,12 +1376,12 @@ def send(text, token, chat_id):
 
 Токен и `TELEGRAM_HOME_CHANNEL` читаются из `/etc/mara/contextd.env`. Если файла нет, скрипт пишет дайджест в `digests` со `state='no-transport'` и возвращает успех: терять текст из-за отсутствия токена нельзя.
 
-- [ ] **Шаг 4: тесты зелёные**
+- [x] **Шаг 4: тесты зелёные**
 
 Запуск: `python3 -m unittest tests.test_call_digest -v`
 Ожидание: PASS, четыре теста.
 
-- [ ] **Шаг 5: коммит**
+- [x] **Шаг 5: коммит**
 
 ```bash
 git add scripts/call_digest.py tests/test_call_digest.py
@@ -1395,7 +1395,7 @@ git commit -m "дайджест: шаблон без модели, отправ�
 **Файлы:**
 - Создать: `tests/test_pipeline_e2e.py`, `tests/fixtures/make_sample_call.sh`
 
-- [ ] **Шаг 1: генератор тестового аудио**
+- [x] **Шаг 1: генератор тестового аудио**
 
 ```bash
 cat > tests/fixtures/make_sample_call.sh <<'EOF'
@@ -1410,7 +1410,7 @@ EOF
 chmod +x tests/fixtures/make_sample_call.sh
 ```
 
-- [ ] **Шаг 2: сквозной тест с поддельными bigpc**
+- [x] **Шаг 2: сквозной тест с поддельными bigpc**
 
 Тест поднимает два локальных HTTP-сервера: один отвечает как `/transcribe`, второй как ollama `/api/chat` фиксированным JSON. Прогоняет `contextd` от приёма события до карточки в временном волте и проверяет:
 
@@ -1432,12 +1432,12 @@ chmod +x tests/fixtures/make_sample_call.sh
         ...
 ```
 
-- [ ] **Шаг 3: прогон**
+- [x] **Шаг 3: прогон**
 
 Запуск: `python3 -m unittest tests.test_pipeline_e2e -v`
 Ожидание: PASS. Если `ffmpeg` в системе нет, тест помечается `skipUnless` и печатает причину, а не падает.
 
-- [ ] **Шаг 4: коммит**
+- [x] **Шаг 4: коммит**
 
 ```bash
 git add tests/test_pipeline_e2e.py tests/fixtures/make_sample_call.sh
@@ -1451,7 +1451,7 @@ git commit -m "сквозной тест: файл на диске превра�
 **Файлы:**
 - Создать: `scripts/blob_retention.py`, `scripts/contextd_reconcile.py`, `tests/test_retention.py`
 
-- [ ] **Шаг 1: падающие тесты**
+- [x] **Шаг 1: падающие тесты**
 
 ```python
 class Ретеншен(unittest.TestCase):
@@ -1465,13 +1465,13 @@ class Сверка(unittest.TestCase):
     def test_осиротевший_блоб_не_удаляется_молча(self): ...
 ```
 
-- [ ] **Шаг 2: реализация**
+- [x] **Шаг 2: реализация**
 
 `blob_retention.py`: удаляет файл, дописывает в манифест `"purged": {"at": ..., "reason": "retention"}`, ставит `blobs.purged_at`. Повторный прогон видит `purged_at` и выходит без ошибки. `pin=1` пропускается всегда.
 
 `contextd_reconcile.py`: пять проверок из спеки §9, вывод человекочитаемый, `--json` для машинного чтения, ненулевой код возврата только при реальной проблеме.
 
-- [ ] **Шаг 3: крон на doctor**
+- [x] **Шаг 3: крон на doctor**
 
 ```bash
 ( crontab -l; \
@@ -1480,7 +1480,7 @@ class Сверка(unittest.TestCase):
 ) | crontab -
 ```
 
-- [ ] **Шаг 4: тесты и коммит**
+- [x] **Шаг 4: тесты и коммит**
 
 ```bash
 python3 -m unittest tests.test_retention -v
@@ -1496,33 +1496,33 @@ git commit -m "ретеншен и сверка: удаление идемпот
 - Создать: `install/com.mara.relay.plist`, `docs/USER-MANUAL-STEPS.md`
 - Изменить: `README.md`, `install/stage0-doctor.sh`
 
-- [ ] **Шаг 1: подготовка doctor**
+- [x] **Шаг 1: подготовка doctor**
 
 ```bash
 ssh doctor 'sudo apt-get install -y ffmpeg && sudo install -d -m 700 -o sergey -g sergey /srv/mara-blobs && sudo install -d -m 755 /etc/mara'
 ```
 
-- [ ] **Шаг 2: секреты вне репозитория**
+- [x] **Шаг 2: секреты вне репозитория**
 
 `/etc/mara/contextd.env` с правами 0600: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_HOME_CHANNEL`, `MARA_BLOBS`. Значения берутся из `~/.hermes/.env` на маке и не печатаются в лог.
 
-- [ ] **Шаг 3: сервис**
+- [x] **Шаг 3: сервис**
 
 ```bash
 ssh doctor 'sudo cp ~/mara-second-brain/install/contextd.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now contextd && systemctl is-active contextd'
 ```
 
-- [ ] **Шаг 4: ключ и релей на маке**
+- [x] **Шаг 4: ключ и релей на маке**
 
 Ключ мак → doctor с ограничением, launchd-агент с `KeepAlive`, привязка к `100.64.0.1:8788`. Проверка с мака: `curl -s http://100.64.0.1:8788/healthz`.
 
-- [ ] **Шаг 5: документация**
+- [x] **Шаг 5: документация**
 
 `docs/USER-MANUAL-STEPS.md` содержит **только** то, что владелец обязан сделать руками и чего агент не может: одобрить установку APK, выдать разрешения на телефоне, сделать тестовый звонок, исключить `kb/conversations` из индекса Copilot на устройствах. Ничего лишнего.
 
 В `README.md` добавляется строка таблицы про `contextd` и абзац про то, где живут блобы и почему они вне синка.
 
-- [ ] **Шаг 6: финальный прогон и коммит**
+- [x] **Шаг 6: финальный прогон и коммит**
 
 ```bash
 ./scripts/run-tests.sh
@@ -1539,3 +1539,28 @@ git commit -m "развёртывание contextd: сервис, релей, р
 **Не покрыто сознательно:** `POST /v1/context/query` и наполнение `/v1/context/bootstrap` уходят в спеку 2 вместе с контекст-брокером; в этой спеке эндпоинты отвечают минимальным пакетом. Инструмент коррекций `mara_correction` тоже спека 2, поэтому таблица `digests` заполняется уже сейчас, а читается позже.
 
 **Согласованность имён.** `mara_ingest.connect/put_event/add_job/claim_job/finish_job/next_delay/blob_path`, `contextd.pair/make_server/run_step/worker/metrics`, `call_asr.slice_plan/transcribe_spans/run`, `call_extract.normalize/parse_deadline/run`, `call_project.conversation_card/commitment_cards/run`, `call_digest.render/send/run` — одинаково во всех задачах, где упоминаются.
+
+---
+
+## Что сделано иначе, чем написано в плане
+
+Три отступления, все осознанные.
+
+1. **Задача 7 не трогала `daily-summary.py`.** План велел показать в дневной
+   сводке разговоры без проекта. Этот скрипт отправляет материал в OpenRouter,
+   и выполнение шага буквально означало бы утечку личных звонков в облако.
+   Вместо этого граница закреплена комментарием в коде и тестом, а новые папки
+   выучила только локальная `daily-page.py`.
+
+2. **Крон задачи 10 поставлен внутри задачи 11.** До появления `contextd` на
+   doctor две новые строки крона писали бы в лог ошибку каждый час.
+
+3. **Ключ релея в задаче 11 остался обычным.** Правку `authorized_keys` на
+   doctor агенту выполнить не дали — и правильно: это привилегированное
+   действие. Ограниченный ключ на маке сгенерирован и ждёт, шаг записан первым
+   пунктом в `docs/USER-MANUAL-STEPS.md`.
+
+Дополнительно, вне плана: закрыта утечка, которую план не предусматривал.
+`person_card` кладёт номер телефона в `aliases`, а `mara-brief.py` копирует
+алиасы в `SOUL.md`, который уходит провайдеру модели каждым ходом. Номер
+теперь в сводку не попадает, в карточке остаётся.
