@@ -107,7 +107,8 @@ class MainActivity : AppCompatActivity() {
             "в очереди: ${q.depth()}, отправлено: ${q.count(JobState.DONE)}, " +
                 "сдалось: ${q.count(JobState.FAILED)}",
             "последняя отправка: " + когда(s.lastUploadMs),
-            "последний контакт с сервером: " + когда(s.lastContactMs),
+            // пишется при любой попытке, и неудачной тоже: удачные видно на сервере
+            "последняя попытка связи: " + когда(s.lastContactMs),
             "разрешения: " + НУЖНЫ.filter { Device.granted(this, it) }
                 .joinToString(", ") { it.substringAfterLast('.') }.ifEmpty { "нет" },
             "батарея не ограничена: " + if (безОграничений()) "да" else "нет, нажми кнопку",
@@ -117,6 +118,8 @@ class MainActivity : AppCompatActivity() {
                 слушаем() && Device.granted(this, Manifest.permission.READ_SMS) ->
                     "провайдер не отдал — через уведомления"
                 слушаем() -> "через уведомления"
+                Device.granted(this, Manifest.permission.READ_SMS) ->
+                    "разрешение есть, провайдер ещё не опрашивался"
                 else -> "нет ни разрешения, ни уведомлений"
             },
             "сообщений в очереди: ${q.countMessages(JobState.NEW)}, отправлено: " +
