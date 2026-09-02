@@ -195,10 +195,44 @@ def commitment_cards(event, extraction, canon):
     return out
 
 
+def person_card(event, canon):
+    """Карточка человека из разрешённого контакта журнала звонков.
+
+    Единственное исключение из правила «людей автоматика не заводит»
+    (см. шапку entity-link.py). Правило существует затем, что имя, выдернутое
+    из текста, легко оказывается опечаткой, должностью или чужим Петей — и
+    граф зарастает фантомами. Здесь имя даёт адресная книга телефона, а не
+    расшифровка, поэтому фантома не будет. Имени из текста разговора это
+    послабление по-прежнему не касается.
+    """
+    p = event.get("payload") or {}
+    name = p.get("contact_name")
+    if not name or p.get("contact_source") != "call-log":
+        return None
+    key = slug(name)
+    if (canon or {}).get(name.lower()) or (canon or {}).get(key):
+        return None                       # уже есть в реестре
+    fm = frontmatter(
+        [("title", yaml_str(name)),
+         ("type", "person"),
+         ("source", "phone"),
+         ("source_id", "person-" + key),
+         ("created", mi.now_iso()),
+         ("occurred", (event.get("occurred") or "")[:10] or None),
+         ("sensitive", "false"),
+         ("distilled", "false")],
+        lists=[("aliases", [name] + ([p["number"]] if p.get("number") else []))])
+    body = "Заведён автоматически из контакта в журнале звонков.\n"
+    return "entities/people/%s.md" % key, fm + "\n" + body
+
+
 def all_cards(event, extraction, canon):
     """Всё, что рождает один звонок: разговор и обязательства из него."""
-    return ([conversation_card(event, extraction, canon)]
-            + commitment_cards(event, extraction, canon))
+    cards = [conversation_card(event, extraction, canon)]
+    person = person_card(event, canon)
+    if person:
+        cards.append(person)
+    return cards + commitment_cards(event, extraction, canon)
 
 
 def write_cards(vault, cards):

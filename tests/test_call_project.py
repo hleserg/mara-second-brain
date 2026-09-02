@@ -116,6 +116,26 @@ class Обязательства(unittest.TestCase):
         self.assertIn("supersedes: ", cards[0][1])
 
 
+class Человек(unittest.TestCase):
+    def контакт(self, **kw):
+        p = {"contact_name": "Анна Петрова", "contact_source": "call-log",
+             "number": "+79990000000"}
+        p.update(kw)
+        return dict(EVENT, payload=p)
+
+    def test_человек_из_книги_заводится(self):
+        path, text = cp.person_card(self.контакт(), {})
+        self.assertEqual(path, "entities/people/anna-petrova.md")
+        self.assertIn("type: person", text)
+        self.assertIn("- +79990000000", text, "номер идёт в алиасы")
+
+    def test_имя_из_текста_человека_не_заводит(self):
+        self.assertIsNone(cp.person_card(self.контакт(contact_source=None), {}))
+
+    def test_известный_человек_не_дублируется(self):
+        self.assertIsNone(cp.person_card(self.контакт(), {"анна петрова": "anna"}))
+
+
 class Запись(unittest.TestCase):
     def test_карточки_ложатся_в_волт_атомарно(self):
         vault = tempfile.mkdtemp()

@@ -25,7 +25,15 @@ SKIP_TOP = {".git", ".obsidian", "raw", "copilot", "Excalidraw", "_system"}
 
 # порядок ключей из §4; всё незнакомое (permalink) уезжает в хвост
 ORDER = ["title", "type", "source", "source_id", "created", "occurred",
-         "learned", "project", "tags", "sensitive", "distilled", "relations"]
+         "learned", "project", "tags", "sensitive", "distilled", "relations",
+         # разговоры и обязательства (ТЗ ambient memory §10): без них новые
+         # ключи уезжали бы в хвост к permalink и перетасовывались при каждой
+         # миграции, а diff карточки становился бы нечитаемым
+         "status", "owner", "promised_to", "due", "due_explicit", "origin",
+         "domain", "classification", "storage_scope", "model_scope",
+         "cloud_allowed", "audience", "retention_audio_until",
+         "content_sha256", "source_revision", "pipeline_version",
+         "confidence", "valid_from", "valid_until", "supersedes"]
 
 TYPE_BY_DIR = {
     "daily": "daily", "timeline": "event",

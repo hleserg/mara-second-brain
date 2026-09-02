@@ -56,7 +56,8 @@ def scan(vault):
     Дата — `occurred`, а если её нет (ручные заметки Мары её не ставят) — день
     из `created`. Иначе такая заметка не попадёт вообще ни в один день."""
     days = {}
-    for sub in ("notes", "sessions", "howto", "decisions"):
+    for sub in ("notes", "sessions", "howto", "decisions",
+                "conversations", "commitments"):
         d = os.path.join(vault, "kb", sub)
         if not os.path.isdir(d): continue
         for name in sorted(os.listdir(d)):
@@ -72,7 +73,9 @@ def scan(vault):
             title = field(fm, "title") if field(fm, "distilled") == "false" or not h \
                 else h.group(1)
             src = field(fm, "source")
-            sec = "Код" if src == "git" else "Разговоры" if sub == "sessions" else "Заметки"
+            sec = ("Код" if src == "git" else
+                   "Разговоры" if sub in ("sessions", "conversations") else
+                   "Заметки")
             days.setdefault(day, []).append(
                 (SECTIONS.index(sec), name[:-3], title.strip(), unlink(field(fm, "project"))))
     return days

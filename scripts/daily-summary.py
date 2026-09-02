@@ -79,6 +79,10 @@ def cards(d, day):
         if not m: continue
         fm, body = m.groups()
         if not re.search(r"(?m)^occurred:\s*'?%s" % re.escape(day), fm): continue
+        # Карточки звонков и переписки помечены sensitive: true, и эта строка
+        # — единственное, что не пускает их в OpenRouter вместе со сводкой дня
+        # (ТЗ ambient memory §18). Захочется «показать звонки в сводке» —
+        # делать это надо локальной моделью, а не ослаблением условия.
         if re.search(r"(?m)^sensitive:\s*['\"]?true", fm): continue
         h = re.search(r"(?m)^#\s+(.+)$", body)
         p = re.search(r"(?m)^project:\s*'?\"?\[?\[?([^'\"\]\n]+)", fm)
