@@ -53,6 +53,7 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 | Туннель к Маре | systemd `mara-mac-tunnel.service` — обратный форвард 8787 на мак |
 | Приём звонков и сообщений | systemd `contextd.service`, `127.0.0.1:8788` — очередь, ASR на bigpc, извлечение, карточки в `kb/conversations` и `kb/commitments`, дайджест в телеграм |
 | Релей телефона | launchd `com.mara.relay` на маке — форвард `100.64.0.1:8788` в contextd на doctor |
+| Телефон `Mara Capture` | `android/`, sideload-APK на doctor `~/dist/`. Не записывает звук: подбирает файлы штатного рекордера (медиатека, папка через SAF, сверка раз в 15 минут и через минуту после отбоя), шлёт в contextd через тайлнет. Собирается только на doctor (`install/android-sdk.sh`): aapt2 под aarch64 нет |
 | Контекст-брокер | крон `25 4 * * *` и после каждого звонка, `scripts/context_pack.py` — открытые обязательства в `_system/context/now.md`; плагин `mara-context` на маке кладёт их в ход Мары хуком `pre_llm_call` |
 | Сверка приёма | крон `7 * * * *`, `scripts/contextd_reconcile.py` — чинит однозначное, докладывает остальное |
 | Уборка записей звонков | крон `40 4 * * *`, `scripts/blob_retention.py` — аудио живёт 90 дней, манифест навсегда |
