@@ -1,0 +1,21 @@
+[Unit]
+Description=Mara contextd: приём звонков и сообщений
+After=network-online.target
+
+[Service]
+Type=simple
+User=sergey
+Environment=MARA_BLOBS=/srv/mara-blobs
+EnvironmentFile=-/etc/mara/contextd.env
+ExecStart=/usr/bin/python3 /home/sergey/mara-second-brain/scripts/contextd.py --serve
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+# волт и блобы писать надо, остальная система — только чтение
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/srv/mara-blobs /srv/vault /home/sergey/.local/state/mara
+
+[Install]
+WantedBy=multi-user.target

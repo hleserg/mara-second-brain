@@ -4,3 +4,7 @@ __pycache__/
 .env
 *.tmp
 .DS_Store
+
+# приёмник ambient memory: база, блобы и частичные загрузки вне репо
+contextd.db
+*.part
