@@ -118,7 +118,10 @@ def register(ctx) -> None:
     # `hermes plugins doctor mara-context` показывает «1 hook» вместо нуля.
     # токен не обязателен прямо сейчас: Брокер добирает его из окружения на
     # каждый поход, а .env к первому ходу Мары уже загружен
-    брокер = Брокер(ctx.get_config("url", URL), ctx.get_config("token"))
+    # MARA_CONTEXT_URL — шов для проверки: подставляем заглушку и смотрим, что
+    # непустой пакет действительно доезжает до модели, не трогая живой волт
+    брокер = Брокер(ctx.get_config("url") or os.environ.get("MARA_CONTEXT_URL") or URL,
+                    ctx.get_config("token"))
 
     def hook(**kw):
         # из хука наружу не летит ничего: сбой брокера — это отсутствие
