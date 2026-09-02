@@ -31,6 +31,10 @@ git add -A
 git diff --cached --quiet || git commit -q -m "удалены файлы, подлежащие вычистке"
 
 echo "== переписываю историю"
+# Маркер прошлого прогона старше суток заставляет filter-repo спрашивать «Y/N»
+# из stdin, которого у крона и ssh без tty нет: EOFError и вычистка встаёт.
+# С --force маркер не нужен: проверки «свежий клон» и так отключены.
+rm -f "$VAULT/.git/filter-repo/already_ran"
 args=(); for f in "$@"; do args+=(--path "$f"); done
 "$FR" --invert-paths "${args[@]}" --force
 git reflog expire --expire=now --all
