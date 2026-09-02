@@ -26,4 +26,11 @@ for f in scripts/*.py; do
     echo "FAIL $f"; echo "$out" | tail -3 | sed 's/^/     /'; fail=1
   fi
 done
+# Плагин Мары живёт на маке, но исходник тут: без проверки он ломался бы там,
+# где логов никто не читает.
+if out=$("$PY" install/mara-context/__init__.py --demo 2>&1); then
+  echo "ok   install/mara-context"
+else
+  echo "FAIL install/mara-context"; echo "$out" | tail -3 | sed 's/^/     /'; fail=1
+fi
 exit $fail
