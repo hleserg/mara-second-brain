@@ -6,9 +6,18 @@
 работают без него: `python3 scripts/call_asr.py --event <id>` чинится руками в
 три часа ночи, а внутренности демона — нет.
 
-Слушает только loopback. Наружу его выводит ssh-туннель с мака, а не bind:
-телефон ходит на tailnet-адрес мака, тот пробрасывает сюда. Демон никогда не
-знает, что такое интернет.
+По умолчанию слушает только loopback, и адрес меняется одной переменной
+MARA_BIND. На doctor стоит 0.0.0.0: телефон приходит по домашней локалке, куда
+его пускает VPN на роутере. Раньше вместо этого был ssh-туннель с мака, и мак
+стоял в цепочке только потому, что на нём жил адрес тайлнета — приложению он
+не был нужен ни для чего.
+
+Наружу, в интернет, демон не смотрит и теперь: границу держит роутер, а не
+bind. Но из локалки он виден, и это осознанный размен. Без токена отдаются
+только /healthz, и наружу он отдаёт один `ok` — счётчики видны лишь с петли,
+как и /metrics целиком. Там не секреты, но имена устройств и время последнего
+синка каждого канала: по этим числам читается распорядок дня. Сам токен едет
+по проводу открытым текстом — шифрует его участок VPN, а не протокол.
 
 Логи санитарные (ТЗ §18): в них идут метод, путь, код, id события и размеры.
 Тела сообщений, транскрипты и токены не логируются никогда.
@@ -36,7 +45,12 @@ STEP = {"asr": "call_asr.py", "extract": "call_extract.py",
 # гигабайт VRAM: параллельный ASR вытеснит whisper, и обе работы поедут
 # медленнее, чем одна. Появится вторая карта — станет Semaphore(2).
 GPU = threading.Semaphore(1)
-OPEN_PATHS = ("/healthz", "/metrics")
+OPEN_PATHS = ("/healthz",)              # мануал велит проверять его с телефона
+# /metrics без токена отдаётся только с петли, и /healthz из локалки отдаёт
+# один `ok` без счётчиков. Там не секреты, но имена устройств и время
+# последнего синка каждого канала: по этим числам читается распорядок дня
+# владельца, а порт теперь открыт в локалку.
+LOOPBACK = ("127.0.0.1", "::1")
 
 
 # --- устройства -------------------------------------------------------------
@@ -151,7 +165,17 @@ def pack_stat(vault=None):
     return int(time.time() - st.st_mtime), st.st_size
 
 
-def health(con, root):
+def health(con, root, full=True):
+    """Счётчики только с петли.
+
+    Наружу уходит один `ok`: приложение читает код ответа, а не тело
+    (`Api.kt`), self-check и тесты — только `ok`. А `events`, `queue` и
+    `free_gb` — монотонные счётчики, которые дёргаются ровно в момент прихода
+    записи: опрашивая их раз в минуту, из локалки восстанавливается тот же
+    распорядок дня, ради которого закрыли /metrics. Грубее, но того же сорта.
+    """
+    if not full:
+        return {"ok": True}
     st = os.statvfs(root)
     return {"ok": True, "queue": con.execute(
                 "select count(*) from jobs where state='ready'").fetchone()[0],
@@ -204,6 +228,8 @@ class Handler(BaseHTTPRequestHandler):
     def authed(self, path):
         if path in OPEN_PATHS:
             return True
+        if path == "/metrics" and self.client_address[0] in LOOPBACK:
+            return True
         if device_of(self.con(), self.headers.get("Authorization")):
             return True
         # тело осталось непрочитанным в сокете, а keep-alive включён: следующий
@@ -218,7 +244,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         con = self.con()
         if p.path == "/healthz":
-            return self.say(200, health(con, self.server.root))
+            return self.say(200, health(con, self.server.root,
+                                        full=self.client_address[0] in LOOPBACK))
         if p.path == "/metrics":
             return self.say(200, metrics(con, self.server.root, self.server.vault),
                             ctype="text/plain; version=0.0.4")
@@ -426,8 +453,18 @@ def bootstrap(con, vault=None):
             "pipeline_version": mi.PIPELINE_VERSION}
 
 
-def make_server(root, port=8788, vault=None):
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+def bind_default():
+    """Адрес из окружения, иначе петля.
+
+    `or`, а не значение по умолчанию у `.get`: systemd передаёт пустую строку,
+    если ключ в env-файле оставили без значения, а пустая строка для
+    ThreadingHTTPServer означает 0.0.0.0 — порт открылся бы молча.
+    """
+    return os.environ.get("MARA_BIND") or "127.0.0.1"
+
+
+def make_server(root, port=8788, vault=None, host="127.0.0.1"):
+    srv = ThreadingHTTPServer((host, port), Handler)
     srv.root = root
     srv.vault = vault or VAULT
     srv.daemon_threads = True
@@ -471,13 +508,13 @@ def worker(stop, root):
             mi.add_job(con, job["event_id"], NEXT[job["kind"]])
 
 
-def serve(root, port):
+def serve(root, port, host="127.0.0.1"):
     con = mi.connect(root)
     con.close()
     stop = threading.Event()
     threading.Thread(target=worker, args=(stop, root), daemon=True).start()
-    srv = make_server(root, port)
-    print("contextd: слушаю 127.0.0.1:%d, блобы в %s" % (port, root), flush=True)
+    srv = make_server(root, port, host=host)
+    print("contextd: слушаю %s:%d, блобы в %s" % (host, port, root), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -504,6 +541,12 @@ def self_check():
     assert "секрет" not in log_line("POST", "/v1/ingest/message", 200,
                                     {"payload": {"text": "секрет"}})
     srv.shutdown()
+    for v, want in (("", "127.0.0.1"), (None, "127.0.0.1"), ("0.0.0.0", "0.0.0.0")):
+        os.environ.pop("MARA_BIND", None)
+        if v is not None:
+            os.environ["MARA_BIND"] = v
+        assert bind_default() == want, "MARA_BIND=%r дал %s" % (v, bind_default())
+    os.environ.pop("MARA_BIND", None)
     print("contextd self-check: ок")
     return 0
 
@@ -512,6 +555,9 @@ def main():
     ap = argparse.ArgumentParser(description="приём событий Mara Ambient Memory")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--port", type=int, default=int(os.environ.get("MARA_PORT", 8788)))
+    # Loopback по умолчанию: разработка и тесты не должны случайно открыть порт
+    # наружу. Открывает его ровно одна строка в /etc/mara/contextd.env на doctor.
+    ap.add_argument("--bind", default=bind_default())
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--pair", metavar="ИМЯ")
     ap.add_argument("--revoke", metavar="ID")
@@ -531,7 +577,7 @@ def main():
         print("отозвано %s" % a.revoke if row else "нет такого устройства")
         return 0 if row else 1
     if a.serve:
-        return serve(a.root, a.port)
+        return serve(a.root, a.port, a.bind)
     ap.print_help()
     return 0
 

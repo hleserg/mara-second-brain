@@ -413,5 +413,45 @@ class Api(unittest.TestCase):
         self.assertIn(b"401", куски.split(b"\r\n")[0])
 
 
+class ТестМетрикиНеИзЛокалки(unittest.TestCase):
+    """/metrics без токена — только с петли (ТЗ §18).
+
+    Сервер поднимается на 127.0.0.2, клиент явно берёт исходный адрес 127.0.0.3:
+    наружу ничего не открывается, но демон видит адрес, которого нет в LOOPBACK
+    — то есть ровно то, чем для него выглядит любой хост из домашней локалки.
+    """
+
+    def test_чужой_адрес_получает_401(self):
+        import http.client
+        root = tempfile.mkdtemp()
+        mi.ROOT = root
+        try:
+            srv = contextd.make_server(root, 0, host="127.0.0.2")
+        except OSError:
+            self.skipTest("в этом окружении нет 127.0.0.2")
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            def запрос(path, откуда="127.0.0.3"):
+                c = http.client.HTTPConnection("127.0.0.2", srv.server_address[1],
+                                               timeout=5, source_address=(откуда, 0))
+                c.request("GET", path)
+                r = c.getresponse()
+                тело = r.read()
+                c.close()
+                return r.status, тело
+
+            self.assertEqual(запрос("/metrics")[0], 401)
+            код, тело = запрос("/healthz")           # проверка связи с телефона
+            self.assertEqual(код, 200)
+            # наружу — только «жив»: счётчики выдают распорядок дня владельца
+            self.assertEqual(json.loads(тело), {"ok": True})
+            код, тело = запрос("/healthz", "127.0.0.1")
+            self.assertEqual(код, 200)
+            self.assertIn("free_gb", json.loads(тело))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()
