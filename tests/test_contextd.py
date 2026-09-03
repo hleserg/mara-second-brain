@@ -1,5 +1,5 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
-import os, sys, json, hashlib, tempfile, threading, unittest
+import os, sys, io, json, hashlib, tempfile, threading, unittest
 import urllib.request, urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
@@ -300,6 +300,102 @@ class ТестМетрикиНеИзЛокалки(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class ТестЛимитПопыток(unittest.TestCase):
+    """Подбор токена упирается в 429, верный токен — нет (ТЗ §18)."""
+
+    def setUp(self):
+        contextd._неудачи.clear()
+
+    tearDown = setUp
+
+    def test_после_лимита_429_а_верный_токен_проходит(self):
+        dir = tempfile.mkdtemp()
+        mi.ROOT = dir
+        srv = contextd.make_server(dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(dir)
+        _, токен = contextd.pair(con, "телефон")
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            def дёрнуть(t):
+                req = urllib.request.Request(base + "/v1/context/bootstrap")
+                req.add_header("Authorization", "Bearer " + t)
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    e.read()
+                    return e.code
+
+            коды = [дёрнуть("mimo-%d" % i) for i in range(contextd.ПОПЫТОК + 2)]
+            self.assertEqual(коды[:contextd.ПОПЫТОК], [401] * contextd.ПОПЫТОК)
+            self.assertEqual(коды[-1], 429, "подбор не упёрся в лимит: %r" % коды)
+            # свой не страдает: за одним NAT с подбирающим может быть телефон
+            self.assertEqual(дёрнуть(токен), 200)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_чужой_forwarded_for_не_учитывается(self):
+        """Без MARA_TRUSTED_PROXY заголовок игнорируется, иначе лимит обходится."""
+        class Заголовки(dict):
+            def get(self, k, d=None):
+                return dict.get(self, k, d)
+
+        class Фейк:
+            client_address = ("203.0.113.7", 1234)
+            headers = Заголовки({"X-Forwarded-For": "10.0.0.1"})
+
+        self.assertEqual(contextd.клиент(Фейк()), "203.0.113.7")
+        прежние = contextd.TRUSTED_PROXY
+        contextd.TRUSTED_PROXY = ("203.0.113.7",)
+        try:
+            self.assertEqual(contextd.клиент(Фейк()), "10.0.0.1")
+        finally:
+            contextd.TRUSTED_PROXY = прежние
+
+
+class ТестРазмерТела(unittest.TestCase):
+    """JSON и аудио меряются разными линейками (ТЗ §6.1)."""
+
+    def test_json_больше_мегабайта_413(self):
+        dir = tempfile.mkdtemp()
+        mi.ROOT = dir
+        srv = contextd.make_server(dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(dir)
+        _, токен = contextd.pair(con, "телефон")
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            тело = json.dumps({"kind": "call", "note": "я" * (contextd.MAX_JSON)})
+            req = urllib.request.Request(base + "/v1/ingest/event",
+                                         data=тело.encode("utf-8"), method="POST")
+            req.add_header("Authorization", "Bearer " + токен)
+            req.add_header("Content-Type", "application/json")
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(e.exception.code, 413)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_аудио_льётся_кусками_а_не_в_память(self):
+        """Файл больше одного КУСКА проходит целиком и с верным хешем."""
+        dir = tempfile.mkdtemp()
+        mi.ROOT = dir
+        con = mi.connect(dir)
+        сырьё = os.urandom(contextd.КУСОК + 12345)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "поток",
+                                    "blob": {"sha256": sha, "bytes": len(сырьё),
+                                             "ext": "m4a"}})
+        код, ответ = contextd.ingest_audio(con, dir, eid, io.BytesIO(сырьё), len(сырьё))
+        self.assertEqual((код, ответ["bytes"]), (200, len(сырьё)))
+        self.assertEqual(hashlib.sha256(
+            open(mi.blob_path(dir, sha, "m4a"), "rb").read()).hexdigest(), sha)
 
 
 if __name__ == "__main__":
