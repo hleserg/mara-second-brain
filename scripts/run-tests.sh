@@ -39,7 +39,9 @@ fi
 # трогал android/ — прогони гейт на doctor, иначе сюда уедет несобираемое.
 echo
 echo "== android =="
-if [ -x android/gradlew ] && command -v java >/dev/null 2>&1; then
+if [ "${SKIP_ANDROID:-0}" = 1 ]; then
+  echo "skip android — SKIP_ANDROID=1 (гоняется отдельной работой CI)"
+elif [ -x android/gradlew ] && command -v java >/dev/null 2>&1; then
   if out=$(cd android && ./gradlew test --console=plain -q 2>&1); then
     echo "ok   android/app (JVM-тесты ядра)"
   else
