@@ -131,7 +131,10 @@ class ТестАдресовВРепозитории(unittest.TestCase):
     # Список короткий намеренно: каждое исключение — это файл, куда адрес может
     # вернуться незамеченным. USER-MANUAL-STEPS.md отсюда убран специально:
     # раздел «дома — по локалке» — самое вероятное место для такого возврата.
+    # CoreTest.kt проверяет само правило «частный адрес или нет» — без литералов
+    # 192.168/10/172.16 проверять там нечего
     МОЖНО = ("android/app/src/main/res/values/strings.xml",
+             "android/app/src/test/java/com/mara/capture/CoreTest.kt",
              "docs/vault-cleanup-step3.md",
              "tests/test_vault_common.py")
     # .service и .example тоже смотрим: Environment=MARA_MAC=... в юните и
