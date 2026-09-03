@@ -156,6 +156,50 @@ class Идентификатор(unittest.TestCase):
         self.assertEqual(len(set(ids)), 50, "в одну миллисекунду тоже разные")
         self.assertEqual(uuid.UUID(ids[0]).version, 7)
 
+    def test_uuid7_не_повторяется_в_потоках(self):
+        """contextd принимает загрузки в несколько потоков.
+
+        Часы заморожены, чтобы все потоки оказались в одной миллисекунде — там,
+        где хвост читается и пишется. На реализации без замка это даёт 9
+        повторов из 4000 (проверено), с замком повтор невозможен вовсе.
+        """
+        import sys, threading
+        собрано, замок = [], threading.Lock()
+        часы, шаг = mi.time.time, sys.getswitchinterval()
+
+        def work():
+            свои = [mi.uuid7() for _ in range(500)]
+            with замок:
+                собрано.extend(свои)
+
+        try:
+            mi.time.time = lambda: 1_700_000_000.123
+            sys.setswitchinterval(1e-6)          # шире окно гонки
+            нити = [threading.Thread(target=work) for _ in range(8)]
+            for н in нити:
+                н.start()
+            for н in нити:
+                н.join()
+        finally:
+            mi.time.time = часы
+            sys.setswitchinterval(шаг)
+        self.assertEqual(len(set(собрано)), 4000, "повтор id между потоками")
+
+    def test_uuid7_переживает_шаг_часов_назад(self):
+        """ntp двигает часы назад — id всё равно обязан расти.
+
+        Опорный id снят до шага: без него проверка ничего не ловит, потому что
+        сами по себе id после шага упорядочены между собой.
+        """
+        до = mi.uuid7()
+        часы = mi.time.time
+        try:
+            mi.time.time = lambda: часы() - 3600     # час назад, разом
+            ряд = [до] + [mi.uuid7() for _ in range(3)]
+        finally:
+            mi.time.time = часы
+        self.assertEqual(ряд, sorted(ряд), "id после шага часов встал перед прежним")
+
     def test_uuid7_несёт_настоящее_время(self):
         import time, uuid
         до = int(time.time() * 1000)

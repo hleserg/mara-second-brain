@@ -16,7 +16,7 @@
 
     python3 scripts/mara_ingest.py --self-check
 """
-import os, sys, json, time, uuid, random, sqlite3, hashlib
+import os, sys, json, time, uuid, random, sqlite3, hashlib, threading
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
@@ -74,6 +74,7 @@ def now_iso():
 
 
 _ПОСЛЕДНИЙ = [0, 0]        # миллисекунда и хвост предыдущего id
+_ЗАМОК = threading.Lock()  # contextd принимает загрузки в несколько потоков
 
 
 def uuid7():
@@ -86,17 +87,26 @@ def uuid7():
     совпадать со временем ровно там, где она нужна.
 
     Хвост стартует с 72 бит из отведённых 74 — запас на рост внутри
-    миллисекунды. Кончился запас — ждём следующую, это дешевле, чем нарушить
-    монотонность.
+    миллисекунды. Кончился запас — занимаем следующую миллисекунду вперёд:
+    id уходит на пару миллисекунд впереди часов, но остаётся монотонным.
+
+    Под замком, потому что читаем и пишем `_ПОСЛЕДНИЙ`: contextd обслуживает
+    загрузки в несколько потоков, и два потока в одной миллисекунде без замка
+    прочитали бы один хвост и выдали одинаковый id.
+
+    Часы могут шагнуть назад (ntp): берём максимум с прошлой миллисекундой,
+    иначе новый id встал бы перед старым, а всё в ADR-0002 держится на том,
+    что строковый порядок id — это порядок времени.
     """
-    ms = int(time.time() * 1000)
-    if ms == _ПОСЛЕДНИЙ[0] and _ПОСЛЕДНИЙ[1] + 1024 < (1 << 74):
-        tail = _ПОСЛЕДНИЙ[1] + random.randrange(1, 1024)
-    else:
-        while ms == _ПОСЛЕДНИЙ[0]:
-            ms = int(time.time() * 1000)
-        tail = random.getrandbits(72)
-    _ПОСЛЕДНИЙ[0], _ПОСЛЕДНИЙ[1] = ms, tail
+    with _ЗАМОК:
+        ms = max(int(time.time() * 1000), _ПОСЛЕДНИЙ[0])
+        if ms != _ПОСЛЕДНИЙ[0]:
+            tail = random.getrandbits(72)
+        elif _ПОСЛЕДНИЙ[1] + 1024 < (1 << 74):
+            tail = _ПОСЛЕДНИЙ[1] + random.randrange(1, 1024)
+        else:
+            ms, tail = ms + 1, random.getrandbits(72)
+        _ПОСЛЕДНИЙ[0], _ПОСЛЕДНИЙ[1] = ms, tail
     n = ((ms << 80) | (0x7 << 76) | ((tail >> 62) << 64)
          | (0b10 << 62) | (tail & ((1 << 62) - 1)))
     return str(uuid.UUID(int=n))
