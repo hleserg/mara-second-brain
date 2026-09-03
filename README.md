@@ -35,6 +35,13 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 
 ## Что крутится на doctor
 
+Расписание живёт в `install/mara.cron`, раскладывает его
+`install/install-cron.sh`. Без аргументов скрипт только показывает
+расхождение живого crontab с репозиторием и ничего не меняет, `--apply`
+ставит, сделав копию текущего crontab в `~/.local/state/mara/`. Чужие
+строки на doctor он не трогает. Правки через `crontab -e` затрёт следующая
+установка — менять расписание надо в файле.
+
 | Что | Как |
 |---|---|
 | Синк с R2 | крон `*/5`, `scripts/vault-r2-sync.sh` (rclone bisync). Меняешь `config/r2-filters.txt` — следом убери `~/.cache/rclone/bisync/*.lst` и прогони скрипт руками: после смены фильтров bisync требует `--resync` и до него молча стоит |
@@ -52,7 +59,7 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 | Сводка сущностей для Мары | крон `20 4 * * *`, `scripts/mara-brief.py` — блок «Что ты уже знаешь о Серёге» в `_system/mara-brief.md` и в `SOUL.md` на маке |
 | Туннель к Маре | systemd `mara-mac-tunnel.service` — обратный форвард 8787 на мак |
 | Приём звонков и сообщений | systemd `contextd.service`, порт 8788 — очередь, ASR на bigpc, извлечение, карточки в `kb/conversations` и `kb/commitments`, дайджест в телеграм |
-| Связь телефона | напрямую в домашнюю локалку на contextd (`MARA_BIND` в `/etc/mara/contextd.env`); вне дома — VPN на роутере |
+| Связь телефона | напрямую на contextd (`MARA_BIND` в `/etc/mara/contextd.env`); вне дома — поддомен KeenDNS по https или VPN роутера |
 | Телефон `Mara Capture` | `android/`, sideload-APK на doctor `~/dist/`. Не записывает звук: подбирает файлы штатного рекордера (медиатека, папка через SAF, сверка раз в 15 минут и через минуту после отбоя), шлёт в contextd по домашней локалке. Собирается только на doctor (`install/android-sdk.sh`): aapt2 под aarch64 нет |
 | Контекст-брокер | крон `25 4 * * *` и после каждого звонка, `scripts/context_pack.py` — открытые обязательства в `_system/context/now.md`; плагин `mara-context` на маке кладёт их в ход Мары хуком `pre_llm_call` |
 | Сверка приёма | крон `7 * * * *`, `scripts/contextd_reconcile.py` — чинит однозначное, докладывает остальное |
@@ -60,6 +67,7 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 | Расход лимитов Claude Code | крон `3-58/5`, `scripts/claude-usage-agg.py` — отчёты в `Claude Usage/` |
 | Бэкап волта | крон `0 4 * * 1`, `scripts/vault-backup.sh` — зашифрованный бандл на два носителя |
 | Тест восстановления | крон `0 5 1 1,4,7,10 *`, `scripts/vault-restore-test.sh` |
+| Бэкап ядра | крон `10 4 * * *`, `scripts/core-backup.py` — база, метаданные и аудио на два носителя, с проверкой восстановления в том же прогоне ([docs/backup-core.md](docs/backup-core.md)) |
 
 ### Почему обязательства не в SOUL.md
 
