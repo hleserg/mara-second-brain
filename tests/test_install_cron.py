@@ -133,6 +133,30 @@ class Установщик(unittest.TestCase):
         self.assertIn("не читается", r.stderr)
         self.assertIn(ЧУЖОЕ, self.прочесть(), "расписание затёрли по отказу -l")
 
+    def test_на_чистой_машине_откат_возвращает_пустоту(self):
+        """«no crontab for» — это отказ, но отказ ожидаемый: крона просто нет.
+        Если не забыть текст этого отказа, дальше он читается как «крон был
+        непустой», и на сорванной установке скрипт откажется откатываться —
+        оставив на чистой машине половину блока и написав в лог неправду."""
+        with open(os.path.join(self.tmp, "bin", "crontab"), "w") as fh:
+            fh.write("#!/usr/bin/env bash\n"
+                     'f="%s"\n'
+                     'if [ "${1:-}" = "-l" ]; then\n'
+                     '  [ -s "$f" ] && { cat "$f"; exit 0; }\n'
+                     '  echo "no crontab for sergey" >&2; exit 1\n'
+                     "fi\n"
+                     # приняли не то, что отправили: ровно тот случай, ради
+                     # которого откат и написан
+                     'grep -v core-backup "$1" > "$f"\n' % self.таблица)
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("возврат из", r.stderr,
+                      "на чистой машине откат не сработал")
+        self.assertNotIn("пустым не был", r.stderr,
+                         "текст отказа crontab -l принят за живое расписание")
+        self.assertEqual(self.прочесть().strip(), "",
+                         "после отката на чистой машине должно быть пусто")
+
 
 if __name__ == "__main__":
     unittest.main()
