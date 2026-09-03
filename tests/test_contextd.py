@@ -499,15 +499,18 @@ class ТестЛимитПопыток(unittest.TestCase):
                 v = dict.get(self, k)
                 return [v] if v is not None else d
 
+        # адреса — из TEST-NET (RFC 5737), а не из 10/8 и 192.168/16: репозиторий
+        # публичный, и сторож в test_vault_common грепает дерево на адреса
+        # домашней сети, не разбирая, выдумка это в тесте или нет
         class Фейк:
             client_address = ("203.0.113.7", 1234)
-            headers = Заголовки({"X-Forwarded-For": "10.0.0.1"})
+            headers = Заголовки({"X-Forwarded-For": "198.51.100.1"})
 
         self.assertEqual(contextd.клиент(Фейк()), "203.0.113.7")
         прежние = contextd.TRUSTED_PROXY
         contextd.TRUSTED_PROXY = ("203.0.113.7",)
         try:
-            self.assertEqual(contextd.клиент(Фейк()), "10.0.0.1")
+            self.assertEqual(contextd.клиент(Фейк()), "198.51.100.1")
         finally:
             contextd.TRUSTED_PROXY = прежние
 
@@ -596,7 +599,7 @@ class ТестПоРевьюГраницы(unittest.TestCase):
 
         class Фейк:
             client_address = ("203.0.113.7", 1234)
-            headers = Заголовки("10.9.9.9", "198.51.100.4")
+            headers = Заголовки("198.51.100.9", "198.51.100.4")
 
         прежние = contextd.TRUSTED_PROXY
         contextd.TRUSTED_PROXY = ("203.0.113.7",)
