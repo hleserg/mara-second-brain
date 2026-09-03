@@ -1,0 +1,43 @@
+# Гейт на каждый PR. Пока владелец не включил branch protection, зелёная галочка
+# здесь ничего не запрещает, а только показывает. Репозиторий с 2026-09-03
+# публичный, так что защита ветки доступна на Free плане — включат, и этот же
+# файл станет обязательной проверкой без правок.
+name: гейт
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  python:
+    name: unittest и self-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'      # как на doctor
+      - name: гейт без андроида
+        env:
+          SKIP_ANDROID: '1'           # Kotlin отдельной работой, ниже
+          # дефолты смотрят в /srv, которого на раннере нет: указываем на
+          # временный каталог, чтобы промахнувшийся тест не создавал каталоги
+          # в системе раннера
+          MARA_BLOBS: ${{ runner.temp }}/mara-blobs
+          VAULT: ${{ runner.temp }}/vault
+          MARA_VAULT: ${{ runner.temp }}/vault
+        run: bash scripts/run-tests.sh
+
+  android:
+    name: Kotlin-ядро приложения
+    runs-on: ubuntu-latest            # aapt2 и d8 есть только под x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - run: ./gradlew test --console=plain
+        working-directory: android
