@@ -328,11 +328,18 @@ def blob_row(con, sha256):
 def finish_stored(con, root, event_id):
     """Довести событие с уже лежащим блобом до `stored`: манифест и работа ASR.
     Идемпотентно — второй вызов не заводит вторую работу. Нужно потому, что
-    между записью блоба и переводом события демон может умереть."""
-    row = con.execute("select state from events where id=?", (event_id,)).fetchone()
-    if not row or row["state"] != "new":
+    между записью блоба и переводом события демон может умереть.
+
+    Перевод состояния — одним `update ... where state='new'`, а не проверкой и
+    записью по отдельности: обработчики живут в разных потоках со своими
+    соединениями, и два одновременных запроса по одному событию проходили
+    раздельную проверку оба. Ценой была вторая цепочка asr→extract→project→
+    digest: час GPU и второй дайджест в телеграм. `rowcount` показывает, кто
+    успел первым.
+    """
+    if con.execute("update events set state='stored' where id=? and state='new'",
+                   (event_id,)).rowcount != 1:
         return
-    con.execute("update events set state='stored' where id=?", (event_id,))
     mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
     mi.add_job(con, event_id, "asr")
 

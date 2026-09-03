@@ -453,5 +453,45 @@ class ТестМетрикиНеИзЛокалки(unittest.TestCase):
             srv.server_close()
 
 
+class ТестГонкаFinishStored(unittest.TestCase):
+    """Два запроса по одному событию заводят одну работу ASR, а не две.
+
+    Вторая работа стоит часа GPU и второго дайджеста в телеграм: `call_digest`
+    шлёт сообщение до записи в базу, так что дубль виден владельцу.
+    """
+
+    def test_обгон_на_переводе_в_stored_не_плодит_работу(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        сха = hashlib.sha256(b"a").hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "гонка",
+                                    "blob": {"sha256": сха, "bytes": 1, "ext": "m4a"}})
+        второй = mi.connect(каталог)
+
+        class Опережающий:
+            """Соединение, пускающее конкурента вперёд прямо перед update."""
+
+            def __init__(self, con):
+                self.con, self.сработал = con, False
+
+            def execute(self, sql, args=()):
+                if "state='stored'" in sql and not self.сработал:
+                    self.сработал = True
+                    contextd.finish_stored(второй, каталог, eid)
+                return self.con.execute(sql, args)
+
+            def __getattr__(self, name):
+                return getattr(self.con, name)
+
+        обгон = Опережающий(con)
+        contextd.finish_stored(обгон, каталог, eid)
+        self.assertTrue(обгон.сработал, "конкурент обязан был вклиниться")
+        работ = con.execute("select count(*) from jobs where event_id=? and kind='asr'",
+                            (eid,)).fetchone()[0]
+        self.assertEqual(работ, 1, "гонка завела вторую работу ASR")
+
+
 if __name__ == "__main__":
     unittest.main()
