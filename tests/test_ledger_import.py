@@ -121,6 +121,20 @@ class Перенос(unittest.TestCase):
         r, = self.строки("commitments")
         self.assertEqual(r["source_native_id"], "vault:kb/commitments/2026-09-03-ruchnaya.md")
 
+    def test_две_карточки_с_одним_source_id_не_схлопываются_молча(self):
+        # копия карточки в Obsidian наследует source_id: без этой проверки
+        # вторая заменила бы первую в ledger, а её файл стал бы невидимкой
+        # порядок обхода — по имени файла, поэтому «а» заведомо первая
+        карточка(self.vault, "kb/commitments/2026-09-03-a.md")
+        карточка(self.vault, "kb/commitments/2026-09-03-b.md", status="done")
+        итог = self.перенести()
+        self.assertEqual(итог["обязательств"], 1)
+        self.assertEqual(итог["спорных"], 1)
+        r, = self.строки("commitments")
+        self.assertEqual(r["status"], "proposed", "вторая не перетирает первую")
+        self.assertEqual([п["path"] for п in self.строки("projections")],
+                         ["kb/commitments/2026-09-03-a.md"])
+
     def test_проба_ничего_не_пишет(self):
         карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
         итог = self.перенести(dry_run=True)
@@ -130,7 +144,8 @@ class Перенос(unittest.TestCase):
 
     def test_пустой_волт_не_падает(self):
         self.assertEqual(self.перенести(),
-                         {"обязательств": 0, "разговоров": 0, "обновлено": 0})
+                         {"обязательств": 0, "разговоров": 0, "обновлено": 0,
+                          "спорных": 0})
 
 
 class Идентификатор(unittest.TestCase):

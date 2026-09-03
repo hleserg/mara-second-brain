@@ -74,11 +74,22 @@ def карточки(vault, подкаталог):
 def run(con, vault=None, dry_run=False):
     """Перенести всё, что есть. Возвращает счётчики."""
     vault = vault or VAULT
-    итог = {"обязательств": 0, "разговоров": 0, "обновлено": 0}
+    итог = {"обязательств": 0, "разговоров": 0, "обновлено": 0, "спорных": 0}
+    видели = {}
     for подкаталог, вид, таблица, поля in ВИДЫ:
         счётчик = "обязательств" if вид == "commitment" else "разговоров"
         for rel, fm, sha in карточки(vault, подкаталог):
             native = (fm.get("source_id") or "").strip() or "vault:" + rel
+            # копия карточки в Obsidian наследует source_id. Молча заменить
+            # первую строку второй — это ровно то схлопывание двух объектов
+            # в один, которое запрещает §4.4. Считаем и говорим вслух.
+            if native in видели:
+                итог["спорных"] += 1
+                print("ledger_import: %s и %s несут один source_id %s — "
+                      "перенесён первый" % (видели[native], rel, native),
+                      file=sys.stderr)
+                continue
+            видели[native] = rel
             row = con.execute("select id from %s where source_native_id=?" % таблица,
                               (native,)).fetchone()
             новый = row is None
@@ -147,10 +158,10 @@ def main():
     if a.self_check:
         return self_check()
     итог = run(mi.connect(a.root), a.vault, dry_run=a.dry_run)
-    print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d"
+    print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d, спорных %d"
           % (" (проба)" if a.dry_run else "", итог["обязательств"],
-             итог["разговоров"], итог["обновлено"]))
-    return 0
+             итог["разговоров"], итог["обновлено"], итог["спорных"]))
+    return 1 if итог["спорных"] else 0
 
 
 if __name__ == "__main__":
