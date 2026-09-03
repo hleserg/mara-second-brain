@@ -1,6 +1,7 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
-import os, sys, io, json, hashlib, tempfile, threading, unittest
+import os, sys, io, json, hashlib, socket, tempfile, threading, unittest
 import urllib.request, urllib.error
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -193,7 +194,8 @@ class Api(unittest.TestCase):
         _, снова = self.post("/v1/ingest/event", ev)
         self.assertTrue(снова["duplicate"], "ключ — хеш содержимого, а не имя")
         self.assertEqual(снова["event_id"], r["event_id"])
-        self.assertFalse(снова["need_blob"], "блоб уже просили, второй раз не надо")
+        self.assertTrue(снова["need_blob"],
+                        "аудио так и не приехало — просить его снова, а не закрывать")
 
     def test_правка_применяется_синхронно(self):
         import context_pack
@@ -260,6 +262,155 @@ class Api(unittest.TestCase):
         self.assertIn("YYYY-MM-DD", r["error"])
         self.assertEqual(self.con.execute("select count(*) from events where source_id='k2'")
                          .fetchone()[0], 0)
+
+    # ── потери на приёме: N1, N5, N6, N7 из docs/current-state-audit.md ──
+
+    def залить(self, event_id, body):
+        return self.post("/v1/ingest/audio?event=" + event_id, body,
+                         raw=True, ctype="application/octet-stream")
+
+    def звонок(self, sid, body):
+        """Событие звонка с аудио. Возвращает (event_id, ответ сервера)."""
+        sha = hashlib.sha256(body).hexdigest()
+        ev = {"kind": "call", "source": "phone", "source_id": sid,
+              "blob": {"sha256": sha, "bytes": len(body), "ext": "wav"}}
+        _, r = self.post("/v1/ingest/event", ev)
+        return ev, r
+
+    def test_повтор_события_без_блоба_снова_просит_блоб(self):
+        """N1. Ответ на первое событие потерялся, телефон повторяет отправку.
+        Пока аудио нет в базе блобов, ответ обязан снова просить блоб: телефон
+        трактует `need_blob: false` как «всё принято» и закрывает работу."""
+        ev, первый = self.звонок("n1", "аудио которое не доехало".encode("utf-8"))
+        self.assertTrue(первый["need_blob"])
+        _, повтор = self.post("/v1/ingest/event", ev)
+        self.assertTrue(повтор["duplicate"], "то же событие — конечно дубль")
+        self.assertTrue(повтор["need_blob"],
+                        "блоба нет в базе — повтор обязан просить его снова")
+
+    def test_после_загрузки_повтор_блоб_не_просит(self):
+        тело = "аудио которое доехало".encode("utf-8")
+        ev, r = self.звонок("n1-ok", тело)
+        self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
+                  raw=True, ctype="application/octet-stream")
+        _, повтор = self.post("/v1/ingest/event", ev)
+        self.assertFalse(повтор["need_blob"], "блоб лежит — второй раз не нужен")
+
+    def test_вычищенный_ретеншеном_блоб_заново_не_просим(self):
+        """Ретеншен удалил аудио по сроку (ТЗ §5). Повторная загрузка вернула бы
+        удалённое намеренно, поэтому просить блоб нельзя."""
+        тело = "старое аудио".encode("utf-8")
+        ev, r = self.звонок("n1-purged", тело)
+        self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
+                  raw=True, ctype="application/octet-stream")
+        self.con.execute("update blobs set purged_at=? where sha256=?",
+                         (mi.now_iso(), hashlib.sha256(тело).hexdigest()))
+        _, повтор = self.post("/v1/ingest/event", ev)
+        self.assertFalse(повтор["need_blob"], "вычищенное аудио не запрашиваем заново")
+
+    def test_блоб_принят_а_событие_осталось_new_чинится_повтором(self):
+        """Демон упал между записью блоба и переводом события в stored. Сегодня
+        такое событие навсегда остаётся `new` без работы ASR: повтор с телефона
+        видит дубль и уходит. Повтор обязан довести событие до конца."""
+        тело = "аудио после падения".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        ev, r = self.звонок("n1-crash", тело)
+        self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
+                  raw=True, ctype="application/octet-stream")
+        self.con.execute("update events set state='new' where id=?", (r["event_id"],))
+        self.con.execute("delete from jobs where event_id=?", (r["event_id"],))
+        _, повтор = self.post("/v1/ingest/event", ev)
+        self.assertFalse(повтор["need_blob"], "байты на диске — грузить нечего")
+        self.assertEqual(self.con.execute("select state from events where id=?",
+                                          (r["event_id"],)).fetchone()["state"], "stored")
+        self.assertEqual(self.con.execute("select count(*) from jobs where event_id=? "
+                                          "and kind='asr'", (r["event_id"],)).fetchone()[0], 1,
+                         "ровно одна работа ASR, а не вторая на каждый повтор")
+
+    def test_загрузка_блоба_дважды_не_плодит_работу(self):
+        тело = "аудио дважды".encode("utf-8")
+        ev, r = self.звонок("n1-twice", тело)
+        for _ in range(2):
+            code, _ = self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
+                                raw=True, ctype="application/octet-stream")
+            self.assertEqual(code, 200)
+        self.assertEqual(self.con.execute("select count(*) from jobs where event_id=? "
+                                          "and kind='asr'", (r["event_id"],)).fetchone()[0], 1)
+
+    def test_параллельные_загрузки_одного_аудио_не_рвут_файл(self):
+        """N12. Два события с одним аудио льют его одновременно. На общем
+        ".part" второй писатель усекает файл первого, и os.replace публикует
+        склейку — либо падает, если сосед уже унёс временный файл."""
+        тело = ("параллель " * 4096).encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        _, a = self.звонок("n12-a", тело)
+        _, b = self.звонок("n12-b", тело)
+        настоящий, сосед = contextd.os.replace, []
+
+        def перехват(src, dst):
+            """Влезть ровно между записью временного файла и публикацией."""
+            if not сосед:
+                сосед.append(None)                 # флаг до вызова: иначе рекурсия
+                сосед[0] = self.залить(b["event_id"], тело)
+            return настоящий(src, dst)
+
+        contextd.os.replace = перехват
+        try:
+            code, _ = self.залить(a["event_id"], тело)
+        finally:
+            contextd.os.replace = настоящий
+        self.assertEqual((code, сосед[0][0]), (200, 200), "обе загрузки — успех")
+        path = self.con.execute("select path from blobs where sha256=?",
+                                (sha,)).fetchone()["path"]
+        with open(path, "rb") as fh:
+            self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), sha,
+                             "опубликован не тот файл, который обещали хешем")
+
+    def test_блоб_ищется_в_базе_а_не_по_сегодняшней_дате(self):
+        """N5. Путь блоба считается от даты загрузки. Августовская запись,
+        долитая в сентябре, по вычисленному сегодня пути не находится, и
+        повторная загрузка перезаписала бы строку вместе с pin и audio_until."""
+        тело = "аудио из прошлого месяца".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        ev, r = self.звонок("n5", тело)
+        self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
+                  raw=True, ctype="application/octet-stream")
+        прошлое = mi.blob_path(self.dir, sha, "wav",
+                               when=datetime.now(mi.TZ) - timedelta(days=45))
+        os.makedirs(os.path.dirname(прошлое), mode=0o700, exist_ok=True)
+        os.replace(mi.blob_path(self.dir, sha, "wav"), прошлое)
+        self.con.execute("update blobs set path=?, pin=1 where sha256=?", (прошлое, sha))
+        code, got = self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
+                              raw=True, ctype="application/octet-stream")
+        self.assertEqual(code, 200)
+        self.assertTrue(got["duplicate"], "блоб известен базе, хоть путь и не сегодняшний")
+        строка = self.con.execute("select path, pin from blobs where sha256=?",
+                                  (sha,)).fetchone()
+        self.assertEqual(строка["path"], прошлое, "путь в базе не затирается")
+        self.assertEqual(строка["pin"], 1, "закрепление владельца переживает повтор")
+
+    def test_после_401_соединение_закрывается(self):
+        """N6. Тело неопознанного запроса остаётся в сокете. При keep-alive
+        следующий запрос по тому же соединению читается как продолжение тела —
+        HttpURLConnection на телефоне переиспользует сокеты."""
+        s = socket.create_connection(self.srv.server_address, timeout=5)
+        тело = json.dumps({"kind": "call", "source": "phone"}).encode("utf-8")
+        s.sendall(("POST /v1/ingest/event HTTP/1.1\r\nHost: x\r\n"
+                   "Authorization: Bearer нет-такого\r\nContent-Type: application/json\r\n"
+                   "Content-Length: %d\r\n\r\n" % len(тело)).encode("utf-8") + тело)
+        куски = b""
+        try:
+            while True:
+                чанк = s.recv(65536)
+                if not чанк:
+                    break
+                куски += чанк
+        except socket.timeout:
+            self.fail("сокет остался открыт: непрочитанное тело ждало бы в нём "
+                      "следующего запроса телефона")
+        finally:
+            s.close()
+        self.assertIn(b"401", куски.split(b"\r\n")[0])
 
 
 class ТестМетрикиНеИзЛокалки(unittest.TestCase):
@@ -374,7 +525,10 @@ class ТестПоРевьюГраницы(unittest.TestCase):
         return каталог, srv, con, токен
 
     def test_отрицательная_длина_не_обходит_лимит(self):
-        """Content-Length: -1 проходил `n > лимит`, а read(-1) читает до EOF."""
+        """Content-Length: -1 проходил `n > лимит`, а read(-1) читает до EOF.
+
+        Теперь такая длина — 400: разобрать её нельзя, границы тела мы не знаем.
+        """
         import http.client
         каталог, srv, con, токен = self.поднять()
         try:
@@ -387,7 +541,7 @@ class ТестПоРевьюГраницы(unittest.TestCase):
             c.send(b'{"kind": "call"}')
             r = c.getresponse()
             r.read()
-            self.assertEqual(r.status, 413)
+            self.assertEqual(r.status, 400)
             c.close()
         finally:
             srv.shutdown()
@@ -511,6 +665,147 @@ class ТестРазмерТела(unittest.TestCase):
         self.assertEqual((код, ответ["bytes"]), (200, len(сырьё)))
         self.assertEqual(hashlib.sha256(
             open(mi.blob_path(dir, sha, "m4a"), "rb").read()).hexdigest(), sha)
+
+class ТестГонкаFinishStored(unittest.TestCase):
+    """Два запроса по одному событию заводят одну работу ASR, а не две.
+
+    Вторая работа стоит часа GPU и второго дайджеста в телеграм: `call_digest`
+    шлёт сообщение до записи в базу, так что дубль виден владельцу.
+    """
+
+    def test_обгон_на_переводе_в_stored_не_плодит_работу(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        сха = hashlib.sha256(b"a").hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "гонка",
+                                    "blob": {"sha256": сха, "bytes": 1, "ext": "m4a"}})
+        второй = mi.connect(каталог)
+
+        class Опережающий:
+            """Соединение, пускающее конкурента вперёд прямо перед update."""
+
+            def __init__(self, con):
+                self.con, self.сработал = con, False
+
+            def execute(self, sql, args=()):
+                if "state='stored'" in sql and not self.сработал:
+                    self.сработал = True
+                    contextd.finish_stored(второй, каталог, eid)
+                return self.con.execute(sql, args)
+
+            def __getattr__(self, name):
+                return getattr(self.con, name)
+
+        обгон = Опережающий(con)
+        contextd.finish_stored(обгон, каталог, eid)
+        self.assertTrue(обгон.сработал, "конкурент обязан был вклиниться")
+        работ = con.execute("select count(*) from jobs where event_id=? and kind='asr'",
+                            (eid,)).fetchone()[0]
+        self.assertEqual(работ, 1, "гонка завела вторую работу ASR")
+
+
+class ТестКривойДлины(unittest.TestCase):
+    """Круг 2 ревью PR #14: длина, которую нельзя разобрать, и мусор на диске."""
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        srv = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(каталог)
+        _, токен = contextd.pair(con, "телефон")
+        return каталог, srv, con, токен
+
+    def запрос(self, srv, путь, заголовки, тело=b"{}", токен=None):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+        c.putrequest("POST", путь, skip_accept_encoding=True)
+        if токен:
+            c.putheader("Authorization", "Bearer " + токен)
+        for k, v in заголовки.items():
+            c.putheader(k, v)
+        c.endheaders()
+        c.send(тело)
+        r = c.getresponse()
+        r.read()
+        код = r.status
+        c.close()
+        return код
+
+    def test_нечисловая_длина_это_400_а_не_traceback(self):
+        """int() на заголовке падал ValueError: ответа нет, соединение рвётся.
+
+        Худший путь — без токена: `отлуп` зовётся из `authed`, то есть дыра
+        была доступна анониму.
+        """
+        каталог, srv, con, токен = self.поднять()
+        try:
+            for кривая in ("abc", "1e3", "0x10", "5 5", "+5", "\u00b2"):
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": кривая}, b"", токен), 400,
+                    "длина %r должна давать 400" % кривая)
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": кривая}, b""), 401,
+                    "без токена длина %r роняла обработчик" % кривая)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_chunked_без_длины_не_создаёт_пустое_событие(self):
+        """n=0 при chunked означал «пустое тело»: событие заводилось, а тело
+        оставалось в сокете и ломало следующий запрос."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            self.assertEqual(
+                self.запрос(srv, "/v1/ingest/event",
+                            {"Transfer-Encoding": "chunked"}, b"0\r\n\r\n", токен),
+                400)
+            self.assertEqual(con.execute("select count(*) from events").fetchone()[0], 0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_обрыв_заливки_не_оставляет_part(self):
+        """Потоковая заливка открыла файл до чтения тела; уборщика .part нет."""
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        сырьё = os.urandom(contextd.КУСОК + 100)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "обрыв",
+                                    "blob": {"sha256": sha, "bytes": len(сырьё),
+                                             "ext": "m4a"}})
+
+        class Рвётся(io.BytesIO):
+            def read(self, n=-1):
+                if self.tell() >= contextd.КУСОК:
+                    raise ConnectionResetError("клиент отвалился")
+                return super().read(n)
+
+        with self.assertRaises(ConnectionResetError):
+            contextd.ingest_audio(con, каталог, eid, Рвётся(сырьё), len(сырьё))
+        каталог_блоба = os.path.dirname(mi.blob_path(каталог, sha, "m4a"))
+        мусор = [f for f in os.listdir(каталог_блоба) if f.endswith(".part")]
+        self.assertEqual(мусор, [], "обрыв оставил недописанный файл")
+
+    def test_несошедшийся_хеш_тоже_не_оставляет_part(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        sha = hashlib.sha256(b"wanted").hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "не-сошёлся",
+                                    "blob": {"sha256": sha, "bytes": 5, "ext": "m4a"}})
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(b"other"), 5)
+        self.assertEqual(код, 409)
+        каталог_блоба = os.path.dirname(mi.blob_path(каталог, sha, "m4a"))
+        self.assertEqual([f for f in os.listdir(каталог_блоба) if f.endswith(".part")],
+                         [])
 
 
 if __name__ == "__main__":

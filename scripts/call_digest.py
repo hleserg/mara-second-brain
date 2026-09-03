@@ -24,7 +24,11 @@ import mara_ingest as mi
 import call_project as cp
 
 ENV_FILE = os.environ.get("MARA_ENV_FILE", "/etc/mara/contextd.env")
-API = "https://api.telegram.org/bot%s/sendMessage"
+# адрес переопределяем: шаг дайджеста запускается отдельным процессом, и
+# сквозной тест иначе либо лезет в настоящий телеграм, либо не проверяет
+# доставку вовсе
+API = os.environ.get("MARA_TELEGRAM_API",
+                     "https://api.telegram.org/bot%s/sendMessage")
 
 # Порядок и названия разделов — из ТЗ §16 и совпадают с карточкой разговора.
 SECTIONS = [("requests", "Попросили"), ("commitments", "Ты обещал"),
@@ -136,6 +140,13 @@ def run(event_id, root=None, env_file=None):
     print("call_digest: %s — %s, пунктов %d" % (event_id, state, len(items)))
     if state == "failed":
         raise RuntimeError("телеграм не принял дайджест")
+    if state != "sent":
+        # транспорта нет — это настройка, а не сбой: повторять нечего, но и
+        # объявлять звонок обработанным нельзя. Текст лежит в digests, а
+        # реконсилятор раз в час скажет, сколько таких накопилось (N11)
+        print("call_digest: %s не доставлен (%s) — событие остаётся %s"
+              % (event_id, state, ev["state"]))
+        return did
     con.execute("update events set state='done' where id=?", (event_id,))
     return did
 
