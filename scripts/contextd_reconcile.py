@@ -211,11 +211,12 @@ def запись_не_долита(con, hours=24):
 
 def дайджест_не_доставлен(con):
     """Дайджест собран, но до владельца не дошёл: нет токена или канала в
-    /etc/mara/contextd.env. Сбой отправки уводит работу в ретрай и строку
-    заменяет, так что здесь остаются только настроечные дыры. Молча такое
-    висеть не должно: звонок разобран, а человек о нём не узнал (ТЗ §17)."""
-    rows = con.execute("select event_id, state from digests where state!='sent' "
-                       "order by sent_at").fetchall()
+    /etc/mara/contextd.env. Молча такое висеть не должно: звонок разобран, а
+    человек о нём не узнал (ТЗ §17). Смотрим только `no-transport`: `failed`
+    уводит работу в ретрай, и если та встанет насовсем — о ней скажет dlq(),
+    а дублировать одну беду двумя находками ни к чему."""
+    rows = con.execute("select event_id, state from digests "
+                       "where state='no-transport' order by sent_at").fetchall()
     if not rows:
         return []
     return [находка("дайджест-не-доставлен", "warn",

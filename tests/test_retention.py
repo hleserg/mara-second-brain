@@ -143,7 +143,9 @@ class СверкаИсточников(unittest.TestCase):
     def test_недоставленный_дайджест_видно_в_сверке(self):
         """N11: звонок разобран, а владелец о нём не узнал — это находка."""
         eid = self.событие("phone", 0)
-        for state, did in (("sent", "d1"), ("no-transport", "d2")):
+        # failed — это сбой отправки: работа уйдёт в ретрай, а встанет насовсем
+        # — скажет dlq(); здесь ждём только настроечную дыру
+        for state, did in (("sent", "d1"), ("no-transport", "d2"), ("failed", "d3")):
             self.con.execute("insert into digests(id,event_id,chat_id,text,items_json,"
                              "sent_at,state) values(?,?,?,?,?,?,?)",
                              (did, eid, "@c", "текст", "[]", mi.now_iso(), state))
