@@ -18,6 +18,7 @@ import json, os, re, sys, fcntl, argparse, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import redact
 from session_note_compat import messages   # см. ниже
+import vault_common
 from vault_common import canon_map, linkify
 
 API = "https://openrouter.ai/api/v1/chat/completions"
@@ -41,16 +42,6 @@ def only_one(wait=False):
     except OSError:
         return None
     return fh
-
-def load_env(path):
-    """~/.config/mara/env: KEY=value. Секреты в волте не держим (§11)."""
-    try: lines = open(os.path.expanduser(path)).read().splitlines()
-    except OSError: return
-    for l in lines:
-        l = l.strip()
-        if l and not l.startswith("#") and "=" in l:
-            k, v = l.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
 def holds_from_cloud(head):
     """Причина, по которой карточку нельзя отдавать облачной модели, или None.
@@ -164,7 +155,7 @@ def main():
     if lock is None:
         print("queue-worker: уже работает другой, пропускаю"); return 0
 
-    load_env("~/.config/mara/env")
+    vault_common.load_env()
     key = os.environ.get("OPENROUTER_API_KEY")
     model = os.environ.get("MARA_DISTILL_MODEL", "deepseek/deepseek-v4-flash")
     if not key and not a.dry_run:
