@@ -127,21 +127,33 @@ class ТестАдресовВРепозитории(unittest.TestCase):
     СЕТЬ = re.compile(
         r"\b(?:10\.\d{1,3}|192\.168\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3})"
         r"\.\d{1,3}\b|\b\w+@(?:\d{1,3}\.){3}\d{1,3}\b")
-    # примеры диапазонов в тестах и подсказках интерфейса — не адреса владельца
+    # примеры диапазонов в тестах и подсказках интерфейса — не адреса владельца.
+    # Список короткий намеренно: каждое исключение — это файл, куда адрес может
+    # вернуться незамеченным. USER-MANUAL-STEPS.md отсюда убран специально:
+    # раздел «дома — по локалке» — самое вероятное место для такого возврата.
     МОЖНО = ("android/app/src/main/res/values/strings.xml",
-             "android/app/src/test/java/com/mara/capture/CoreTest.kt",
              "docs/vault-cleanup-step3.md",
-             "docs/USER-MANUAL-STEPS.md",
              "tests/test_vault_common.py")
+    # .service и .example тоже смотрим: Environment=MARA_MAC=... в юните и
+    # пример env-файла — самые естественные места для адреса, а по расширению
+    # они не .py и не .sh
+    РАСШИРЕНИЯ = (".py", ".sh", ".kt", ".md", ".xml", ".service", ".example",
+                  ".txt", ".yml", ".yaml", ".cron", ".json", ".kts", ".pro")
 
     def test_в_коде_нет_адресов_домашней_сети(self):
         корень = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-        files = subprocess.run(["git", "ls-files", "scripts", "install", "android",
-                                "tests", "docs", "README.md"],
-                               cwd=корень, capture_output=True, text=True).stdout.split()
+        # -z и check=True: без них сторож молча зеленел там, где ловить и надо
+        # больше всего. Вне git-репозитория `ls-files` даёт rc=128 и пустой
+        # список — сравнение пустого с пустым проходило; а имя файла с не-ASCII
+        # или пробелом git печатает в кавычках со «\320\275», и `.split()` его
+        # разваливал. Имена в этом проекте кириллические сплошь и рядом.
+        r = subprocess.run(["git", "ls-files", "-z", "--", "."],
+                           cwd=корень, capture_output=True, check=True)
+        files = [f for f in r.stdout.decode("utf-8").split("\0") if f]
+        self.assertTrue(files, "git ls-files ничего не вернул — сторож слеп")
         найдено = []
         for f in files:
-            if f in self.МОЖНО or not f.endswith((".py", ".sh", ".kt", ".md", ".xml")):
+            if f in self.МОЖНО or not f.endswith(self.РАСШИРЕНИЯ):
                 continue
             try:
                 with open(os.path.join(корень, f), encoding="utf-8") as fh:

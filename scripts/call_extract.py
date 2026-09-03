@@ -24,6 +24,13 @@ import mara_ingest as mi
 import call_asr
 import vault_common
 
+# Файл читаем на импорте, а не лениво: ниже из окружения берутся ручки
+# настройки, и после ленивого перехода они молча перестали читаться из файла —
+# `нужен_адрес` вызывается уже после того, как константы вычислены. Тестовый
+# процесс от этого больше не страдает: `run-tests.sh` уводит MARA_ENV_FILE в
+# несуществующий файл.
+vault_common.load_env()
+
 OLLAMA = os.environ.get("MARA_LLM_URL") or None
 MODEL = os.environ.get("MARA_EXTRACT_MODEL", "qwen3.5:9b")
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))
