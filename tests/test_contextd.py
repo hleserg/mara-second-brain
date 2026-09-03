@@ -758,6 +758,66 @@ class ТестКривойДлины(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
+    def test_длинное_число_в_длине_не_роняет_обработчик(self):
+        """Круг 3. `int()` от строки длиннее 4300 цифр кидает ValueError, а
+        `isdigit` её пропускал. Заголовок влезает в 64 КиБ, `отлуп` зовёт
+        `длина` до проверки токена — то есть анониму хватало одного запроса,
+        чтобы получить трейсбек вместо ответа."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            for цифр in (20, 4301, 5000):
+                длинная = "1" * цифр
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": длинная}, b"", токен), 400,
+                    "длина из %d цифр должна давать 400" % цифр)
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": длинная}, b""), 401,
+                    "без токена длина из %d цифр роняла обработчик" % цифр)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_две_длины_и_chunked_рядом_с_длиной_это_400(self):
+        """Два разных Content-Length и `Transfer-Encoding` вместе с длиной:
+        границу тела в обоих случаях выбирает не сервер, а отправитель, и
+        остаток тела уезжает в следующий запрос по тому же соединению."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            import http.client
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=10)
+            c.putrequest("POST", "/v1/ingest/event", skip_accept_encoding=True)
+            c.putheader("Authorization", "Bearer " + токен)
+            c.putheader("Content-Length", "2")
+            c.putheader("Content-Length", "9")
+            c.endheaders()
+            c.send(b"{}")
+            self.assertEqual(c.getresponse().status, 400)
+            c.close()
+            self.assertEqual(
+                self.запрос(srv, "/v1/ingest/event",
+                            {"Content-Length": "2", "Transfer-Encoding": "chunked"},
+                            b"{}", токен), 400)
+            self.assertEqual(con.execute("select count(*) from events").fetchone()[0], 0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_json_не_объект_это_400_а_не_traceback(self):
+        """`5` и `[]` — валидный json, но дальше по коду сплошь data.get."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            for тело in (b"5", b"[]", b'"text"'):
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": str(len(тело))}, тело, токен),
+                    400, "тело %r роняло обработчик" % тело)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
     def test_chunked_без_длины_не_создаёт_пустое_событие(self):
         """n=0 при chunked означал «пустое тело»: событие заводилось, а тело
         оставалось в сокете и ломало следующий запрос."""

@@ -365,6 +365,10 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(raw or b"{}")
         except ValueError:
             return self.say(400, {"error": "не json"})
+        if not isinstance(data, dict):
+            # `5` и `[]` — валидный json, но дальше по коду сплошь data.get,
+            # и обработчик падал без ответа
+            return self.say(400, {"error": "не json"})
         if p.path in ("/v1/ingest/event", "/v1/ingest/message", "/v1/ingest/email"):
             kind = {"/v1/ingest/message": "message",
                     "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
@@ -440,16 +444,28 @@ def слить(поток, n, куда):
 def длина(handler):
     """Content-Length числом. None — читать тело нельзя, границы не знаем.
 
-    isdigit, а не int(): `int` глотает `+5`, ` 5 `, `1_000` и `-1`, а HTTP —
-    нет. Сервер прочитал бы пять байт, а хвост тела уехал бы в следующий
-    запрос по тому же keep-alive соединению. isascii — потому что `isdigit`
-    верен и для `²`, на котором `int` падает. Chunked без длины сюда же:
-    разбирать его мы не умеем.
+    isdigit, а не int(): `int` глотает `+5`, `1_000` и `-1`, а HTTP — нет.
+    Сервер прочитал бы пять байт, а хвост тела уехал бы в следующий запрос по
+    тому же keep-alive соединению. isascii — потому что `isdigit` верен и для
+    `²`, на котором `int` падает. Длину ограничиваем 19 цифрами: с CPython 3.11
+    `int()` от строки длиннее 4300 цифр кидает ValueError, а заголовок влезает
+    в 64 КиБ — то есть анонимный запрос ронял обработчик без ответа вовсе.
+    Число из 19 цифр это 9 эксабайт, до лимита тела ему в любом случае далеко.
+
+    Chunked разбирать мы не умеем, поэтому любой Transfer-Encoding — отказ,
+    даже с Content-Length рядом: сервер прочитал бы столько байт, а в
+    соединении осталась бы чанковая обвязка. Два разных Content-Length — тот
+    же случай: выбирать один из них не наше дело.
     """
-    s = (handler.headers.get("Content-Length") or "").strip()
+    if handler.headers.get("Transfer-Encoding"):
+        return None
+    все = handler.headers.get_all("Content-Length") or []
+    if len(все) > 1:
+        return None
+    s = (все[0] if все else "").strip()
     if not s:
-        return None if handler.headers.get("Transfer-Encoding") else 0
-    return int(s) if s.isascii() and s.isdigit() else None
+        return 0
+    return int(s) if s.isascii() and s.isdigit() and len(s) <= 19 else None
 
 
 def blob_row(con, sha256):
