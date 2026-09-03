@@ -262,10 +262,6 @@ class Api(unittest.TestCase):
                          .fetchone()[0], 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ТестМетрикиНеИзЛокалки(unittest.TestCase):
     """/metrics без токена — только с петли (ТЗ §18).
 
@@ -284,17 +280,27 @@ class ТестМетрикиНеИзЛокалки(unittest.TestCase):
             self.skipTest("в этом окружении нет 127.0.0.2")
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
-            def код(path):
+            def запрос(path, откуда="127.0.0.3"):
                 c = http.client.HTTPConnection("127.0.0.2", srv.server_address[1],
-                                               timeout=5,
-                                               source_address=("127.0.0.3", 0))
+                                               timeout=5, source_address=(откуда, 0))
                 c.request("GET", path)
                 r = c.getresponse()
-                r.read()
+                тело = r.read()
                 c.close()
-                return r.status
+                return r.status, тело
 
-            self.assertEqual(код("/metrics"), 401)
-            self.assertEqual(код("/healthz"), 200)   # проверка связи с телефона
+            self.assertEqual(запрос("/metrics")[0], 401)
+            код, тело = запрос("/healthz")           # проверка связи с телефона
+            self.assertEqual(код, 200)
+            # наружу — только «жив»: счётчики выдают распорядок дня владельца
+            self.assertEqual(json.loads(тело), {"ok": True})
+            код, тело = запрос("/healthz", "127.0.0.1")
+            self.assertEqual(код, 200)
+            self.assertIn("free_gb", json.loads(тело))
         finally:
             srv.shutdown()
+            srv.server_close()
+
+
+if __name__ == "__main__":
+    unittest.main()
