@@ -8,3 +8,16 @@ __pycache__/
 # приёмник ambient memory: база, блобы и частичные загрузки вне репо
 contextd.db
 *.part
+
+# ТЗ §18: deny-by-default для всего, что не должно попасть в публичный репо.
+*.env
+!*.env.example
+/etc/
+*token*.json
+*credential*
+*secret*
+.tdlib/
+tdlib/
+gmail/
+*.apk
+/raw/
