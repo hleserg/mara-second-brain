@@ -103,6 +103,35 @@ class Установщик(unittest.TestCase):
         self.assertTrue(копии, "копия не сделана — откатываться не с чего")
         with open(os.path.join(self.tmp, "state", копии[0]), encoding="utf-8") as fh:
             self.assertIn(ЧУЖОЕ, fh.read())
+    def test_блок_без_закрывающей_строки_не_съедает_чужое(self):
+        """END стёрли правкой через `crontab -e`. awk с флагом дальше не
+        сбрасывается, и всё, что ниже BEGIN, пропадает из разбора — а новые
+        работы crontab -e дописывает как раз в конец."""
+        начало = ("# >>> mara-second-brain: install/mara.cron, "
+                  "правки руками затрёт >>>")
+        self.таблицу(начало + "\n0 1 * * * /bin/true\n" + ЧУЖОЕ + "\n")
+        r = self.запуск("--check")
+        self.assertIn("маркеры", r.stderr)
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn(ЧУЖОЕ, self.прочесть(), "чужую работу снесли молча")
+
+    def test_нечитаемый_crontab_не_повод_ставить_с_нуля(self):
+        """`crontab -l` отвечает единицей и на «крона нет», и на «нет прав».
+        Приняв второе за первое, установщик затёр бы чужое расписание, а копия
+        легла бы пустой — откатываться было бы нечем."""
+        with open(os.path.join(self.tmp, "bin", "crontab"), "w") as fh:
+            fh.write("#!/usr/bin/env bash\n"
+                     'if [ "${1:-}" = "-l" ]; then\n'
+                     '  echo "You (sergey) are not allowed to use this program" >&2\n'
+                     "  exit 1\n"
+                     "fi\n"
+                     'cp "$1" "%s"\n' % self.таблица)
+        self.таблицу(ЧУЖОЕ + "\n")
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("не читается", r.stderr)
+        self.assertIn(ЧУЖОЕ, self.прочесть(), "расписание затёрли по отказу -l")
 
 
 if __name__ == "__main__":

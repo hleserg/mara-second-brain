@@ -10,7 +10,9 @@
 #   install-cron.sh --apply    поставить, сделав копию текущего crontab
 #
 # Чужие строки (не из этого репозитория) не трогаются: на doctor живут кроны
-# соседних проектов.
+# соседних проектов. А вот строки, где упомянут путь этого репозитория,
+# --apply УДАЛЯЕТ, а не переносит: их место занимает блок из mara.cron.
+# --check показывает такие строки заранее — прочитать список обязательно.
 set -euo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -22,9 +24,25 @@ END="# <<< mara-second-brain <<<"
 
 рендер() {
   printf '%s\n' "$BEGIN"
-  sed -e "s|@REPO@|$REPO|g" -e "s|@STATE@|$STATE|g" -e "s|@VENV@|$VENV|g" "$TPL"
+  # ${x//&/\\&}: в правой части `s|…|…|` амперсанд означает «весь матч», и
+  # путь с ним подставился бы искажённым — молча, в живой crontab
+  sed -e "s|@REPO@|${REPO//&/\\&}|g" -e "s|@STATE@|${STATE//&/\\&}|g" \
+      -e "s|@VENV@|${VENV//&/\\&}|g" "$TPL"
   printf '%s\n' "$END"
 }
+
+# Б2. `crontab -l` отвечает единицей и на «крона нет», и на «нет прав», и на
+# сломанный демон. Не различив причины, установщик принял бы отказ за пустой
+# crontab: чужое расписание он бы затёр, копия легла бы пустой, а «откат»
+# вернул бы эту пустоту — восстанавливать было бы не из чего. Проверяем один
+# раз, до всего, и на непонятном отказе не трогаем ничего.
+if ! out=$(crontab -l 2>&1); then
+  case "$out" in
+    *"no crontab for"*|"") ;;
+    *) echo "== crontab -l не читается, ничего не трогаю: $out" >&2; exit 3 ;;
+  esac
+fi
+WAS_EMPTY=$([ -n "$out" ] && echo 0 || echo 1)
 
 живой() { crontab -l 2>/dev/null || true; }
 
@@ -39,6 +57,19 @@ END="# <<< mara-second-brain <<<"
 # находятся — а значит, пережили бы установку и работали бы вторым экземпляром.
 наши() { grep -F "$@" -e "$REPO/" -e "~/${REPO#$HOME/}/"; }
 
+# Б1. Незакрытый или задвоенный блок. `awk` с флагом `f` не сбрасывает его
+# никогда, если END стёрли правкой через `crontab -e`, — и всё, что ниже
+# BEGIN, молча пропадает из `мимо` и из сборки нового crontab. А новые работы
+# `crontab -e` дописывает как раз в конец, то есть ниже блока. Одна стёртая
+# замыкающая строка стоила бы всех работ под ней, и --apply отчитался бы
+# «поставлено».
+маркеры() {
+  local b e
+  b=$(живой | grep -cxF -e "$BEGIN" || true)
+  e=$(живой | grep -cxF -e "$END" || true)
+  [ "$b" = "$e" ] && [ "$b" -le 1 ]
+}
+
 мимо() {
   живой | awk -v b="$BEGIN" -v e="$END" '$0==b{f=1} !f{print} $0==e{f=0}' \
         | наши || true
@@ -48,20 +79,32 @@ mode="${1:---check}"
 case "$mode" in
   --check)
     drift=0
-    if ! diff -u <(блок) <(рендер) > /tmp/mara-cron-diff.$$; then
-      echo "== crontab расходится с репозиторием:"; cat /tmp/mara-cron-diff.$$
+    diff=$(mktemp); trap 'rm -f "$diff"' EXIT
+    if ! маркеры; then
+      echo "== маркеры блока в crontab побиты: строки ниже BEGIN не видны," \
+           "--apply их сотрёт. Поправьте crontab -e руками." >&2
+      drift=1
+    fi
+    if ! diff -u <(блок) <(рендер) > "$diff"; then
+      echo "== crontab расходится с репозиторием:"; cat "$diff"
       drift=1
     else
       echo "== блок в crontab совпадает с install/mara.cron"
     fi
-    rm -f /tmp/mara-cron-diff.$$
+    rm -f "$diff"
     if [ -n "$(мимо)" ]; then
       echo "== строки Мары мимо блока (их заменит --apply):"; мимо | sed 's/^/   /'
       drift=1
     fi
     exit $drift
     ;;
-  --apply) ;;
+  --apply)
+    if ! маркеры; then
+      echo "== маркеры блока в crontab побиты: строки ниже BEGIN не видны," \
+           "и --apply стёр бы их молча. Ничего не трогаю, поправьте crontab -e." >&2
+      exit 3
+    fi
+    ;;
   *) echo "использование: $0 [--check|--apply]" >&2; exit 2 ;;
 esac
 
@@ -84,14 +127,21 @@ trap 'rm -f "$newtab"' EXIT
 crontab "$newtab"
 
 # Проверяем не то, что отправили, а то, что crontab принял.
-if diff -u <(блок) <(рендер) > /tmp/mara-cron-verify.$$; then
+verify=$(mktemp)
+trap 'rm -f "$newtab" "$verify"' EXIT
+if diff -u <(блок) <(рендер) > "$verify"; then
   echo "== поставлено, строк Мары: $(рендер | grep -cE '^[0-9*]')"
 else
   echo "== crontab принял не то, что отправляли:" >&2
-  cat /tmp/mara-cron-verify.$$ >&2
-  echo "== возврат из $backup" >&2
-  crontab "$backup"
-  rm -f /tmp/mara-cron-verify.$$
+  cat "$verify" >&2
+  if [ -s "$backup" ] || [ "$WAS_EMPTY" = 1 ]; then
+    echo "== возврат из $backup" >&2
+    crontab "$backup"
+  else
+    echo "== копия $backup пуста, а crontab пустым не был: не откатываюсь," \
+         "иначе расписание исчезнет совсем" >&2
+  fi
+  rm -f "$verify"
   exit 1
 fi
-rm -f /tmp/mara-cron-verify.$$
+rm -f "$verify"
