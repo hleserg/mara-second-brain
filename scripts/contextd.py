@@ -81,7 +81,9 @@ def клиент(handler):
     """
     peer = handler.client_address[0]
     if peer in TRUSTED_PROXY:
-        fwd = handler.headers.get("X-Forwarded-For") or ""
+        # get_all, а не get: при двух заголовках `get` берёт первый, то есть
+        # присланный клиентом, а не дописанный прокси
+        fwd = (handler.headers.get_all("X-Forwarded-For") or [""])[-1]
         цепочка = [a.strip() for a in fwd.split(",") if a.strip()]
         if цепочка:
             return цепочка[-1]
@@ -260,22 +262,26 @@ class Handler(BaseHTTPRequestHandler):
             self.server._local.con = mi.connect(self.server.root)
         return self.server._local.con
 
+    timeout = 60                     # зависшая заливка иначе держит поток вечно
+
     def log_message(self, fmt, *args):
         pass                                  # свой лог, санитарный
 
-    def say(self, code, obj, ctype="application/json", closing=False):
+    def say(self, code, obj, ctype="application/json", closing=False, ещё=None):
         body = (obj if isinstance(obj, (bytes, bytearray)) else
                 json.dumps(obj, ensure_ascii=False).encode("utf-8")
                 if ctype == "application/json" else obj.encode("utf-8"))
         self.send_response(code)
         if closing:
             self.send_header("Connection", "close")
+        for k, v in (ещё or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def отлуп(self, code, текст):
+    def отлуп(self, code, текст, ещё=None):
         """Ответ на тело, которое мы отказались читать.
 
         Клиент в этот момент ещё шлёт: закроем соединение молча — он увидит
@@ -283,14 +289,16 @@ class Handler(BaseHTTPRequestHandler):
         СЛИВ: отказ читать полгигабайта — половина смысла лимита.
         """
         n = int(self.headers.get("Content-Length") or 0)
-        слить(self.rfile, min(n, СЛИВ), io.BytesIO())
+        слить(self.rfile, min(n, СЛИВ), Никуда())
         self.close_connection = True
-        return self.say(code, {"error": текст}, closing=True)
+        return self.say(code, {"error": текст}, closing=True, ещё=ещё)
 
     def body(self, лимит=MAX_JSON):
         n = int(self.headers.get("Content-Length") or 0)
-        if n > лимит:
-            raise ValueError("тело больше %d МиБ" % (лимит >> 20))
+        # не `n > лимит`: `Content-Length: -1` проходил такую проверку, а
+        # `rfile.read(-1)` читает до конца соединения — лимит обходился строкой
+        if not 0 <= n <= лимит:
+            raise ValueError("тело больше %d МиБ или длина кривая" % (лимит >> 20))
         return self.rfile.read(n) if n else b""
 
     def authed(self, path):
@@ -308,18 +316,13 @@ class Handler(BaseHTTPRequestHandler):
             под_замком(adr, True)
             return True
         if ждать:
-            self.send_response(429)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Retry-After", str(ждать))
-            тело = json.dumps({"error": "слишком много попыток"},
-                              ensure_ascii=False).encode("utf-8")
-            self.send_header("Content-Length", str(len(тело)))
-            self.end_headers()
-            self.wfile.write(тело)
             print("429 %s %s: подбор токена, ждать %dс" % (adr, path, ждать), flush=True)
+            self.отлуп(429, "слишком много попыток", {"Retry-After": str(ждать)})
             return False
         print("401 %s %s" % (adr, path), flush=True)
-        self.say(401, {"error": "устройство не опознано"})
+        # тело неопознанного запроса тоже вычитываем: иначе его хвост уедет в
+        # следующий запрос на том же соединении и сервер ответит 400 на мусор
+        self.отлуп(401, "устройство не опознано")
         return False
 
     def do_GET(self):
@@ -349,8 +352,9 @@ class Handler(BaseHTTPRequestHandler):
         con = self.con()
         if p.path == "/v1/ingest/audio":
             n = int(self.headers.get("Content-Length") or 0)
-            if n > MAX_BODY:
-                return self.отлуп(413, "тело больше %d МиБ" % (MAX_BODY >> 20))
+            if not 0 <= n <= MAX_BODY:
+                return self.отлуп(413, "тело больше %d МиБ или длина кривая"
+                                  % (MAX_BODY >> 20))
             q = urllib.parse.parse_qs(p.query)
             code, out = ingest_audio(con, self.server.root,
                                      (q.get("event") or [""])[0], self.rfile, n)
@@ -403,6 +407,18 @@ class Handler(BaseHTTPRequestHandler):
 КУСОК = 1 << 20                          # мегабайт за чтение
 
 
+class Никуда:
+    """Сток для тела, которое нужно вычитать, но некуда девать.
+
+    io.BytesIO на этом месте копил в памяти всё, что читал: заливка дубля на
+    128 МиБ поднимала RSS демона на те же 128 МиБ — ровно та беда, ради
+    которой заливку делали потоковой.
+    """
+
+    def write(self, кусок):
+        return len(кусок)
+
+
 def слить(поток, n, куда):
     """Тело запроса на диск кусками, попутно считая sha256.
 
@@ -435,20 +451,22 @@ def ingest_audio(con, root, event_id, поток, n=None):
     row = con.execute("select blob_sha256, payload_json, state from events where id=?",
                       (event_id,)).fetchone()
     if not row:
-        слить(поток, n or 0, io.BytesIO())    # тело всё равно вычитать, иначе
+        слить(поток, n or 0, Никуда())    # тело всё равно вычитать, иначе
         return 404, {"error": "нет такого события"}   # keep-alive поедет вразнос
     want = row["blob_sha256"]
     if not want:
-        слить(поток, n or 0, io.BytesIO())
+        слить(поток, n or 0, Никуда())
         return 400, {"error": "событие без аудио"}
     ext = (json.loads(row["payload_json"] or "{}").get("ext")) or "bin"
     path = mi.blob_path(root, want, ext)
     if os.path.exists(path):
-        слить(поток, n or 0, io.BytesIO())
+        слить(поток, n or 0, Никуда())
         return 200, {"event_id": event_id, "blob_sha256": want,
                      "bytes": os.path.getsize(path), "duplicate": True}
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".part"
+    # имя на поток: потоковая заливка растянула гонку двух одновременных
+    # загрузок одного блоба с микросекунд на всё время закачки
+    tmp = "%s.%d.part" % (path, threading.get_ident())
     with open(tmp, "wb") as fh:
         got, размер = слить(поток, n or 0, fh)
     if got != want:

@@ -272,15 +272,15 @@ class CoreTest {
 
     @Test
     fun `по http пускаем только в свою сеть`() {
-        assertNull(Адрес.беда("http://192.168.1.51:8788"))
+        assertNull(Адрес.беда("http://192.168.0.2:8788"))
         assertNull(Адрес.беда("http://10.0.0.5:8788"))
         assertNull(Адрес.беда("http://doctor.local:8788"))
         assertNull(Адрес.беда("https://mara.example.ru"))
         // наружу открытым текстом — туда уедет токен, а следом записи
         assertNotNull(Адрес.беда("http://mara.example.ru"))
         assertNotNull(Адрес.беда("http://8.8.8.8:8788"))
-        assertNotNull(Адрес.беда("ftp://192.168.1.51"))
-        assertNotNull(Адрес.беда("192.168.1.51:8788"))
+        assertNotNull(Адрес.беда("ftp://192.168.0.2"))
+        assertNotNull(Адрес.беда("192.168.0.2:8788"))
         assertNotNull(Адрес.беда(""))
         // 172.16/12 — частная, 172.32 уже нет
         assertNull(Адрес.беда("http://172.20.0.3:8788"))

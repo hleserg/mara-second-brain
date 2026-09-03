@@ -344,6 +344,10 @@ class ТестЛимитПопыток(unittest.TestCase):
             def get(self, k, d=None):
                 return dict.get(self, k, d)
 
+            def get_all(self, k, d=None):
+                v = dict.get(self, k)
+                return [v] if v is not None else d
+
         class Фейк:
             client_address = ("203.0.113.7", 1234)
             headers = Заголовки({"X-Forwarded-For": "10.0.0.1"})
@@ -355,6 +359,117 @@ class ТестЛимитПопыток(unittest.TestCase):
             self.assertEqual(contextd.клиент(Фейк()), "10.0.0.1")
         finally:
             contextd.TRUSTED_PROXY = прежние
+
+
+class ТестПоРевьюГраницы(unittest.TestCase):
+    """Находки ревью PR #14: кривая длина, память на дублях, заголовки."""
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        srv = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(каталог)
+        _, токен = contextd.pair(con, "телефон")
+        return каталог, srv, con, токен
+
+    def test_отрицательная_длина_не_обходит_лимит(self):
+        """Content-Length: -1 проходил `n > лимит`, а read(-1) читает до EOF."""
+        import http.client
+        каталог, srv, con, токен = self.поднять()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            c.putrequest("POST", "/v1/ingest/event")
+            c.putheader("Authorization", "Bearer " + токен)
+            c.putheader("Content-Type", "application/json")
+            c.putheader("Content-Length", "-1")
+            c.endheaders()
+            c.send(b'{"kind": "call"}')
+            r = c.getresponse()
+            r.read()
+            self.assertEqual(r.status, 413)
+            c.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_дубль_не_поднимает_тело_в_память(self):
+        """Сток на выходах ingest_audio — Никуда, а не буфер в памяти."""
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        сырьё = b"x" * (contextd.КУСОК + 7)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "дубль",
+                                    "blob": {"sha256": sha, "bytes": len(сырьё),
+                                             "ext": "m4a"}})
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(сырьё), len(сырьё))
+
+        class Считающий(io.BytesIO):
+            """Ловит попытку сложить тело в память."""
+            накопил = 0
+
+            def write(self, b):
+                Считающий.накопил += len(b)
+                return len(b)
+
+        было = contextd.Никуда
+        contextd.Никуда = Считающий
+        try:
+            поток = io.BytesIO(сырьё)
+            код, ответ = contextd.ingest_audio(con, каталог, eid, поток, len(сырьё))
+        finally:
+            contextd.Никуда = было
+        self.assertTrue(ответ.get("duplicate"), ответ)
+        # тело обязано быть вычитано целиком: хвост иначе уедет в следующий
+        # запрос на том же соединении
+        self.assertEqual(поток.tell(), len(сырьё))
+        self.assertEqual(Считающий.накопил, len(сырьё), "сток не тот, что заявлен")
+        self.assertEqual(contextd.Никуда().write(b"12345"), 5)
+
+    def test_второй_forwarded_for_не_подменяет_клиента(self):
+        """При двух заголовках берём последний — дописанный прокси, не клиентом."""
+        class Заголовки:
+            def __init__(self, *значения):
+                self.значения = list(значения)
+
+            def get_all(self, k, d=None):
+                return self.значения or d
+
+            def get(self, k, d=None):
+                return self.значения[0] if self.значения else d
+
+        class Фейк:
+            client_address = ("203.0.113.7", 1234)
+            headers = Заголовки("10.9.9.9", "198.51.100.4")
+
+        прежние = contextd.TRUSTED_PROXY
+        contextd.TRUSTED_PROXY = ("203.0.113.7",)
+        try:
+            self.assertEqual(contextd.клиент(Фейк()), "198.51.100.4")
+        finally:
+            contextd.TRUSTED_PROXY = прежние
+
+    def test_401_с_телом_закрывает_соединение(self):
+        """Иначе хвост тела уедет в следующий запрос и сервер ответит 400."""
+        import http.client
+        каталог, srv, con, токен = self.поднять()
+        contextd._неудачи.clear()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            c.request("POST", "/v1/ingest/event", body=b'{"kind": "call"}',
+                      headers={"Authorization": "Bearer nope",
+                               "Content-Type": "application/json"})
+            r = c.getresponse()
+            r.read()
+            self.assertEqual(r.status, 401)
+            self.assertEqual(r.getheader("Connection"), "close")
+            c.close()
+        finally:
+            contextd._неудачи.clear()
+            srv.shutdown()
+            srv.server_close()
 
 
 class ТестРазмерТела(unittest.TestCase):
