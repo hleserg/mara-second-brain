@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Сверка состояния приёма (спека §9, ТЗ §17). Крон раз в час.
 
-Девять инвариантов. То, что чинится однозначно, сверка чинит сама: ставит
+Инварианты приёма. То, что чинится однозначно, сверка чинит сама: ставит
 пропущенную работу извлечения, снимает с ретраев работу, у которой пропал
 исходник. То, где нужен человек, она только докладывает — файлы не удаляет
 никогда, даже осиротевшие: единственная копия личного разговора стирается по
@@ -23,6 +23,9 @@ sys.path.insert(0, HERE)
 import mara_ingest as mi
 
 VAULT = os.environ.get("VAULT", "/srv/vault")
+НОСИТЕЛИ = os.environ.get("MARA_CORE_TARGETS",
+                          "/mnt/backup/mara /mnt/win-backups/mara").split()
+БЭКАП_СУТКИ = float(os.environ.get("MARA_CORE_BACKUP_MAX_DAYS", 2))
 BM_DB = os.environ.get("MARA_BM_DB", os.path.expanduser("~/.basic-memory/memory.db"))
 КАРТОЧКИ = ("kb/conversations", "kb/commitments")
 
@@ -236,7 +239,39 @@ def dlq(con):
                     % (n, row["kind"], (row["last_error"] or "")[:120]), count=n)]
 
 
-def run(con, root=None, vault=VAULT, bm_db=BM_DB):
+def бэкап_ядра(targets=None, days=БЭКАП_СУТКИ):
+    """Бэкап ядра встал. Сам прогон бэкапа проверяет, что архив
+    разворачивается; здесь мы проверяем, что архив вообще появляется —
+    молчащий крон выглядит точно так же, как отсутствующий (P0-2, P0-5).
+
+    Архивов нет вовсе — это ещё не поломка, а несделанная настройка: warn.
+    Были и перестали — это отказ, о котором надо знать: error."""
+    targets = НОСИТЕЛИ if targets is None else targets
+    свежий, доступных = None, 0
+    for t in targets:
+        if not os.path.isdir(t):
+            continue
+        доступных += 1
+        for f in glob.glob(os.path.join(t, "core-*.tar.gz.gpg")):
+            m = os.path.getmtime(f)
+            свежий = m if свежий is None or m > свежий else свежий
+    if not доступных:
+        return [находка("бэкап-ядра-носители", "warn",
+                        "ни один носитель бэкапа не смонтирован: %s"
+                        % " ".join(targets))]
+    if свежий is None:
+        return [находка("бэкап-ядра-нет", "warn",
+                        "на носителях нет ни одного архива ядра — "
+                        "core-backup.py ещё не поставлен в крон")]
+    возраст = (time.time() - свежий) / 86400.0
+    if возраст > days:
+        return [находка("бэкап-ядра-устарел", "error",
+                        "последний бэкап ядра %.1f сут. назад — смотреть крон и "
+                        "core-backup.log" % возраст, days=round(возраст, 1))]
+    return []
+
+
+def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     root = root or mi.ROOT
     out = []
     out += манифест_без_блоба(con, root)
@@ -249,6 +284,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB):
     out += запись_не_долита(con)
     out += дайджест_не_доставлен(con)
     out += dlq(con)
+    out += бэкап_ядра(targets)
     return out
 
 
@@ -316,7 +352,13 @@ def self_check():
     root = tempfile.mkdtemp()
     mi.ROOT = root
     con = mi.connect(root)
-    assert run(con, root, vault=None) == [], "на пустой базе находок быть не должно"
+    # свежий «архив» на игрушечном носителе: иначе проверка бэкапа честно
+    # ругалась бы на любую машину, где /mnt/backup не смонтирован
+    носитель = os.path.join(root, "backup")
+    os.makedirs(носитель)
+    open(os.path.join(носитель, "core-0000-00-00.tar.gz.gpg"), "wb").write(b"gpg")
+    assert run(con, root, vault=None, targets=[носитель]) == [], \
+        "на пустой базе находок быть не должно"
     assert код([]) == 0
     eid, _ = mi.put_event(con, {"kind": "call", "source": "sc", "source_id": "1",
                                 "blob": {"sha256": "d" * 64, "ext": "m4a"}})
