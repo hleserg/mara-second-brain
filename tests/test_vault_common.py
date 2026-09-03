@@ -31,15 +31,38 @@ class ТестОкружениеИзФайла(unittest.TestCase):
 
     def test_нужен_адрес_умирает_внятно(self):
         """Раньше тут был адрес домашней сети по умолчанию: промах мимо порта
-        выглядел как таймаут, а не как ненастроенная машина."""
+        выглядел как таймаут, а не как ненастроенная машина.
+
+        MARA_ENV_FILE уводим в никуда руками. `нужен_адрес` на промахе читает
+        env-файл, а на doctor он лежит на месте: без подмены тест затянул бы в
+        свой процесс живой OPENROUTER_API_KEY и назвал бы в сообщении чужой
+        путь. Что по умолчанию это `~/.config/mara/env` — проверяет
+        `test_путь_по_умолчанию`.
+        """
         os.environ.pop("МАРА_ТЕСТ_А", None)
-        with self.assertRaises(SystemExit) as e:
-            vault_common.нужен_адрес("МАРА_ТЕСТ_А", "коробка с чем-то")
-        self.assertIn("МАРА_ТЕСТ_А", str(e.exception))
-        self.assertIn("~/.config/mara/env", str(e.exception))
-        os.environ["МАРА_ТЕСТ_А"] = "http://есть:1"
-        self.assertEqual(vault_common.нужен_адрес("МАРА_ТЕСТ_А", "что-то"),
-                         "http://есть:1")
+        нет = os.path.join(tempfile.mkdtemp(), "нет-такого")
+        было = os.environ.get("MARA_ENV_FILE")
+        os.environ["MARA_ENV_FILE"] = нет
+        try:
+            with self.assertRaises(SystemExit) as e:
+                vault_common.нужен_адрес("МАРА_ТЕСТ_А", "коробка с чем-то")
+            self.assertIn("МАРА_ТЕСТ_А", str(e.exception))
+            self.assertIn(нет, str(e.exception))
+            os.environ["МАРА_ТЕСТ_А"] = "http://есть:1"
+            self.assertEqual(vault_common.нужен_адрес("МАРА_ТЕСТ_А", "что-то"),
+                             "http://есть:1")
+        finally:
+            os.environ.pop("MARA_ENV_FILE", None)
+            if было is not None:
+                os.environ["MARA_ENV_FILE"] = было
+
+    def test_путь_по_умолчанию(self):
+        было = os.environ.pop("MARA_ENV_FILE", None)
+        try:
+            self.assertEqual(vault_common.env_file(), "~/.config/mara/env")
+        finally:
+            if было is not None:
+                os.environ["MARA_ENV_FILE"] = было
 
 
 class ТестРазбораEnv(unittest.TestCase):
