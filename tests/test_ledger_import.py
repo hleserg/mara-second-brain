@@ -135,12 +135,107 @@ class Перенос(unittest.TestCase):
         self.assertEqual([п["path"] for п in self.строки("projections")],
                          ["kb/commitments/2026-09-03-a.md"])
 
+    def test_два_обязательства_переносятся_оба(self):
+        # без этого теста мимо гейта проходит потеря фильтра по object_id в
+        # `delete from projections`: с одним объектом стирать нечего, а с
+        # двумя вторая карточка сносит проекцию первой
+        карточка(self.vault, "kb/commitments/2026-09-03-a.md",
+                 source_id="commitment/call_1/requests/1")
+        карточка(self.vault, "kb/commitments/2026-09-03-b.md",
+                 source_id="commitment/call_2/requests/1", status="done")
+        итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["спорных"]), (2, 0))
+        self.assertEqual(len(self.строки("commitments")), 2)
+        self.assertEqual(sorted(п["path"] for п in self.строки("projections")),
+                         ["kb/commitments/2026-09-03-a.md",
+                          "kb/commitments/2026-09-03-b.md"])
+        # id у объектов разные, и каждая проекция смотрит на свой
+        пары = {п["path"]: п["object_id"] for п in self.строки("projections")}
+        self.assertEqual(len(set(пары.values())), 2)
+
     def test_проба_ничего_не_пишет(self):
         карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
         итог = self.перенести(dry_run=True)
         self.assertEqual(итог["обязательств"], 1, "проба считает, как настоящий")
         self.assertEqual(self.строки("commitments"), [])
         self.assertEqual(self.строки("projections"), [])
+
+    def test_проба_поверх_перенесённого_волта_тоже_не_пишет(self):
+        # владелец запустит `--dry-run` вторым заходом, чтобы посмотреть, что
+        # изменилось: на этом пути все карточки уже не новые, и проба обязана
+        # молчать в базу так же, как на пустой
+        p = карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        self.перенести()
+        было = self.строки("commitments")[0]["id"]
+        with open(p, "rb") as fh:
+            отпечаток = hashlib.sha256(fh.read()).hexdigest()
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md", status="done")
+        итог = self.перенести(dry_run=True)
+        self.assertEqual((итог["обновлено"], итог["обязательств"]), (1, 0))
+        r, = self.строки("commitments")
+        self.assertEqual((r["id"], r["status"]), (было, "proposed"),
+                         "проба не переписывает строку")
+        пр, = self.строки("projections")
+        self.assertEqual(пр["content_sha256"], отпечаток,
+                         "проба не двигает отпечаток")
+
+    def test_bom_и_crlf_не_прячут_шапку(self):
+        # Obsidian через синк с винды кладёт и то, и другое. Без нормализации
+        # шапка не матчится, и карточка заводится объектом со всеми NULL
+        p = карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8", newline="") as fh:
+            fh.write("\ufeff" + текст.replace("\n", "\r\n"))
+        self.assertEqual(self.перенести()["обязательств"], 1)
+        r, = self.строки("commitments")
+        self.assertEqual(r["source_native_id"], "commitment/call_1/requests/1")
+        self.assertEqual(r["title"], "прислать смету")
+
+    def test_карточка_без_шапки_не_заводит_объект_из_пустоты(self):
+        os.makedirs(os.path.join(self.vault, "kb/commitments"))
+        with open(os.path.join(self.vault, "kb/commitments/черновик.md"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("просто заметка, шапки нет\n")
+        итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["спорных"]), (0, 1))
+        self.assertEqual(self.строки("commitments"), [])
+
+    def test_списочное_поле_не_роняет_перенос(self):
+        # `supersedes: [a, b]` человек напишет руками первым делом, а падение
+        # уносит с собой все карточки, которые дальше по алфавиту
+        p = карточка(self.vault, "kb/commitments/2026-09-03-a.md")
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("title: ", "supersedes:\n- x\n- y\ntitle: ", 1))
+        карточка(self.vault, "kb/commitments/2026-09-03-b.md",
+                 source_id="commitment/call_2/requests/1")
+        итог = self.перенести()
+        self.assertEqual(итог["обязательств"], 2, "вторая карточка не потерялась")
+        r, = [x for x in self.строки("commitments")
+              if x["source_native_id"].endswith("call_1/requests/1")]
+        self.assertEqual(r["supersedes"], "x, y")
+
+    def test_нечитаемый_файл_не_обрывает_прогон(self):
+        os.makedirs(os.path.join(self.vault, "kb/commitments"))
+        os.symlink(os.path.join(self.vault, "kb/commitments/нет.md"),
+                   os.path.join(self.vault, "kb/commitments/0-битый.md"))
+        os.makedirs(os.path.join(self.vault, "kb/commitments/1-папка.md"))
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        self.assertEqual(self.перенести()["обязательств"], 1)
+
+    def test_один_source_id_у_разных_видов_не_съедает_разговор(self):
+        # `source_native_id` уникален внутри таблицы, а не поперёк: обязательство
+        # с `source_id: call/…`, поставленным руками, не повод потерять разговор
+        карточка(self.vault, "kb/commitments/2026-09-03-a.md",
+                 source_id="call/call_1")
+        карточка(self.vault, "kb/conversations/2026-09-02-anna.md",
+                 type="conversation", source_id="call/call_1", status=None,
+                 owner=None, promised_to=None, due=None, origin=None)
+        итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["разговоров"], итог["спорных"]),
+                         (1, 1, 0))
 
     def test_пустой_волт_не_падает(self):
         self.assertEqual(self.перенести(),

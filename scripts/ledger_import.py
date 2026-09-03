@@ -62,11 +62,38 @@ def _число(s):
         return None
 
 
+def _строка(v):
+    """Значение фронтматтера строкой. Список — через запятую.
+
+    Разбор фронтматтера отдаёт что положили: `supersedes: [a, b]` приезжает
+    списком, и дальше он ронял либо `.strip()`, либо саму вставку («type
+    'list' is not supported»). Падение посреди прогона — это не «плохая
+    карточка не перенеслась», это «всё, что после неё по алфавиту, не
+    перенеслось тоже».
+    """
+    if v is None or isinstance(v, str):
+        return v
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v) or None
+    return str(v)
+
+
 def карточки(vault, подкаталог):
     for p in sorted(glob.glob(os.path.join(vault, подкаталог, "*.md"))):
-        with open(p, "rb") as fh:
-            raw = fh.read()
-        fm, _ = mb.frontmatter(raw.decode("utf-8", "replace"))
+        try:
+            with open(p, "rb") as fh:
+                raw = fh.read()
+        except OSError as e:
+            # битый симлинк или каталог с именем `*.md`: перенос разовый и
+            # руками, останавливать его из-за одного мусорного имени незачем
+            print("ledger_import: %s не читается (%s) — пропущен"
+                  % (os.path.relpath(p, vault), e), file=sys.stderr)
+            continue
+        # BOM от винды и CRLF из синка: без них `frontmatter` не матчит шапку
+        # вовсе и возвращает пустоту, а карточка молча заводится объектом со
+        # всеми полями NULL и ключом по пути
+        текст = raw.decode("utf-8", "replace").lstrip("\ufeff").replace("\r\n", "\n")
+        fm, _ = mb.frontmatter(текст)
         yield (os.path.relpath(p, vault), fm,
                hashlib.sha256(raw).hexdigest())
 
@@ -75,11 +102,22 @@ def run(con, vault=None, dry_run=False):
     """Перенести всё, что есть. Возвращает счётчики."""
     vault = vault or VAULT
     итог = {"обязательств": 0, "разговоров": 0, "обновлено": 0, "спорных": 0}
-    видели = {}
     for подкаталог, вид, таблица, поля in ВИДЫ:
         счётчик = "обязательств" if вид == "commitment" else "разговоров"
+        # карта своя на каждый вид: `source_native_id` уникален внутри таблицы,
+        # а не поперёк. Одна общая карта означала бы, что обязательство с
+        # `source_id: call/…`, поставленным руками, съедает разговор
+        видели = {}
         for rel, fm, sha in карточки(vault, подкаталог):
-            native = (fm.get("source_id") or "").strip() or "vault:" + rel
+            if not fm:
+                # шапки нет вовсе: завести объект со всеми полями NULL и
+                # ключом по пути хуже, чем не заводить — такая строка потом
+                # даёт дубль при первом же переименовании файла
+                print("ledger_import: %s без фронтматтера — пропущена" % rel,
+                      file=sys.stderr)
+                итог["спорных"] += 1
+                continue
+            native = (_строка(fm.get("source_id")) or "").strip() or "vault:" + rel
             # копия карточки в Obsidian наследует source_id. Молча заменить
             # первую строку второй — это ровно то схлопывание двух объектов
             # в один, которое запрещает §4.4. Считаем и говорим вслух.
@@ -97,13 +135,14 @@ def run(con, vault=None, dry_run=False):
             if dry_run:
                 continue
             oid = mi.uuid7() if новый else row["id"]
-            значения = {k: (fm.get(k) or None) for k in поля}
+            значения = {k: (_строка(fm.get(k)) or None) for k in поля}
             if "confidence" in значения:
                 значения["confidence"] = _число(значения["confidence"])
             значения["id"] = oid
             значения["source_native_id"] = native
-            значения["origin_event"] = (событие(fm.get("origin")) if вид == "commitment"
-                                        else событие(fm.get("source_id")))
+            значения["origin_event"] = (
+                событие(_строка(fm.get("origin"))) if вид == "commitment"
+                else событие(_строка(fm.get("source_id"))))
             имена = sorted(значения)
             con.execute("insert or replace into %s(%s) values(%s)"
                         % (таблица, ",".join(имена), ",".join("?" * len(имена))),
