@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">Mara Capture</string>
-    <string name="hint_url">адрес сервера, например http://100.64.0.1:8788</string>
+    <string name="hint_url">адрес сервера, например http://192.168.0.10:8788</string>
     <string name="hint_token">токен устройства, из contextd --pair</string>
     <string name="save">Сохранить и запустить</string>
     <string name="perms">Выдать разрешения</string>
