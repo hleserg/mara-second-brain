@@ -28,6 +28,10 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vault_common
+
+
 MARK_OPEN, MARK_CLOSE = "<!-- mara:brief -->", "<!-- /mara:brief -->"
 ANCHOR = "\n## Когда он изливает душу"      # блок знаний идёт перед блоками поведения
 KIND = [("projects", "Проекты"), ("people", "Люди"), ("places", "Места и машины"),
@@ -245,7 +249,7 @@ def self_check():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
-    ap.add_argument("--mac", default=os.environ.get("MARA_MAC", "serg@192.168.1.80"))
+    ap.add_argument("--mac", default=os.environ.get("MARA_MAC"))
     ap.add_argument("--soul", default="~/.hermes/SOUL.md", help="путь на маке")
     ap.add_argument("--no-mac", action="store_true", help="только файл в волте")
     ap.add_argument("--self-check", action="store_true")
@@ -260,7 +264,9 @@ def main():
             "Карточки с `sensitive: true` сюда не попадают.\n\n" + block + "\n")
     if not os.path.exists(out) or open(out, encoding="utf-8").read() != body:
         write_atomic(out, body)
-    ok = True if a.no_mac else push_mac(a.mac, a.soul, block)
+    ok = True if a.no_mac else push_mac(
+        a.mac or vault_common.нужен_адрес("MARA_MAC", "мак с Марой"),
+        a.soul, block)
     print(f"mara-brief: карточек {n}, блок {len(block.encode())} байт, мак {'ок' if ok else 'НЕТ'}")
     return 0 if ok else 1
 

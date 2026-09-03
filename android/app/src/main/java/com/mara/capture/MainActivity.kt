@@ -63,7 +63,12 @@ class MainActivity : AppCompatActivity() {
         b.token.setText(s.token)
 
         b.save.setOnClickListener {
-            s.baseUrl = b.url.text.toString()
+            val беда = Адрес.беда(b.url.text.toString())
+            if (беда != null) {
+                покажи("Адрес не годится: $беда")
+                return@setOnClickListener
+            }
+            s.baseUrl = b.url.text.toString().trim()
             s.token = b.token.text.toString()
             if (s.paired) {
                 // чужой токен клал работы в FAILED; новый токен — новая попытка
