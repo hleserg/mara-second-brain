@@ -65,9 +65,19 @@ def sha(path):
 
 def снимок(db, dst):
     """Согласованная копия базы под живым демоном (SQLite backup API)."""
-    # connect, а не mi.connect: бэкап не имеет права писать в боевую базу, а
-    # mi.connect ставит pragma и прогоняет SCHEMA
-    src = sqlite3.connect(db, timeout=30)
+    # mode=ro, а не mi.connect и не обычный connect: mi.connect ставит pragma
+    # и прогоняет SCHEMA, а rw-соединение на закрытии может чекпойнтить WAL —
+    # то есть писать в боевой файл. Бэкап не имеет права ни на то, ни на другое
+    try:
+        src = sqlite3.connect("file:%s?mode=ro" % db, timeout=30, uri=True)
+        src.execute("select count(*) from sqlite_master").fetchone()
+    except sqlite3.OperationalError as e:
+        # WAL после падения демона требует восстановления, а его read-only
+        # соединение сделать не может. Отказаться от бэкапа ровно в тот день,
+        # когда он нужнее всего, хуже, чем один чекпойнт — но сказать вслух
+        print("core-backup: read-only не открылось (%s), беру на запись" % e,
+              file=sys.stderr)
+        src = sqlite3.connect(db, timeout=30)
     try:
         цель = sqlite3.connect(dst)
         try:
@@ -117,7 +127,7 @@ def зеркало_аудио(db, root, target, пароль):
     инкрементальность получается бесплатно."""
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
-    новых, байт, убрано = 0, 0, 0
+    новых, байт, убрано, без_файла = 0, 0, 0, 0
     try:
         for r in con.execute("select sha256, path, purged_at from blobs"):
             рядом = os.path.join(target, os.path.relpath(r["path"], root) + ".gpg")
@@ -126,7 +136,12 @@ def зеркало_аудио(db, root, target, пароль):
                     os.unlink(рядом)
                     убрано += 1
                 continue
-            if os.path.exists(рядом) or not os.path.exists(r["path"]):
+            if not os.path.exists(r["path"]):
+                # строка есть, файла нет — молчать об этом нельзя: ровно эту
+                # тихую потерю бэкап и должен показывать
+                без_файла += 1
+                continue
+            if os.path.exists(рядом):
                 continue
             os.makedirs(os.path.dirname(рядом), mode=0o700, exist_ok=True)
             # ponytail: один gpg на файл — при десятках записей в сутки это
@@ -137,7 +152,8 @@ def зеркало_аудио(db, root, target, пароль):
             байт += os.path.getsize(рядом)
     finally:
         con.close()
-    return {"новых": новых, "байт": байт, "убрано_вычищенных": убрано}
+    return {"новых": новых, "байт": байт, "убрано_вычищенных": убрано,
+            "без_файла": без_файла}
 
 
 def проверка(target, пароль, root, имя=None):
@@ -259,7 +275,6 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
                               sort_keys=True)
                 os.chmod(os.path.join(t, имя.replace(".tar.gz.gpg",
                                                      ".manifest.json")), 0o600)
-                ротация(t, keep)
                 записано.append(t)
             except OSError as e:
                 print("core-backup: %s недоступен (%s)" % (t, e), file=sys.stderr)
@@ -279,6 +294,10 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
         t0 = time.time()
         итог["проверка"] = проверка(записано[0], пароль, root, имя=имя)
         итог["проверка"]["секунд"] = round(time.time() - t0, 1)
+    # ротация последней: свежий архив, не прошедший проверку, не имеет права
+    # вытеснить старый, который разворачивался
+    for t in записано:
+        ротация(t, keep)
     return итог
 
 
