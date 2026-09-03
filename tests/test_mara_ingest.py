@@ -84,6 +84,31 @@ class Ingest(unittest.TestCase):
         self.assertIn("/calls/", p)
         self.assertTrue(p.endswith("b" * 64 + ".m4a"))
 
+    def test_гонка_на_вставке_события_даёт_дубль_а_не_поломку(self):
+        """N7. put_event делает select, потом insert. Телефон, проснувшись,
+        досылает очередь разом: между этими двумя запросами успевает вставить
+        другой запрос. Это дубль, а не 500 в ответ телефону."""
+        второй = mi.connect(self.dir)
+
+        class Опережающий:
+            """Соединение, которое перед insert пускает вперёд конкурента."""
+
+            def __init__(self, con):
+                self.con, self.сработал = con, False
+
+            def execute(self, sql, args=()):
+                if sql.lstrip().startswith("insert into events") and not self.сработал:
+                    self.сработал = True
+                    mi.put_event(второй, dict(EV))
+                return self.con.execute(sql, args)
+
+        обгон = Опережающий(self.con)
+        eid, dup = mi.put_event(обгон, dict(EV))
+        self.assertTrue(обгон.сработал, "конкурент обязан был вклиниться")
+        self.assertTrue(dup, "чужая вставка того же ключа — дубль")
+        self.assertEqual(self.con.execute("select count(*) from events").fetchone()[0], 1)
+        self.assertEqual(self.con.execute("select id from events").fetchone()["id"], eid)
+
 
 if __name__ == "__main__":
     unittest.main()
