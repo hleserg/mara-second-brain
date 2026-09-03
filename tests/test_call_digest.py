@@ -1,5 +1,6 @@
 """Формат дайджеста (ТЗ §16). Рендер без модели и без сети."""
 import os, sys, json, tempfile, unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import call_digest as cd
@@ -97,6 +98,13 @@ class Доставка(unittest.TestCase):
     """N11: недоставленный дайджест не считается обработанным звонком."""
 
     def setUp(self):
+        # env() читает окружение раньше env-файла: если у разработчика
+        # экспортирован живой токен, тест уйдёт в настоящий Bot API
+        снято = mock.patch.dict(os.environ, clear=False)
+        снято.start()
+        self.addCleanup(снято.stop)
+        for k in cd.КЛЮЧИ:
+            os.environ.pop(k, None)
         self.dir = tempfile.mkdtemp()
         self.con = mi.connect(self.dir)
         self.eid, _ = mi.put_event(self.con, {
