@@ -140,6 +140,19 @@ class СверкаИсточников(unittest.TestCase):
         self.assertEqual((f[0]["count"], f[0]["sample"]), (1, [старый]))
         self.assertNotIn(свежий, f[0]["sample"])
 
+    def test_недоставленный_дайджест_видно_в_сверке(self):
+        """N11: звонок разобран, а владелец о нём не узнал — это находка."""
+        eid = self.событие("phone", 0)
+        for state, did in (("sent", "d1"), ("no-transport", "d2")):
+            self.con.execute("insert into digests(id,event_id,chat_id,text,items_json,"
+                             "sent_at,state) values(?,?,?,?,?,?,?)",
+                             (did, eid, "@c", "текст", "[]", mi.now_iso(), state))
+        f = rc.дайджест_не_доставлен(self.con)
+        self.assertEqual((f[0]["count"], f[0]["sample"]), (1, [eid]),
+                         "доставленный дайджест — не находка")
+        self.con.execute("update digests set state='sent'")
+        self.assertEqual(rc.дайджест_не_доставлен(self.con), [])
+
     def test_сводка_владельцу_только_о_проблемах(self):
         self.assertIsNone(rc.текст([]))
         self.assertIsNone(rc.текст([rc.находка("x", "fixed", "починено")]), "починенное — не проблема")

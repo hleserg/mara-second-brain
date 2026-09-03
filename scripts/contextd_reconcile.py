@@ -209,6 +209,22 @@ def запись_не_долита(con, hours=24):
                     % len(старые), count=len(старые), sample=старые[:5])]
 
 
+def дайджест_не_доставлен(con):
+    """Дайджест собран, но до владельца не дошёл: нет токена или канала в
+    /etc/mara/contextd.env. Сбой отправки уводит работу в ретрай и строку
+    заменяет, так что здесь остаются только настроечные дыры. Молча такое
+    висеть не должно: звонок разобран, а человек о нём не узнал (ТЗ §17)."""
+    rows = con.execute("select event_id, state from digests where state!='sent' "
+                       "order by sent_at").fetchall()
+    if not rows:
+        return []
+    return [находка("дайджест-не-доставлен", "warn",
+                    "дайджестов без доставки: %d — проверить токен и канал в "
+                    "/etc/mara/contextd.env, потом call_digest.py --event <id>"
+                    % len(rows), count=len(rows),
+                    sample=[r["event_id"] for r in rows[:5]])]
+
+
 def dlq(con):
     n = con.execute("select count(*) from jobs where state='dlq'").fetchone()[0]
     if not n:
@@ -230,6 +246,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB):
     out += сердцебиение(root)
     out += источник_замолчал(con)
     out += запись_не_долита(con)
+    out += дайджест_не_доставлен(con)
     out += dlq(con)
     return out
 
