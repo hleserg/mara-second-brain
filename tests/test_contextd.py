@@ -265,6 +265,10 @@ class Api(unittest.TestCase):
 
     # ── потери на приёме: N1, N5, N6, N7 из docs/current-state-audit.md ──
 
+    def залить(self, event_id, body):
+        return self.post("/v1/ingest/audio?event=" + event_id, body,
+                         raw=True, ctype="application/octet-stream")
+
     def звонок(self, sid, body):
         """Событие звонка с аудио. Возвращает (event_id, ответ сервера)."""
         sha = hashlib.sha256(body).hexdigest()
@@ -332,6 +336,35 @@ class Api(unittest.TestCase):
             self.assertEqual(code, 200)
         self.assertEqual(self.con.execute("select count(*) from jobs where event_id=? "
                                           "and kind='asr'", (r["event_id"],)).fetchone()[0], 1)
+
+    def test_параллельные_загрузки_одного_аудио_не_рвут_файл(self):
+        """N12. Два события с одним аудио льют его одновременно. На общем
+        ".part" второй писатель усекает файл первого, и os.replace публикует
+        склейку — либо падает, если сосед уже унёс временный файл."""
+        тело = ("параллель " * 4096).encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        _, a = self.звонок("n12-a", тело)
+        _, b = self.звонок("n12-b", тело)
+        настоящий, сосед = contextd.os.replace, []
+
+        def перехват(src, dst):
+            """Влезть ровно между записью временного файла и публикацией."""
+            if not сосед:
+                сосед.append(None)                 # флаг до вызова: иначе рекурсия
+                сосед[0] = self.залить(b["event_id"], тело)
+            return настоящий(src, dst)
+
+        contextd.os.replace = перехват
+        try:
+            code, _ = self.залить(a["event_id"], тело)
+        finally:
+            contextd.os.replace = настоящий
+        self.assertEqual((code, сосед[0][0]), (200, 200), "обе загрузки — успех")
+        path = self.con.execute("select path from blobs where sha256=?",
+                                (sha,)).fetchone()["path"]
+        with open(path, "rb") as fh:
+            self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), sha,
+                             "опубликован не тот файл, который обещали хешем")
 
     def test_блоб_ищется_в_базе_а_не_по_сегодняшней_дате(self):
         """N5. Путь блоба считается от даты загрузки. Августовская запись,

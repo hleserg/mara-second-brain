@@ -19,6 +19,7 @@
     python3 scripts/contextd.py --self-check
 """
 import os, sys, json, time, hashlib, secrets, argparse, threading, subprocess
+import tempfile
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -348,8 +349,10 @@ def ingest_audio(con, root, event_id, raw):
     path = mi.blob_path(root, want, ext)
     got = hashlib.sha256(raw).hexdigest()
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".part"
-    with open(tmp, "wb") as fh:
+    # каждой загрузке свой временный файл: на общем ".part" второй писатель
+    # усекал бы файл первого, и os.replace публиковал бы склейку (N12)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".part")
+    with os.fdopen(fd, "wb") as fh:
         fh.write(raw)
     if got != want:
         os.unlink(tmp)
