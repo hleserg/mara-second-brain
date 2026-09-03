@@ -208,7 +208,7 @@ retention в 04:40, `context_pack` в 04:25, `gmail_ingest --sync` каждые
 | 2 | Durable queue с lease, retry и DLQ | confirmed | схема `scripts/mara_ingest.py:28-49`, аренда `:108-123`, ретраи `:25`, DLQ `:136-154` | 5 тестов в `tests/test_mara_ingest.py` |
 | 3 | Blob-хранилище вне Markdown-волта | confirmed конфигурацией | `MARA_BLOBS` по умолчанию `/srv/mara-blobs` (`mara_ingest.py:23`) против `VAULT=/srv/vault` | `test_путь_блоба_раскладывает_по_годам` |
 | 4 | Ingestion аудио с проверкой SHA-256 | confirmed | `scripts/contextd.py:285-315`: хеш до `os.replace` и до постановки работы | `test_битый_хеш_не_успех` |
-| 5 | Локальный ASR pipeline | partially confirmed | `scripts/call_asr.py`: whisper-large-v3-turbo на bigpc `192.168.1.10:8770`; на doctor только нарезка | 6 тестов `tests/test_call_asr.py` |
+| 5 | Локальный ASR pipeline | partially confirmed | `scripts/call_asr.py`: whisper-large-v3-turbo на bigpc (адрес в `MARA_STT`); на doctor только нарезка | 6 тестов `tests/test_call_asr.py` |
 | 6 | Локальное извлечение через Ollama | confirmed | `scripts/call_extract.py:26-27`, `qwen3.5:9b`, схема отдаётся как `format` | 6 тестов + живой (пропускается) |
 | 7 | Карточки conversations и commitments | confirmed | `scripts/call_project.py:100-196` | 19 тестов `tests/test_call_project.py` |
 | 8 | Post-call digest | confirmed | `scripts/call_digest.py`, шаблон без модели, Telegram Bot API + строка в `digests` | 10 тестов |
