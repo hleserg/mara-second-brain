@@ -25,7 +25,6 @@ sys.path.insert(0, HERE)
 import mara_ingest as mi
 import vault_common
 
-vault_common.load_env()          # адрес коробки с ASR — не в репозитории
 ASR_URL = os.environ.get("MARA_ASR_URL") or None
 WINDOW_MS = int(os.environ.get("MARA_ASR_WINDOW_MS", 25000))
 OVERLAP_MS = int(os.environ.get("MARA_ASR_OVERLAP_MS", 2000))

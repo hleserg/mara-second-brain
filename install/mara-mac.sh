@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # Адрес мака — в ~/.config/mara/env (MARA_MAC), репозиторий публичный.
-[ -r "$HOME/.config/mara/env" ] && . "$HOME/.config/mara/env"
+[ -r "${HOME:-}/.config/mara/env" ] && . "${HOME:-}/.config/mara/env"
 MAC="${MAC:-${MARA_MAC:?не задан MARA_MAC в ~/.config/mara/env}}"
 PORT="${PORT:-8787}"
 

@@ -18,7 +18,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import vault_common
 
-vault_common.load_env()          # адрес мака — не в репозитории
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
 # Разговоры с человеком, а не машинная болтовня. У сессии есть колонка
 # source: telegram (Серёга пишет), cli (кто-то зашёл на мак руками), cron

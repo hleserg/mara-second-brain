@@ -24,7 +24,6 @@ import mara_ingest as mi
 import call_asr
 import vault_common
 
-vault_common.load_env()          # адрес коробки с моделью — не в репозитории
 OLLAMA = os.environ.get("MARA_LLM_URL") or None
 MODEL = os.environ.get("MARA_EXTRACT_MODEL", "qwen3.5:9b")
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))

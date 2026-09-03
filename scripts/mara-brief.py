@@ -31,7 +31,6 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vault_common
 
-vault_common.load_env()          # адрес мака — не в репозитории
 
 MARK_OPEN, MARK_CLOSE = "<!-- mara:brief -->", "<!-- /mara:brief -->"
 ANCHOR = "\n## Когда он изливает душу"      # блок знаний идёт перед блоками поведения

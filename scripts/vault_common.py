@@ -66,30 +66,58 @@ def locked(vault):
     finally:
         fh.close()
 
-def load_env(path="~/.config/mara/env"):
+def env_file():
+    """Где лежит файл с адресами и ключами. MARA_ENV_FILE — чтобы тесты и
+    systemd могли увести чтение в сторону от боевого файла."""
+    return os.environ.get("MARA_ENV_FILE") or "~/.config/mara/env"
+
+
+def load_env(path=None):
     """KEY=value из файла в окружение, не затирая уже заданное.
 
     Адреса машин домашней сети и ключи живут здесь, а не в репозитории: он
     публичный. Уже заданное в окружении (systemd EnvironmentFile, cron) имеет
     приоритет — `setdefault`.
+
+    Тот же файл сорсится шеллом, поэтому разбираем его по-шелловски: `export`
+    в начале и хвостовой комментарий шелл срезает, а буквальный разбор оставлял
+    бы их внутри значения — в URL это заметят не сразу. Битая строка не
+    обрывает файл: ключи после неё нужны не меньше.
     """
     try:
-        lines = open(os.path.expanduser(path)).read().splitlines()
+        with open(os.path.expanduser(path or env_file()), errors="replace") as fh:
+            lines = fh.read().splitlines()
     except OSError:
         return
     for l in lines:
         l = l.strip()
-        if l and not l.startswith("#") and "=" in l:
-            k, v = l.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+        if l.startswith("export "):
+            l = l[7:].lstrip()
+        if not l or l.startswith("#") or "=" not in l:
+            continue
+        k, v = l.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if " #" in v:
+            v = v.split(" #", 1)[0].rstrip()
+        if k:
+            os.environ.setdefault(k, v.strip("'\""))
 
 
 def нужен_адрес(имя, зачем):
-    """Адрес из окружения или внятная смерть вместо тихого промаха мимо порта."""
+    """Адрес из окружения или внятная смерть вместо тихого промаха мимо порта.
+
+    Файл читаем здесь, а не на импорте модуля: иначе всякий, кто импортирует
+    `call_asr`, затягивает в своё окружение и OPENROUTER_API_KEY — тестовому
+    процессу он ни к чему.
+    """
     v = os.environ.get(имя)
     if not v:
-        raise SystemExit("не задан %s (%s). Строка вида %s=http://... кладётся в "
-                         "~/.config/mara/env или /etc/mara/contextd.env" % (имя, зачем, имя))
+        load_env()
+        v = os.environ.get(имя)
+    if not v:
+        raise SystemExit("не задан %s (%s). Строка `%s=...` кладётся в %s "
+                         "(демону — в /etc/mara/contextd.env через systemd)"
+                         % (имя, зачем, имя, env_file()))
     return v
 
 

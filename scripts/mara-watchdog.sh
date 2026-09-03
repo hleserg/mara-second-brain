@@ -11,14 +11,14 @@
 set -euo pipefail
 
 # Адрес мака — в ~/.config/mara/env (MARA_MAC), репозиторий публичный.
-[ -r "$HOME/.config/mara/env" ] && . "$HOME/.config/mara/env"
+[ -r "${HOME:-}/.config/mara/env" ] && . "${HOME:-}/.config/mara/env"
 MAC="${MAC:-${MARA_MAC:?не задан MARA_MAC в ~/.config/mara/env}}"
 COOLDOWN="${COOLDOWN:-2100}"   # 35 минут. `gateway restart` доливает
                                # незакрытые прогоны до 1815 с, и всё это время
                                # тикер молчит законно. Без паузы сторож
                                # накидывал бы второй и третий рестарт на
                                # gateway, который и так встаёт.
-MARK="${MARK:-$HOME/.local/state/mara/watchdog-restart}"
+MARK="${MARK:-${HOME:-/tmp}/.local/state/mara/watchdog-restart}"
 STALE="${STALE:-600}"          # 10 минут: тикер ходит раз в минуту, но мак
                                # успевает и подтормозить, и уснуть на пару.
 
