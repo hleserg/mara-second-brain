@@ -8,7 +8,7 @@
 фильтров R2 (ТЗ §11, §13).
 """
 import os, sys, json, time, shutil, hashlib, tempfile, threading, subprocess, unittest
-import urllib.request
+import urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -37,7 +37,11 @@ class Заглушка(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n)
         self.server.hits.append((self.path, len(raw)))
-        if self.path == "/transcribe":
+        if self.path.endswith("/sendMessage"):
+            self.server.telegram.append(urllib.parse.unquote_plus(
+                raw.decode("utf-8")))
+            body = {"ok": True}
+        elif self.path == "/transcribe":
             body = {"text": РАСШИФРОВКА}
         else:                                  # ollama /api/generate
             body = {"response": json.dumps(ИЗВЛЕЧЕНИЕ, ensure_ascii=False)}
@@ -57,7 +61,7 @@ def карточка(vault):
 
 def поднять():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Заглушка)
-    srv.hits = []
+    srv.hits, srv.telegram = [], []
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
@@ -73,12 +77,15 @@ class Сквозной(unittest.TestCase):
         cls.vault = tempfile.mkdtemp(prefix="mara-vault-")
         os.makedirs(os.path.join(cls.vault, ".git"))
         cls.env0 = dict(os.environ)
-        for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"):
-            os.environ.pop(k, None)   # транспорта в тесте нет и не должно быть
         os.environ.update({
             "MARA_BLOBS": cls.blobs, "VAULT": cls.vault,
             "MARA_ASR_URL": base, "MARA_LLM_URL": base,
             "MARA_ENV_FILE": os.path.join(cls.blobs, "нет-такого.env"),
+            # шаги идут отдельными процессами, подменять функцию бесполезно:
+            # телеграм заменяем адресом, а не заглушкой в памяти
+            "MARA_TELEGRAM_API": base + "/bot%s/sendMessage",
+            "TELEGRAM_BOT_TOKEN": "test-token",   # уходит в путь URL: только ascii
+            "TELEGRAM_HOME_CHANNEL": "@тест",
         })
         import mara_ingest as mi
         import contextd
@@ -173,13 +180,15 @@ class Сквозной(unittest.TestCase):
         d = os.path.join(self.vault, "kb/commitments")
         self.assertTrue(os.listdir(d), "просьба выше порога не стала обязательством")
 
-    def test_дайджест_записан_даже_без_транспорта(self):
+    def test_дайджест_записан_и_доставлен(self):
         con = self.mi.connect(self.blobs)
         row = con.execute("select text,state from digests where event_id=?",
                           (self.event_id,)).fetchone()
         self.assertIsNotNone(row, "дайджест не сохранён")
-        self.assertEqual(row["state"], "no-transport")
+        self.assertEqual(row["state"], "sent")
         self.assertIn("Попросили", row["text"])
+        self.assertIn("Попросили", "\n".join(self.bigpc.telegram),
+                      "в транспорт ушёл тот же текст, что лёг в базу")
 
     def test_аудио_не_попало_в_волт(self):
         плохие = [f for _, _, fs in os.walk(self.vault) for f in fs

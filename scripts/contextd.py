@@ -28,6 +28,7 @@ bind. Но из локалки он виден, и это осознанный �
     python3 scripts/contextd.py --self-check
 """
 import os, sys, json, time, hashlib, secrets, argparse, threading, subprocess
+import tempfile
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -231,6 +232,9 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if device_of(self.con(), self.headers.get("Authorization")):
             return True
+        # тело осталось непрочитанным в сокете, а keep-alive включён: следующий
+        # запрос по этому соединению прочитался бы как продолжение тела
+        self.close_connection = True
         self.say(401, {"error": "устройство не опознано"})
         return False
 
@@ -262,6 +266,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             raw = self.body()
         except ValueError as e:
+            self.close_connection = True     # тело не вычитано, соединение испорчено
             return self.say(413, {"error": str(e)})
         if p.path == "/v1/ingest/audio":
             q = urllib.parse.parse_qs(p.query)
@@ -284,7 +289,8 @@ class Handler(BaseHTTPRequestHandler):
                 if err:
                     return self.say(400, {"error": err})
             eid, dup = mi.put_event(con, data)
-            need = bool((data.get("blob") or {}).get("sha256")) and not dup
+            need = need_blob(con, self.server.root, eid,
+                             (data.get("blob") or {}).get("sha256"))
             applied = None
             if kind == "correction" and not dup:
                 # синхронно, а не через очередь: Серёга ждёт ответа Мары, а не
@@ -309,6 +315,52 @@ class Handler(BaseHTTPRequestHandler):
         return self.say(404, {"error": "нет такого пути"})
 
 
+def blob_row(con, sha256):
+    """Что база знает о блобе. Спрашиваем её, а не файловую систему: путь
+    считается от даты загрузки, поэтому августовская запись, долитая в
+    сентябре, по вычисленному сегодня пути не находится (N5)."""
+    if not sha256:
+        return None
+    return con.execute("select path, bytes, purged_at from blobs where sha256=?",
+                       (sha256,)).fetchone()
+
+
+def finish_stored(con, root, event_id):
+    """Довести событие с уже лежащим блобом до `stored`: манифест и работа ASR.
+    Идемпотентно — второй вызов не заводит вторую работу. Нужно потому, что
+    между записью блоба и переводом события демон может умереть.
+
+    Перевод состояния — одним `update ... where state='new'`, а не проверкой и
+    записью по отдельности: обработчики живут в разных потоках со своими
+    соединениями, и два одновременных запроса по одному событию проходили
+    раздельную проверку оба. Ценой была вторая цепочка asr→extract→project→
+    digest: час GPU и второй дайджест в телеграм. `rowcount` показывает, кто
+    успел первым.
+    """
+    if con.execute("update events set state='stored' where id=? and state='new'",
+                   (event_id,)).rowcount != 1:
+        return
+    mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
+    mi.add_job(con, event_id, "asr")
+
+
+def need_blob(con, root, event_id, sha256):
+    """Нужен ли серверу блоб этого события.
+
+    Считается по базе блобов, а не по признаку «событие новое». Иначе повтор
+    после потерянного ответа получает `duplicate: true, need_blob: false`,
+    телефон закрывает работу успешной, и запись не приезжает никогда (N1).
+    Вычищенное ретеншеном аудио заново не просим: его удалили намеренно."""
+    if not sha256:
+        return False
+    row = blob_row(con, sha256)
+    if row is None:
+        return True
+    if not row["purged_at"]:
+        finish_stored(con, root, event_id)
+    return False
+
+
 def ingest_audio(con, root, event_id, raw):
     """Блоб на диск с проверкой содержимого. Хеш не сошёлся — не успех (ТЗ §20)."""
     row = con.execute("select blob_sha256, payload_json, state from events where id=?",
@@ -319,26 +371,34 @@ def ingest_audio(con, root, event_id, raw):
     if not want:
         return 400, {"error": "событие без аудио"}
     ext = (json.loads(row["payload_json"] or "{}").get("ext")) or "bin"
-    path = mi.blob_path(root, want, ext)
-    if os.path.exists(path):
+    известен = blob_row(con, want)
+    if известен is not None:
+        # строку не трогаем: в ней pin, audio_until и purged_at, а insert or
+        # replace их обнулил бы
+        if not известен["purged_at"]:
+            finish_stored(con, root, event_id)
         return 200, {"event_id": event_id, "blob_sha256": want,
-                     "bytes": os.path.getsize(path), "duplicate": True}
+                     "bytes": известен["bytes"], "duplicate": True,
+                     "purged": bool(известен["purged_at"])}
+    path = mi.blob_path(root, want, ext)
     got = hashlib.sha256(raw).hexdigest()
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".part"
-    with open(tmp, "wb") as fh:
+    # каждой загрузке свой временный файл: на общем ".part" второй писатель
+    # усекал бы файл первого, и os.replace публиковал бы склейку (N12)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".part")
+    with os.fdopen(fd, "wb") as fh:
         fh.write(raw)
     if got != want:
         os.unlink(tmp)
         return 409, {"error": "хеш не сошёлся", "expected": want, "got": got}
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
-    con.execute("insert or replace into blobs(sha256,path,bytes,mime,created,audio_until)"
+    # or ignore, а не or replace: две параллельные загрузки одного аудио не
+    # повод обнулять pin и audio_until уже лежащей строки
+    con.execute("insert or ignore into blobs(sha256,path,bytes,mime,created,audio_until)"
                 " values(?,?,?,?,?,?)",
                 (want, path, len(raw), "audio", mi.now_iso(), audio_until()))
-    con.execute("update events set state='stored' where id=?", (event_id,))
-    mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
-    mi.add_job(con, event_id, "asr")
+    finish_stored(con, root, event_id)
     return 200, {"event_id": event_id, "blob_sha256": want, "bytes": len(raw)}
 
 
