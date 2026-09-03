@@ -35,7 +35,10 @@ import mara_ingest as mi
 
 МЕЛОЧЬ = ("manifests", "transcripts", "extractions")   # allowlist, не exclude
 СЕКРЕТЫ = ("tdlib", "gmail")                           # ТЗ §11 — не бэкапим
-ТАБЛИЦЫ = ("devices", "events", "jobs", "blobs", "digests")
+# Список жёсткий, и он же кормит сверку восстановления: таблица, которой тут
+# нет, в проверку не попадёт молча. Добавлять сюда каждую новую (ADR-0001).
+ТАБЛИЦЫ = ("devices", "events", "jobs", "blobs", "digests",
+           "commitments", "conversations", "projections")
 ПРОБА = 3                                              # столько блобов сверяем
 
 
