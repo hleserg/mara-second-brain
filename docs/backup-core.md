@@ -60,6 +60,7 @@ scripts/core-backup.py --self-check         # круг на игрушечном
 
 ```bash
 # 0. Парольная фраза из менеджера паролей
+mkdir -p -m 700 ~/.config/mara      # без него install скажет «cannot create»
 install -m 600 /dev/stdin ~/.config/mara/backup-pass   # вставить фразу, Ctrl-D
 
 # 1. Убедиться, что архив читается, прежде чем что-то трогать
