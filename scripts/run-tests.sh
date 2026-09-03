@@ -4,6 +4,11 @@
 # венва на doctor.
 set -u
 cd "$(dirname "$0")/.."
+# Гейт не должен зависеть от того, что лежит в ~/.config/mara/env: на
+# doctor там боевые адреса и ключ OpenRouter, на BetaPi и в CI файла нет
+# вовсе, и одни и те же тесты давали бы разный результат. Уводим чтение в
+# несуществующий файл — заодно живой ключ не попадает в тестовый процесс.
+export MARA_ENV_FILE=/nonexistent/mara-env
 fail=0
 echo "== unittest =="
 python3 -m unittest discover -s tests -v || fail=1

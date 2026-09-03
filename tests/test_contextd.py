@@ -1,5 +1,5 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
-import os, sys, json, hashlib, socket, tempfile, threading, unittest
+import os, sys, io, json, hashlib, socket, tempfile, threading, unittest
 import urllib.request, urllib.error
 from datetime import datetime, timedelta
 
@@ -453,6 +453,222 @@ class ТестМетрикиНеИзЛокалки(unittest.TestCase):
             srv.server_close()
 
 
+class ТестЛимитПопыток(unittest.TestCase):
+    """Подбор токена упирается в 429, верный токен — нет (ТЗ §18)."""
+
+    def setUp(self):
+        contextd._неудачи.clear()
+
+    tearDown = setUp
+
+    def test_после_лимита_429_а_верный_токен_проходит(self):
+        dir = tempfile.mkdtemp()
+        mi.ROOT = dir
+        srv = contextd.make_server(dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(dir)
+        _, токен = contextd.pair(con, "телефон")
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            def дёрнуть(t):
+                req = urllib.request.Request(base + "/v1/context/bootstrap")
+                req.add_header("Authorization", "Bearer " + t)
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    e.read()
+                    return e.code
+
+            коды = [дёрнуть("mimo-%d" % i) for i in range(contextd.ПОПЫТОК + 2)]
+            self.assertEqual(коды[:contextd.ПОПЫТОК], [401] * contextd.ПОПЫТОК)
+            self.assertEqual(коды[-1], 429, "подбор не упёрся в лимит: %r" % коды)
+            # свой не страдает: за одним NAT с подбирающим может быть телефон
+            self.assertEqual(дёрнуть(токен), 200)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_чужой_forwarded_for_не_учитывается(self):
+        """Без MARA_TRUSTED_PROXY заголовок игнорируется, иначе лимит обходится."""
+        class Заголовки(dict):
+            def get(self, k, d=None):
+                return dict.get(self, k, d)
+
+            def get_all(self, k, d=None):
+                v = dict.get(self, k)
+                return [v] if v is not None else d
+
+        # адреса — из TEST-NET (RFC 5737), а не из 10/8 и 192.168/16: репозиторий
+        # публичный, и сторож в test_vault_common грепает дерево на адреса
+        # домашней сети, не разбирая, выдумка это в тесте или нет
+        class Фейк:
+            client_address = ("203.0.113.7", 1234)
+            headers = Заголовки({"X-Forwarded-For": "198.51.100.1"})
+
+        self.assertEqual(contextd.клиент(Фейк()), "203.0.113.7")
+        прежние = contextd.TRUSTED_PROXY
+        contextd.TRUSTED_PROXY = ("203.0.113.7",)
+        try:
+            self.assertEqual(contextd.клиент(Фейк()), "198.51.100.1")
+        finally:
+            contextd.TRUSTED_PROXY = прежние
+
+
+class ТестПоРевьюГраницы(unittest.TestCase):
+    """Находки ревью PR #14: кривая длина, память на дублях, заголовки."""
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        srv = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(каталог)
+        _, токен = contextd.pair(con, "телефон")
+        return каталог, srv, con, токен
+
+    def test_отрицательная_длина_не_обходит_лимит(self):
+        """Content-Length: -1 проходил `n > лимит`, а read(-1) читает до EOF.
+
+        Теперь такая длина — 400: разобрать её нельзя, границы тела мы не знаем.
+        """
+        import http.client
+        каталог, srv, con, токен = self.поднять()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            c.putrequest("POST", "/v1/ingest/event")
+            c.putheader("Authorization", "Bearer " + токен)
+            c.putheader("Content-Type", "application/json")
+            c.putheader("Content-Length", "-1")
+            c.endheaders()
+            c.send(b'{"kind": "call"}')
+            r = c.getresponse()
+            r.read()
+            self.assertEqual(r.status, 400)
+            c.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_дубль_не_поднимает_тело_в_память(self):
+        """Сток на выходах ingest_audio — Никуда, а не буфер в памяти."""
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        сырьё = b"x" * (contextd.КУСОК + 7)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "дубль",
+                                    "blob": {"sha256": sha, "bytes": len(сырьё),
+                                             "ext": "m4a"}})
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(сырьё), len(сырьё))
+
+        class Считающий(io.BytesIO):
+            """Ловит попытку сложить тело в память."""
+            накопил = 0
+
+            def write(self, b):
+                Считающий.накопил += len(b)
+                return len(b)
+
+        было = contextd.Никуда
+        contextd.Никуда = Считающий
+        try:
+            поток = io.BytesIO(сырьё)
+            код, ответ = contextd.ingest_audio(con, каталог, eid, поток, len(сырьё))
+        finally:
+            contextd.Никуда = было
+        self.assertTrue(ответ.get("duplicate"), ответ)
+        # тело обязано быть вычитано целиком: хвост иначе уедет в следующий
+        # запрос на том же соединении
+        self.assertEqual(поток.tell(), len(сырьё))
+        self.assertEqual(Считающий.накопил, len(сырьё), "сток не тот, что заявлен")
+        self.assertEqual(contextd.Никуда().write(b"12345"), 5)
+
+    def test_второй_forwarded_for_не_подменяет_клиента(self):
+        """При двух заголовках берём последний — дописанный прокси, не клиентом."""
+        class Заголовки:
+            def __init__(self, *значения):
+                self.значения = list(значения)
+
+            def get_all(self, k, d=None):
+                return self.значения or d
+
+            def get(self, k, d=None):
+                return self.значения[0] if self.значения else d
+
+        class Фейк:
+            client_address = ("203.0.113.7", 1234)
+            headers = Заголовки("198.51.100.9", "198.51.100.4")
+
+        прежние = contextd.TRUSTED_PROXY
+        contextd.TRUSTED_PROXY = ("203.0.113.7",)
+        try:
+            self.assertEqual(contextd.клиент(Фейк()), "198.51.100.4")
+        finally:
+            contextd.TRUSTED_PROXY = прежние
+
+    def test_401_с_телом_закрывает_соединение(self):
+        """Иначе хвост тела уедет в следующий запрос и сервер ответит 400."""
+        import http.client
+        каталог, srv, con, токен = self.поднять()
+        contextd._неудачи.clear()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            c.request("POST", "/v1/ingest/event", body=b'{"kind": "call"}',
+                      headers={"Authorization": "Bearer nope",
+                               "Content-Type": "application/json"})
+            r = c.getresponse()
+            r.read()
+            self.assertEqual(r.status, 401)
+            self.assertEqual(r.getheader("Connection"), "close")
+            c.close()
+        finally:
+            contextd._неудачи.clear()
+            srv.shutdown()
+            srv.server_close()
+
+
+class ТестРазмерТела(unittest.TestCase):
+    """JSON и аудио меряются разными линейками (ТЗ §6.1)."""
+
+    def test_json_больше_мегабайта_413(self):
+        dir = tempfile.mkdtemp()
+        mi.ROOT = dir
+        srv = contextd.make_server(dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(dir)
+        _, токен = contextd.pair(con, "телефон")
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            тело = json.dumps({"kind": "call", "note": "я" * (contextd.MAX_JSON)})
+            req = urllib.request.Request(base + "/v1/ingest/event",
+                                         data=тело.encode("utf-8"), method="POST")
+            req.add_header("Authorization", "Bearer " + токен)
+            req.add_header("Content-Type", "application/json")
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(e.exception.code, 413)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_аудио_льётся_кусками_а_не_в_память(self):
+        """Файл больше одного КУСКА проходит целиком и с верным хешем."""
+        dir = tempfile.mkdtemp()
+        mi.ROOT = dir
+        con = mi.connect(dir)
+        сырьё = os.urandom(contextd.КУСОК + 12345)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "поток",
+                                    "blob": {"sha256": sha, "bytes": len(сырьё),
+                                             "ext": "m4a"}})
+        код, ответ = contextd.ingest_audio(con, dir, eid, io.BytesIO(сырьё), len(сырьё))
+        self.assertEqual((код, ответ["bytes"]), (200, len(сырьё)))
+        self.assertEqual(hashlib.sha256(
+            open(mi.blob_path(dir, sha, "m4a"), "rb").read()).hexdigest(), sha)
+
 class ТестГонкаFinishStored(unittest.TestCase):
     """Два запроса по одному событию заводят одну работу ASR, а не две.
 
@@ -491,6 +707,168 @@ class ТестГонкаFinishStored(unittest.TestCase):
         работ = con.execute("select count(*) from jobs where event_id=? and kind='asr'",
                             (eid,)).fetchone()[0]
         self.assertEqual(работ, 1, "гонка завела вторую работу ASR")
+
+
+class ТестКривойДлины(unittest.TestCase):
+    """Круг 2 ревью PR #14: длина, которую нельзя разобрать, и мусор на диске."""
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        srv = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        con = mi.connect(каталог)
+        _, токен = contextd.pair(con, "телефон")
+        return каталог, srv, con, токен
+
+    def запрос(self, srv, путь, заголовки, тело=b"{}", токен=None):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+        c.putrequest("POST", путь, skip_accept_encoding=True)
+        if токен:
+            c.putheader("Authorization", "Bearer " + токен)
+        for k, v in заголовки.items():
+            c.putheader(k, v)
+        c.endheaders()
+        c.send(тело)
+        r = c.getresponse()
+        r.read()
+        код = r.status
+        c.close()
+        return код
+
+    def test_нечисловая_длина_это_400_а_не_traceback(self):
+        """int() на заголовке падал ValueError: ответа нет, соединение рвётся.
+
+        Худший путь — без токена: `отлуп` зовётся из `authed`, то есть дыра
+        была доступна анониму.
+        """
+        каталог, srv, con, токен = self.поднять()
+        try:
+            for кривая in ("abc", "1e3", "0x10", "5 5", "+5", "\u00b2"):
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": кривая}, b"", токен), 400,
+                    "длина %r должна давать 400" % кривая)
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": кривая}, b""), 401,
+                    "без токена длина %r роняла обработчик" % кривая)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_длинное_число_в_длине_не_роняет_обработчик(self):
+        """Круг 3. `int()` от строки длиннее 4300 цифр кидает ValueError, а
+        `isdigit` её пропускал. Заголовок влезает в 64 КиБ, `отлуп` зовёт
+        `длина` до проверки токена — то есть анониму хватало одного запроса,
+        чтобы получить трейсбек вместо ответа."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            for цифр in (20, 4301, 5000):
+                длинная = "1" * цифр
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": длинная}, b"", токен), 400,
+                    "длина из %d цифр должна давать 400" % цифр)
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": длинная}, b""), 401,
+                    "без токена длина из %d цифр роняла обработчик" % цифр)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_две_длины_и_chunked_рядом_с_длиной_это_400(self):
+        """Два разных Content-Length и `Transfer-Encoding` вместе с длиной:
+        границу тела в обоих случаях выбирает не сервер, а отправитель, и
+        остаток тела уезжает в следующий запрос по тому же соединению."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            import http.client
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=10)
+            c.putrequest("POST", "/v1/ingest/event", skip_accept_encoding=True)
+            c.putheader("Authorization", "Bearer " + токен)
+            c.putheader("Content-Length", "2")
+            c.putheader("Content-Length", "9")
+            c.endheaders()
+            c.send(b"{}")
+            self.assertEqual(c.getresponse().status, 400)
+            c.close()
+            self.assertEqual(
+                self.запрос(srv, "/v1/ingest/event",
+                            {"Content-Length": "2", "Transfer-Encoding": "chunked"},
+                            b"{}", токен), 400)
+            self.assertEqual(con.execute("select count(*) from events").fetchone()[0], 0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_json_не_объект_это_400_а_не_traceback(self):
+        """`5` и `[]` — валидный json, но дальше по коду сплошь data.get."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            for тело in (b"5", b"[]", b'"text"'):
+                self.assertEqual(
+                    self.запрос(srv, "/v1/ingest/event",
+                                {"Content-Length": str(len(тело))}, тело, токен),
+                    400, "тело %r роняло обработчик" % тело)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_chunked_без_длины_не_создаёт_пустое_событие(self):
+        """n=0 при chunked означал «пустое тело»: событие заводилось, а тело
+        оставалось в сокете и ломало следующий запрос."""
+        каталог, srv, con, токен = self.поднять()
+        try:
+            self.assertEqual(
+                self.запрос(srv, "/v1/ingest/event",
+                            {"Transfer-Encoding": "chunked"}, b"0\r\n\r\n", токен),
+                400)
+            self.assertEqual(con.execute("select count(*) from events").fetchone()[0], 0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_обрыв_заливки_не_оставляет_part(self):
+        """Потоковая заливка открыла файл до чтения тела; уборщика .part нет."""
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        сырьё = os.urandom(contextd.КУСОК + 100)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "обрыв",
+                                    "blob": {"sha256": sha, "bytes": len(сырьё),
+                                             "ext": "m4a"}})
+
+        class Рвётся(io.BytesIO):
+            def read(self, n=-1):
+                if self.tell() >= contextd.КУСОК:
+                    raise ConnectionResetError("клиент отвалился")
+                return super().read(n)
+
+        with self.assertRaises(ConnectionResetError):
+            contextd.ingest_audio(con, каталог, eid, Рвётся(сырьё), len(сырьё))
+        каталог_блоба = os.path.dirname(mi.blob_path(каталог, sha, "m4a"))
+        мусор = [f for f in os.listdir(каталог_блоба) if f.endswith(".part")]
+        self.assertEqual(мусор, [], "обрыв оставил недописанный файл")
+
+    def test_несошедшийся_хеш_тоже_не_оставляет_part(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        sha = hashlib.sha256(b"wanted").hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "не-сошёлся",
+                                    "blob": {"sha256": sha, "bytes": 5, "ext": "m4a"}})
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(b"other"), 5)
+        self.assertEqual(код, 409)
+        каталог_блоба = os.path.dirname(mi.blob_path(каталог, sha, "m4a"))
+        self.assertEqual([f for f in os.listdir(каталог_блоба) if f.endswith(".part")],
+                         [])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import os, re, sys, json, argparse, urllib.request
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vault_common                                          # noqa: E402
 
 FM = re.compile(r"\A---\n(.*?)\n---\n(.*)", re.S)
 API = "https://openrouter.ai/api/v1/chat/completions"
@@ -53,17 +54,6 @@ PROMPT = """Ты пишешь Серёге сводку за вчера: что 
 
 Ответ — просто строки, каждая начинается с «- ».
 Делать было нечего — ответь одним словом: пусто"""
-
-
-def load_env(path="~/.config/mara/env"):
-    """Секреты не в волте (§11), а в ~/.config/mara/env: KEY=value."""
-    try: lines = open(os.path.expanduser(path)).read().splitlines()
-    except OSError: return
-    for l in lines:
-        l = l.strip()
-        if l and not l.startswith("#") and "=" in l:
-            k, v = l.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
 
 def cards(d, day):
@@ -179,7 +169,7 @@ def main(argv=None):
     ap.add_argument("--date", help="день в ISO; по умолчанию вчерашний")
     ap.add_argument("--raw", action="store_true", help="без облака, оглавление карточек")
     a = ap.parse_args(argv)
-    load_env()
+    vault_common.load_env()
     day = a.date or (datetime.now().date() - timedelta(days=1)).isoformat()
     text = summary(a.vault, day, os.environ.get("OPENROUTER_API_KEY"),
                    os.environ.get("MARA_DIGEST_MODEL", "deepseek/deepseek-v4-pro"), a.raw)

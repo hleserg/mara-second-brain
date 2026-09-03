@@ -5,6 +5,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -267,4 +268,25 @@ class CoreTest {
         return File(requireNotNull(d) { "не нашёл tests/fixtures — где корень репозитория?" },
             "tests/fixtures/$name")
     }
+    // ── адрес сервера ─────────────────────────────────────────────────────
+
+    @Test
+    fun `по http пускаем только в свою сеть`() {
+        assertNull(Адрес.беда("http://192.168.0.2:8788"))
+        assertNull(Адрес.беда("http://10.0.0.5:8788"))
+        assertNull(Адрес.беда("http://doctor.local:8788"))
+        assertNull(Адрес.беда("https://mara.example.ru"))
+        // наружу открытым текстом — туда уедет токен, а следом записи
+        assertNotNull(Адрес.беда("http://mara.example.ru"))
+        assertNotNull(Адрес.беда("http://8.8.8.8:8788"))
+        assertNotNull(Адрес.беда("ftp://192.168.0.2"))
+        assertNotNull(Адрес.беда("192.168.0.2:8788"))
+        assertNotNull(Адрес.беда(""))
+        // 172.16/12 — частная, 172.32 уже нет
+        assertNull(Адрес.беда("http://172.20.0.3:8788"))
+        assertNotNull(Адрес.беда("http://172.32.0.3:8788"))
+        // слэш на конце склеится в двойной: base + "/v1/..."
+        assertNotNull(Адрес.беда("https://mara.example.ru/"))
+    }
+
 }

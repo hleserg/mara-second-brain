@@ -818,7 +818,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 
-ASR_URL = os.environ.get("MARA_ASR_URL", "http://192.168.1.10:8770")
+ASR_URL = os.environ.get("MARA_ASR_URL", "http://<bigpc в локалке>:8770")
 WINDOW_MS, OVERLAP_MS = 25000, 2000
 
 def slice_plan(duration_ms, window_ms=WINDOW_MS, overlap_ms=OVERLAP_MS):
@@ -1013,7 +1013,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 
-OLLAMA = os.environ.get("MARA_LLM_URL", "http://192.168.1.10:11434")
+OLLAMA = os.environ.get("MARA_LLM_URL", "http://<bigpc в локалке>:11434")
 MODEL = os.environ.get("MARA_EXTRACT_MODEL", "qwen3.5:9b")
 TASK_MIN, REVIEW_MIN = 0.85, 0.60
 
