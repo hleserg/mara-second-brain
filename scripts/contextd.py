@@ -6,9 +6,16 @@
 работают без него: `python3 scripts/call_asr.py --event <id>` чинится руками в
 три часа ночи, а внутренности демона — нет.
 
-Слушает только loopback. Наружу его выводит ssh-туннель с мака, а не bind:
-телефон ходит на tailnet-адрес мака, тот пробрасывает сюда. Демон никогда не
-знает, что такое интернет.
+По умолчанию слушает только loopback, и адрес меняется одной переменной
+MARA_BIND. На doctor стоит 0.0.0.0: телефон приходит по домашней локалке, куда
+его пускает VPN на роутере. Раньше вместо этого был ssh-туннель с мака, и мак
+стоял в цепочке только потому, что на нём жил адрес тайлнета — приложению он
+не был нужен ни для чего.
+
+Наружу, в интернет, демон не смотрит и теперь: границу держит роутер, а не
+bind. Но из локалки он виден, и это осознанный размен. Без токена отдаются
+только /healthz и /metrics, всё остальное — 401; сам токен едет по проводу
+открытым текстом, шифрует его участок VPN, а не протокол.
 
 Логи санитарные (ТЗ §18): в них идут метод, путь, код, id события и размеры.
 Тела сообщений, транскрипты и токены не логируются никогда.
@@ -373,8 +380,8 @@ def bootstrap(con, vault=None):
             "pipeline_version": mi.PIPELINE_VERSION}
 
 
-def make_server(root, port=8788, vault=None):
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+def make_server(root, port=8788, vault=None, host="127.0.0.1"):
+    srv = ThreadingHTTPServer((host, port), Handler)
     srv.root = root
     srv.vault = vault or VAULT
     srv.daemon_threads = True
@@ -418,13 +425,13 @@ def worker(stop, root):
             mi.add_job(con, job["event_id"], NEXT[job["kind"]])
 
 
-def serve(root, port):
+def serve(root, port, host="127.0.0.1"):
     con = mi.connect(root)
     con.close()
     stop = threading.Event()
     threading.Thread(target=worker, args=(stop, root), daemon=True).start()
-    srv = make_server(root, port)
-    print("contextd: слушаю 127.0.0.1:%d, блобы в %s" % (port, root), flush=True)
+    srv = make_server(root, port, host=host)
+    print("contextd: слушаю %s:%d, блобы в %s" % (host, port, root), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -459,6 +466,9 @@ def main():
     ap = argparse.ArgumentParser(description="приём событий Mara Ambient Memory")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--port", type=int, default=int(os.environ.get("MARA_PORT", 8788)))
+    # Loopback по умолчанию: разработка и тесты не должны случайно открыть порт
+    # наружу. Открывает его ровно одна строка в /etc/mara/contextd.env на doctor.
+    ap.add_argument("--bind", default=os.environ.get("MARA_BIND", "127.0.0.1"))
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--pair", metavar="ИМЯ")
     ap.add_argument("--revoke", metavar="ID")
@@ -478,7 +488,7 @@ def main():
         print("отозвано %s" % a.revoke if row else "нет такого устройства")
         return 0 if row else 1
     if a.serve:
-        return serve(a.root, a.port)
+        return serve(a.root, a.port, a.bind)
     ap.print_help()
     return 0
 
