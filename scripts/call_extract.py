@@ -22,8 +22,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 import call_asr
+import vault_common
 
-OLLAMA = os.environ.get("MARA_LLM_URL", "http://192.168.1.10:11434")
+vault_common.load_env()          # адрес коробки с моделью — не в репозитории
+OLLAMA = os.environ.get("MARA_LLM_URL") or None
 MODEL = os.environ.get("MARA_EXTRACT_MODEL", "qwen3.5:9b")
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))
 REVIEW_MIN = float(os.environ.get("MARA_REVIEW_MIN", 0.60))
@@ -209,7 +211,9 @@ def ask_model(text, base_url=None, model=None):
         "think": False,
         "options": {"temperature": 0, "num_ctx": 8192},
     }, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request((base_url or OLLAMA) + "/api/generate", data=body,
+    адрес = base_url or OLLAMA or vault_common.нужен_адрес(
+        "MARA_LLM_URL", "коробка с ollama")
+    req = urllib.request.Request(адрес + "/api/generate", data=body,
                                  method="POST")
     req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:

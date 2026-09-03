@@ -11,7 +11,9 @@
 # Ставится на doctor:  install/mara-mac.sh
 set -euo pipefail
 
-MAC="${MAC:-serg@192.168.1.80}"
+# Адрес мака — в ~/.config/mara/env (MARA_MAC), репозиторий публичный.
+[ -r "$HOME/.config/mara/env" ] && . "$HOME/.config/mara/env"
+MAC="${MAC:-${MARA_MAC:?не задан MARA_MAC в ~/.config/mara/env}}"
 PORT="${PORT:-8787}"
 
 command -v systemctl >/dev/null || { echo "не doctor: нет systemd" >&2; exit 1; }

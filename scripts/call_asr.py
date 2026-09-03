@@ -23,8 +23,10 @@ import os, sys, json, argparse, subprocess, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
+import vault_common
 
-ASR_URL = os.environ.get("MARA_ASR_URL", "http://192.168.1.10:8770")
+vault_common.load_env()          # адрес коробки с ASR — не в репозитории
+ASR_URL = os.environ.get("MARA_ASR_URL") or None
 WINDOW_MS = int(os.environ.get("MARA_ASR_WINDOW_MS", 25000))
 OVERLAP_MS = int(os.environ.get("MARA_ASR_OVERLAP_MS", 2000))
 HTTP_TIMEOUT = 300
@@ -114,7 +116,9 @@ def run(event_id, root=None):
         raise RuntimeError("блоб %s не на диске" % ev["blob_sha256"][:12])
     audio = b["path"]
     plan = slice_plan(duration_ms(audio))
-    segs = transcribe_spans(ASR_URL, plan, lambda x, y: cut_wav(audio, x, y))
+    segs = transcribe_spans(ASR_URL or vault_common.нужен_адрес(
+        "MARA_ASR_URL", "коробка с whisper"), plan,
+        lambda x, y: cut_wav(audio, x, y))
     out = write_jsonl(mi.transcript_path(root, event_id), segs)
     con.execute("update events set state='transcribed' where id=?", (event_id,))
     print("call_asr: %s — кусков %d, сегментов %d" % (event_id, len(plan), len(segs)))

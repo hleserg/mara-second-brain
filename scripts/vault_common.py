@@ -66,6 +66,33 @@ def locked(vault):
     finally:
         fh.close()
 
+def load_env(path="~/.config/mara/env"):
+    """KEY=value из файла в окружение, не затирая уже заданное.
+
+    Адреса машин домашней сети и ключи живут здесь, а не в репозитории: он
+    публичный. Уже заданное в окружении (systemd EnvironmentFile, cron) имеет
+    приоритет — `setdefault`.
+    """
+    try:
+        lines = open(os.path.expanduser(path)).read().splitlines()
+    except OSError:
+        return
+    for l in lines:
+        l = l.strip()
+        if l and not l.startswith("#") and "=" in l:
+            k, v = l.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
+
+def нужен_адрес(имя, зачем):
+    """Адрес из окружения или внятная смерть вместо тихого промаха мимо порта."""
+    v = os.environ.get(имя)
+    if not v:
+        raise SystemExit("не задан %s (%s). Строка вида %s=http://... кладётся в "
+                         "~/.config/mara/env или /etc/mara/contextd.env" % (имя, зачем, имя))
+    return v
+
+
 def scrub(s):
     """Текст человека уезжает в волт как есть, а волт синкается в R2 и
     коммитится. Ключ, вставленный в реплику или в сообщение коммита, уехал бы

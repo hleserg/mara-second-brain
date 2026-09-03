@@ -10,7 +10,9 @@
 # `systemd_watchdog_seconds` из ТЗ не ставим: это sd_notify, на launchd пусто.
 set -euo pipefail
 
-MAC="${MAC:-serg@192.168.1.80}"
+# Адрес мака — в ~/.config/mara/env (MARA_MAC), репозиторий публичный.
+[ -r "$HOME/.config/mara/env" ] && . "$HOME/.config/mara/env"
+MAC="${MAC:-${MARA_MAC:?не задан MARA_MAC в ~/.config/mara/env}}"
 COOLDOWN="${COOLDOWN:-2100}"   # 35 минут. `gateway restart` доливает
                                # незакрытые прогоны до 1815 с, и всё это время
                                # тикер молчит законно. Без паузы сторож
