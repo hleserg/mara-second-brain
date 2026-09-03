@@ -264,3 +264,37 @@ class Api(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ТестМетрикиНеИзЛокалки(unittest.TestCase):
+    """/metrics без токена — только с петли (ТЗ §18).
+
+    Сервер поднимается на 127.0.0.2, клиент явно берёт исходный адрес 127.0.0.3:
+    наружу ничего не открывается, но демон видит адрес, которого нет в LOOPBACK
+    — то есть ровно то, чем для него выглядит любой хост из домашней локалки.
+    """
+
+    def test_чужой_адрес_получает_401(self):
+        import http.client
+        root = tempfile.mkdtemp()
+        mi.ROOT = root
+        try:
+            srv = contextd.make_server(root, 0, host="127.0.0.2")
+        except OSError:
+            self.skipTest("в этом окружении нет 127.0.0.2")
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            def код(path):
+                c = http.client.HTTPConnection("127.0.0.2", srv.server_address[1],
+                                               timeout=5,
+                                               source_address=("127.0.0.3", 0))
+                c.request("GET", path)
+                r = c.getresponse()
+                r.read()
+                c.close()
+                return r.status
+
+            self.assertEqual(код("/metrics"), 401)
+            self.assertEqual(код("/healthz"), 200)   # проверка связи с телефона
+        finally:
+            srv.shutdown()

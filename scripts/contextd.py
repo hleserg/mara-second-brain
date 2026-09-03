@@ -14,8 +14,10 @@ MARA_BIND. На doctor стоит 0.0.0.0: телефон приходит по 
 
 Наружу, в интернет, демон не смотрит и теперь: границу держит роутер, а не
 bind. Но из локалки он виден, и это осознанный размен. Без токена отдаются
-только /healthz и /metrics, всё остальное — 401; сам токен едет по проводу
-открытым текстом, шифрует его участок VPN, а не протокол.
+только /healthz, всё остальное — 401. /metrics отдаётся без токена лишь с
+петли: там не секреты, но имена устройств и время последнего синка каждого
+канала. Сам токен едет по проводу открытым текстом — шифрует его участок VPN,
+а не протокол.
 
 Логи санитарные (ТЗ §18): в них идут метод, путь, код, id события и размеры.
 Тела сообщений, транскрипты и токены не логируются никогда.
@@ -42,7 +44,11 @@ STEP = {"asr": "call_asr.py", "extract": "call_extract.py",
 # гигабайт VRAM: параллельный ASR вытеснит whisper, и обе работы поедут
 # медленнее, чем одна. Появится вторая карта — станет Semaphore(2).
 GPU = threading.Semaphore(1)
-OPEN_PATHS = ("/healthz", "/metrics")
+OPEN_PATHS = ("/healthz",)              # мануал велит проверять его с телефона
+# /metrics без токена отдаётся только с петли. Там не секреты, но имена
+# устройств и время последнего синка каждого канала: по этим числам читается
+# распорядок дня владельца, а порт теперь открыт в локалку.
+LOOPBACK = ("127.0.0.1", "::1")
 
 
 # --- устройства -------------------------------------------------------------
@@ -209,6 +215,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def authed(self, path):
         if path in OPEN_PATHS:
+            return True
+        if path == "/metrics" and self.client_address[0] in LOOPBACK:
             return True
         if device_of(self.con(), self.headers.get("Authorization")):
             return True
@@ -380,6 +388,16 @@ def bootstrap(con, vault=None):
             "pipeline_version": mi.PIPELINE_VERSION}
 
 
+def bind_default():
+    """Адрес из окружения, иначе петля.
+
+    `or`, а не значение по умолчанию у `.get`: systemd передаёт пустую строку,
+    если ключ в env-файле оставили без значения, а пустая строка для
+    ThreadingHTTPServer означает 0.0.0.0 — порт открылся бы молча.
+    """
+    return os.environ.get("MARA_BIND") or "127.0.0.1"
+
+
 def make_server(root, port=8788, vault=None, host="127.0.0.1"):
     srv = ThreadingHTTPServer((host, port), Handler)
     srv.root = root
@@ -458,6 +476,12 @@ def self_check():
     assert "секрет" not in log_line("POST", "/v1/ingest/message", 200,
                                     {"payload": {"text": "секрет"}})
     srv.shutdown()
+    for v, want in (("", "127.0.0.1"), (None, "127.0.0.1"), ("0.0.0.0", "0.0.0.0")):
+        os.environ.pop("MARA_BIND", None)
+        if v is not None:
+            os.environ["MARA_BIND"] = v
+        assert bind_default() == want, "MARA_BIND=%r дал %s" % (v, bind_default())
+    os.environ.pop("MARA_BIND", None)
     print("contextd self-check: ок")
     return 0
 
@@ -468,7 +492,7 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("MARA_PORT", 8788)))
     # Loopback по умолчанию: разработка и тесты не должны случайно открыть порт
     # наружу. Открывает его ровно одна строка в /etc/mara/contextd.env на doctor.
-    ap.add_argument("--bind", default=os.environ.get("MARA_BIND", "127.0.0.1"))
+    ap.add_argument("--bind", default=bind_default())
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--pair", metavar="ИМЯ")
     ap.add_argument("--revoke", metavar="ID")
