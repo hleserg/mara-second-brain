@@ -15,6 +15,16 @@ import os, sys, json, argparse, subprocess
 from datetime import datetime, timezone, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import vault_common
+
+# Файл читаем на импорте, а не лениво: ниже из окружения берутся ручки
+# настройки, и после ленивого перехода они молча перестали читаться из файла —
+# `нужен_адрес` вызывается уже после того, как константы вычислены. Тестовый
+# процесс от этого больше не страдает: `run-tests.sh` уводит MARA_ENV_FILE в
+# несуществующий файл.
+vault_common.load_env()
+
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
 # Разговоры с человеком, а не машинная болтовня. У сессии есть колонка
 # source: telegram (Серёга пишет), cli (кто-то зашёл на мак руками), cron
@@ -64,7 +74,7 @@ def as_claude(rows):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
-    ap.add_argument("--mac", default=os.environ.get("MARA_MAC", "serg@192.168.1.80"))
+    ap.add_argument("--mac", default=os.environ.get("MARA_MAC"))
     ap.add_argument("--db", default="~/.hermes/state.db")
     # Разговор с Марой — личное по умолчанию (§7.2: настроение, проблемы,
     # третьи лица). Решит владелец иначе — снимается этим флагом.
@@ -72,7 +82,8 @@ def main(argv=None):
                     help="разрешить дистилляцию разговоров с Марой в облаке")
     a = ap.parse_args(argv)
 
-    sessions = as_claude(fetch(a.mac, a.db))
+    sessions = as_claude(fetch(
+        a.mac or vault_common.нужен_адрес("MARA_MAC", "мак с Марой"), a.db))
     made = 0
     for sid, lines in sessions.items():
         raw_rel = "raw/hermes/%s.jsonl" % sid

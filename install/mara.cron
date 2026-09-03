@@ -1,0 +1,45 @@
+# Расписание Мары. Единственный источник правды — этот файл; на doctor его
+# раскладывает install/install-cron.sh. Правки через `crontab -e` затрутся
+# следующим прогоном установщика, и это осознанно: до сих пор расписание
+# существовало только в голове машины, и переустановка doctor означала бы
+# восстановление по памяти.
+#
+# @REPO@ — корень репозитория, @STATE@ — каталог логов, @VENV@ — питон венва
+# (Presidio и часть зависимостей живут там, системный питон их не видит).
+#
+# Строки вне маркеров установщик не трогает: на doctor живут ещё чужие кроны.
+
+# --- волт: синк, коммиты, бэкап ---------------------------------------------
+*/5  * * * *  @REPO@/scripts/vault-r2-sync.sh
+*/15 * * * *  @REPO@/scripts/vault-git.sh commit
+0    * * * *  @REPO@/scripts/vault-git.sh push
+0    4 * * 1  @REPO@/scripts/vault-backup.sh >> @STATE@/backup.log 2>&1
+0    5 1 1,4,7,10 * @REPO@/scripts/vault-restore-test.sh >> @STATE@/backup.log 2>&1
+
+# --- ядро приёма ------------------------------------------------------------
+# Бэкап ядра раньше ретеншена: ретеншен вычищает аудио по сроку, и запись,
+# удалённая в 4:40, обязана быть уже на носителе (docs/backup-core.md).
+10   4 * * *  /usr/bin/python3 @REPO@/scripts/core-backup.py >> @STATE@/core-backup.log 2>&1
+40   4 * * *  /usr/bin/python3 @REPO@/scripts/blob_retention.py >> @STATE@/retention.log 2>&1
+7    * * * *  /usr/bin/python3 @REPO@/scripts/contextd_reconcile.py >> @STATE@/reconcile.log 2>&1
+0    8 * * *  /usr/bin/python3 @REPO@/scripts/contextd_reconcile.py --telegram >> @STATE@/reconcile.log 2>&1
+*/10 * * * *  /usr/bin/python3 @REPO@/scripts/gmail_ingest.py --sync >> @STATE@/gmail-ingest.log 2>&1
+
+# --- сбор в волт ------------------------------------------------------------
+20   * * * *  @REPO@/scripts/sessions-backfill.sh >/dev/null
+25   * * * *  /usr/bin/python3 @REPO@/scripts/hermes-ingest.py >> @STATE@/hermes-ingest.log 2>&1
+40   * * * *  @VENV@ @REPO@/scripts/queue-worker.py >> @STATE@/queue-worker.log 2>&1
+10   3 * * *  /usr/bin/python3 @REPO@/scripts/git-ingest.py >> @STATE@/git-ingest.log 2>&1
+3-58/5 * * * * /usr/bin/python3 @REPO@/scripts/claude-usage-agg.py >> @STATE@/claude-usage.log 2>&1
+
+# --- обработка волта --------------------------------------------------------
+35   * * * *  /usr/bin/python3 @REPO@/scripts/entity-index.py --lint >/dev/null 2>&1
+50   3 * * *  /usr/bin/python3 @REPO@/scripts/entity-link.py >> @STATE@/entity-link.log 2>&1
+55   3 * * *  /usr/bin/python3 @REPO@/scripts/daily-page.py --all >> @STATE@/daily-page.log 2>&1
+20   4 * * *  /usr/bin/python3 @REPO@/scripts/mara-brief.py >> @STATE@/mara-brief.log 2>&1
+# Пакет обязательств для Мары: после каждого звонка его пересобирает
+# call_project, а этот прогон ловит правки статусов руками в Obsidian (ТЗ §15).
+25   4 * * *  /usr/bin/python3 @REPO@/scripts/context_pack.py >> @STATE@/context-pack.log 2>&1
+
+# --- сторож -----------------------------------------------------------------
+*/10 * * * *  @REPO@/scripts/mara-watchdog.sh >> @STATE@/watchdog.log 2>&1

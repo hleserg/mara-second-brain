@@ -16,7 +16,7 @@
 
     python3 scripts/mara_ingest.py --self-check
 """
-import os, sys, json, time, uuid, random, sqlite3, hashlib
+import os, sys, json, time, uuid, random, sqlite3, hashlib, threading
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
@@ -46,11 +46,70 @@ create table if not exists digests(
   items_json text, sent_at text, state text default 'new');
 create index if not exists jobs_ready on jobs(state, next_at);
 create index if not exists events_state on events(state);
+
+-- ledger по ADR-0001: сюда переезжает власть, Markdown становится проекцией.
+-- Ревизий и version тут нет намеренно: это §4.5 и свой ADR, а колонку
+-- добавить потом — одна строка alter table. Пишет в эти таблицы пока только
+-- разовый перенос (ledger_import.py), проектор на них ещё не переключён.
+create table if not exists commitments(
+  id text primary key, title text, status text, owner text, promised_to text,
+  due text, due_explicit text, origin_event text, source_native_id text unique,
+  created text, occurred text, valid_from text, confidence real,
+  supersedes text, classification text);
+create table if not exists conversations(
+  id text primary key, title text, occurred text, valid_from text,
+  origin_event text, source_native_id text unique, created text,
+  classification text);
+-- отпечаток того, что проектор записал в файл: по нему будущая пересборка
+-- отличит свой файл от поправленного руками и не затрёт правку молча
+create table if not exists projections(
+  path text primary key, object_kind text, object_id text,
+  content_sha256 text, written text);
+create index if not exists projections_object on projections(object_id);
 """
 
 
 def now_iso():
     return datetime.now(TZ).isoformat(timespec="seconds")
+
+
+_ПОСЛЕДНИЙ = [0, 0]        # миллисекунда и хвост предыдущего id
+_ЗАМОК = threading.Lock()  # contextd принимает загрузки в несколько потоков
+
+
+def uuid7():
+    """Стабильный id по ADR-0002: 48 бит миллисекунд, версия, вариант, хвост.
+
+    Своя реализация, потому что `uuid.uuid7()` появляется только в Python 3.14,
+    а на doctor 3.12. Внутри одной миллисекунды хвост не случайный, а растущий:
+    иначе два объекта одного прогона (два обязательства из одного звонка)
+    вставали бы в произвольном порядке, и сортировка по id перестала бы
+    совпадать со временем ровно там, где она нужна.
+
+    Хвост стартует с 72 бит из отведённых 74 — запас на рост внутри
+    миллисекунды. Кончился запас — занимаем следующую миллисекунду вперёд:
+    id уходит на пару миллисекунд впереди часов, но остаётся монотонным.
+
+    Под замком, потому что читаем и пишем `_ПОСЛЕДНИЙ`: contextd обслуживает
+    загрузки в несколько потоков, и два потока в одной миллисекунде без замка
+    прочитали бы один хвост и выдали одинаковый id.
+
+    Часы могут шагнуть назад (ntp): берём максимум с прошлой миллисекундой,
+    иначе новый id встал бы перед старым, а всё в ADR-0002 держится на том,
+    что строковый порядок id — это порядок времени.
+    """
+    with _ЗАМОК:
+        ms = max(int(time.time() * 1000), _ПОСЛЕДНИЙ[0])
+        if ms != _ПОСЛЕДНИЙ[0]:
+            tail = random.getrandbits(72)
+        elif _ПОСЛЕДНИЙ[1] + 1024 < (1 << 74):
+            tail = _ПОСЛЕДНИЙ[1] + random.randrange(1, 1024)
+        else:
+            ms, tail = ms + 1, random.getrandbits(72)
+        _ПОСЛЕДНИЙ[0], _ПОСЛЕДНИЙ[1] = ms, tail
+    n = ((ms << 80) | (0x7 << 76) | ((tail >> 62) << 64)
+         | (0b10 << 62) | (tail & ((1 << 62) - 1)))
+    return str(uuid.UUID(int=n))
 
 
 def connect(root=None):
@@ -86,14 +145,22 @@ def put_event(con, ev):
     for extra in ("ext", "mime", "bytes"):          # пригодится при приёме блоба
         if extra in blob and extra not in payload:
             payload[extra] = blob[extra]
-    con.execute(
-        "insert into events(id,kind,source,source_id,dedupe_key,device_id,received,"
-        "occurred,ended,classification,payload_json,blob_sha256) "
-        "values(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (eid, ev.get("kind"), ev.get("source"), ev.get("source_id"), key,
-         ev.get("device_id"), now_iso(), ev.get("occurred_at"), ev.get("ended_at"),
-         ev.get("classification") or "personal",
-         json.dumps(payload, ensure_ascii=False), blob.get("sha256")))
+    try:
+        con.execute(
+            "insert into events(id,kind,source,source_id,dedupe_key,device_id,received,"
+            "occurred,ended,classification,payload_json,blob_sha256) "
+            "values(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (eid, ev.get("kind"), ev.get("source"), ev.get("source_id"), key,
+             ev.get("device_id"), now_iso(), ev.get("occurred_at"), ev.get("ended_at"),
+             ev.get("classification") or "personal",
+             json.dumps(payload, ensure_ascii=False), blob.get("sha256")))
+    except sqlite3.IntegrityError:
+        # между select и insert успел вставить параллельный запрос: телефон
+        # просыпается и разом досылает всю очередь. Это дубль, а не поломка
+        row = con.execute("select id from events where dedupe_key=?", (key,)).fetchone()
+        if not row:
+            raise
+        return row["id"], True
     return eid, False
 
 
