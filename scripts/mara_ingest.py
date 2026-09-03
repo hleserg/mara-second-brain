@@ -86,14 +86,22 @@ def put_event(con, ev):
     for extra in ("ext", "mime", "bytes"):          # пригодится при приёме блоба
         if extra in blob and extra not in payload:
             payload[extra] = blob[extra]
-    con.execute(
-        "insert into events(id,kind,source,source_id,dedupe_key,device_id,received,"
-        "occurred,ended,classification,payload_json,blob_sha256) "
-        "values(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (eid, ev.get("kind"), ev.get("source"), ev.get("source_id"), key,
-         ev.get("device_id"), now_iso(), ev.get("occurred_at"), ev.get("ended_at"),
-         ev.get("classification") or "personal",
-         json.dumps(payload, ensure_ascii=False), blob.get("sha256")))
+    try:
+        con.execute(
+            "insert into events(id,kind,source,source_id,dedupe_key,device_id,received,"
+            "occurred,ended,classification,payload_json,blob_sha256) "
+            "values(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (eid, ev.get("kind"), ev.get("source"), ev.get("source_id"), key,
+             ev.get("device_id"), now_iso(), ev.get("occurred_at"), ev.get("ended_at"),
+             ev.get("classification") or "personal",
+             json.dumps(payload, ensure_ascii=False), blob.get("sha256")))
+    except sqlite3.IntegrityError:
+        # между select и insert успел вставить параллельный запрос: телефон
+        # просыпается и разом досылает всю очередь. Это дубль, а не поломка
+        row = con.execute("select id from events where dedupe_key=?", (key,)).fetchone()
+        if not row:
+            raise
+        return row["id"], True
     return eid, False
 
 
