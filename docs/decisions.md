@@ -1342,8 +1342,8 @@ ADR-0009 решение 3 назвало запись агента в волт �
 
 **Ключи разные, и оба проверены на живой машине, а не взяты из головы.**
 У Claude Code — `permissions.deny` в `~/.claude/settings.json`; формат имени
-подсказывает сам клиент: «Use 'mcp__<server>' to deny one server's tools
-('mcp__<server>__<tool>' for one tool)». У Codex — `disabled_tools` в секции
+описан в самом клиенте: «MCP permission rules match on the
+`mcp__<server>__<tool>` name string alone». У Codex — `disabled_tools` в секции
 `[mcp_servers.basic-memory]`; `codex mcp get basic-memory -c
 'mcp_servers.basic-memory.disabled_tools=["delete_note"]'` печатает значение
 обратно, то есть ключ читается. Флага у установщиков нет ни там, ни там

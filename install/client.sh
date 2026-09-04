@@ -75,7 +75,10 @@ command -v codex >/dev/null && { codex mcp add basic-memory --url http://127.0.0
 say "read-only для Basic Memory (ADR-0009 решение 3)"
 # Сервер прав не различает, отказ живёт в конфиге клиента — и у Claude Code
 # с Codex он разный. Правит только эти два файла, чужие правила не трогает.
-python3 "$REPO/scripts/mcp-readonly.py"
+# Нужен python3 >= 3.11 (tomllib). Если не вышло — установка не обязана
+# падать целиком: скажем вслух и идём дальше, запись закроют руками.
+python3 "$REPO/scripts/mcp-readonly.py" \
+  || echo "read-only не применён — доделайте руками, см. README" >&2
 
 say "зеркалка Codex по расписанию (у Codex хуков нет, §6.2)"
 LINE="10 * * * * MARA_VAULT_SSH=$DEST $REPO/scripts/codex-mirror.sh # mara-second-brain"
