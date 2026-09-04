@@ -30,17 +30,22 @@ class Носители(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("не абсолютный", r.stderr)
 
-    def test_пробел_в_пути_валит_сверку(self):
+    def test_пробел_в_пути_виден_сверке(self):
         # Сверка разбирает тот же список: разойдись она с бэкапом, носитель,
-        # на который бэкап не пишет, она считала бы живым.
-        r = subprocess.run([sys.executable,
-                            os.path.join(ROOT, "scripts",
-                                         "contextd_reconcile.py"), "--json"],
+        # на который бэкап не пишет, она считала бы живым. Но падать ей
+        # нельзя — с ней замолчали бы DLQ, сердцебиения и ретеншен, поэтому
+        # ждём находку, а не ненулевой код. Подпроцессом, потому что разбор
+        # идёт при импорте: в этом же процессе модуль уже загружен.
+        код = ("import sys; sys.path.insert(0, %r);"
+               " import contextd_reconcile as rc;"
+               " print([f['check'] for f in rc.бэкап_ядра()])"
+               % os.path.join(ROOT, "scripts"))
+        r = subprocess.run([sys.executable, "-c", код],
                            capture_output=True, text=True,
                            env=dict(os.environ,
                                     MARA_CORE_TARGETS="/mnt/a /mnt/мой диск"))
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("не абсолютный", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("бэкап-ядра-конфиг", r.stdout)
 
 
 class ПустойНоситель(unittest.TestCase):
