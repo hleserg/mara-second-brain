@@ -16,10 +16,15 @@ tests.test_contextd` руками мимо гейта — тоже прогон,
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 
 _песок = tempfile.mkdtemp(prefix="mara-tests.")
 tempfile.tempdir = _песок
 os.environ["TMPDIR"] = _песок
-if not os.environ.get("MARA_KEEP_TMP"):
+if os.environ.get("MARA_KEEP_TMP"):
+    # Путь печатаем и здесь: без него оставленная песочница немая, а искать её
+    # по времени создания среди чужих — то же самое, что не оставлять.
+    atexit.register(print, "песочница оставлена:", _песок, file=sys.stderr)
+else:
     atexit.register(shutil.rmtree, _песок, ignore_errors=True)

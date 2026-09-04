@@ -19,7 +19,10 @@ export MARA_ENV_FILE=/nonexistent/mara-env
 # MARA_KEEP_TMP=1 — оставить песочницу: у красного гейта волт и база упавшего
 # теста нужны именно после прогона, а не до.
 sand="$(mktemp -d "${TMPDIR:-/tmp}/mara-tests.XXXXXX")" || exit 1
-trap '[ -n "${MARA_KEEP_TMP:-}" ] && echo "песочница оставлена: $sand" || rm -rf "$sand"' EXIT
+# Явный `if`, а не `&& … ||`: у второго ветка `rm` достижима, когда падает
+# `echo` — например при выводе на забитую ФС. То есть люк молча не срабатывал
+# бы ровно в той ситуации, из которой вырос #33.
+trap 'if [ -n "${MARA_KEEP_TMP:-}" ]; then echo "песочница оставлена: $sand"; else rm -rf "$sand"; fi' EXIT
 TMPDIR_ORIG="${TMPDIR:-/tmp}"
 export TMPDIR="$sand"
 fail=0
