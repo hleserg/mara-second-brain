@@ -942,5 +942,93 @@ class ТестКривойДлины(unittest.TestCase):
                          [])
 
 
+class ТестScopes(unittest.TestCase):
+    """Allowlist видов у устройства (ADR-0009, откат п. 2)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.srv = contextd.make_server(self.dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        self.con = mi.connect(self.dir)
+        self.dev, self.token = contextd.pair(self.con, "телефон")
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def послать(self, kind, source_id):
+        body = json.dumps({"kind": kind, "source": "phone",
+                           "source_id": source_id}).encode("utf-8")
+        req = urllib.request.Request(self.base + "/v1/ingest/event", data=body,
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            e.read()
+            return e.code
+
+    def test_колонка_добавляется_к_старой_базе(self):
+        """Существующая база без колонки доезжает сама, данные целы."""
+        каталог = tempfile.mkdtemp()
+        путь = os.path.join(каталог, "contextd.db")
+        import sqlite3
+        con = sqlite3.connect(путь)
+        con.execute("create table devices(id text primary key, name text, "
+                    "token_sha256 text not null, created text, last_seen text, "
+                    "revoked_at text)")
+        con.execute("insert into devices(id,name,token_sha256) values('d1','старое','x')")
+        con.commit(); con.close()
+        con = mi.connect(каталог)
+        колонки = {r["name"] for r in con.execute("pragma table_info(devices)")}
+        self.assertIn("scopes", колонки)
+        row = con.execute("select name, scopes from devices where id='d1'").fetchone()
+        self.assertEqual(row["name"], "старое")
+        self.assertIsNone(row["scopes"], "миграция не должна ничего разрешать сама")
+
+    def test_null_пускает_всё(self):
+        self.assertEqual(self.послать("call", "s1"), 200)
+        self.assertEqual(self.послать("message", "s2"), 200)
+
+    def test_список_пускает_своё_и_отбивает_чужое(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        self.assertEqual(self.послать("call", "s3"), 200)
+        self.assertEqual(self.послать("message", "s4"), 403)
+
+    def test_отбитое_событие_в_базу_не_попало(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        self.послать("message", "s5")
+        n = self.con.execute("select count(*) c from events "
+                             "where source_id='s5'").fetchone()["c"]
+        self.assertEqual(n, 0, "403 всё равно записал событие")
+
+    def test_пустой_список_снимает_ограничение(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        self.assertEqual(self.послать("message", "s6"), 403)
+        found, val = contextd.set_scopes(self.con, self.dev, [])
+        self.assertTrue(found)
+        self.assertIsNone(val)
+        self.assertEqual(self.послать("message", "s7"), 200)
+
+    def test_история_даёт_то_что_устройство_реально_слало(self):
+        self.assertEqual(self.послать("call", "s8"), 200)
+        self.assertEqual(self.послать("message", "s9"), 200)
+        self.assertEqual(contextd.scopes_from_history(self.con, self.dev),
+                         ["call", "message"])
+
+    def test_история_пуста_у_нового_устройства(self):
+        dev2, _ = contextd.pair(self.con, "ещё не звонил")
+        self.assertEqual(contextd.scopes_from_history(self.con, dev2), [],
+                         "устройству без событий список выдавать нечем")
+
+    def test_чужое_устройство_не_находится(self):
+        found, _ = contextd.set_scopes(self.con, "dev_нет", ["call"])
+        self.assertFalse(found)
+
+
 if __name__ == "__main__":
     unittest.main()
