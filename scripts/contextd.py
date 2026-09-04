@@ -27,7 +27,8 @@ bind. Но из локалки он виден, и это осознанный �
     python3 scripts/contextd.py --revoke dev_ab12...
     python3 scripts/contextd.py --self-check
 """
-import os, sys, json, time, hashlib, secrets, argparse, threading, subprocess
+import os, sys, io, json, time, hashlib, secrets, argparse, threading, subprocess
+import tempfile
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -36,7 +37,17 @@ sys.path.insert(0, HERE)
 import mara_ingest as mi
 
 VAULT = os.environ.get("VAULT", "/srv/vault")
-MAX_BODY = 512 << 20                 # часовой звонок в m4a влезает с запасом
+# Час разговора в m4a на 192 kb/s — около 85 МБ, два часа — 170. Тело теперь
+# льётся на диск кусками, так что лимит бережёт не память, а место на плате;
+# зато 413 у телефона терминальный (JobFlow.next), и запись сверх лимита не
+# доедет никогда. 256 МиБ — примерно три часа разговора.
+MAX_BODY = 256 << 20
+# JSON-эндпоинты принимают событие, а не файл. Мегабайта хватает на самое
+# длинное письмо; всё, что больше, — либо ошибка клиента, либо попытка занять
+# память демона.
+MAX_JSON = 1 << 20
+# Сколько согласны вычитать в никуда, чтобы отдать 413 по-человечески.
+СЛИВ = 8 << 20
 NEXT = {"asr": "extract", "extract": "project", "project": "digest"}
 STEP = {"asr": "call_asr.py", "extract": "call_extract.py",
         "project": "call_project.py", "digest": "call_digest.py"}
@@ -50,6 +61,54 @@ OPEN_PATHS = ("/healthz",)              # мануал велит проверя
 # последнего синка каждого канала: по этим числам читается распорядок дня
 # владельца, а порт теперь открыт в локалку.
 LOOPBACK = ("127.0.0.1", "::1")
+# Роутер, которому разрешено подставлять реальный адрес клиента в
+# X-Forwarded-For. Пусто — никому: заголовок подделывается одной строкой, и без
+# явного списка лимит попыток обходится сменой выдуманного адреса.
+TRUSTED_PROXY = tuple(a.strip() for a in
+                      (os.environ.get("MARA_TRUSTED_PROXY") or "").split(",") if a.strip())
+ПОПЫТОК = 10                            # подряд неудачных 401 с одного адреса
+ОКНО = 300                              # за столько секунд
+ОСТЫТЬ = 300                            # и столько же потом получает 429
+_неудачи = {}                           # адрес -> [сколько, когда первая]
+_замок = threading.Lock()
+
+
+def клиент(handler):
+    """Кто стучится, с точки зрения лимита попыток.
+
+    Адрес сокета, а если стучится доверенный прокси — последний адрес из
+    X-Forwarded-For. Только для счётчика: проверки на петлю (`/metrics`,
+    полный `/healthz`) остаются на `client_address`, иначе заголовком можно
+    было бы притвориться петлёй.
+    """
+    peer = handler.client_address[0]
+    if peer in TRUSTED_PROXY:
+        # get_all, а не get: при двух заголовках `get` берёт первый, то есть
+        # присланный клиентом, а не дописанный прокси
+        fwd = (handler.headers.get_all("X-Forwarded-For") or [""])[-1]
+        цепочка = [a.strip() for a in fwd.split(",") if a.strip()]
+        if цепочка:
+            return цепочка[-1]
+    return peer
+
+
+def под_замком(adr, ok):
+    """Считает неудачи. Возвращает, сколько секунд ещё ждать (0 — пускаем)."""
+    сейчас = time.time()
+    with _замок:
+        for a, (_, когда) in list(_неудачи.items()):
+            if сейчас - когда > ОКНО + ОСТЫТЬ:
+                _неудачи.pop(a, None)          # чтобы словарь не рос от сканеров
+        if ok:
+            _неудачи.pop(adr, None)
+            return 0
+        было, когда = _неудачи.get(adr, (0, сейчас))
+        if сейчас - когда > ОКНО and было < ПОПЫТОК:
+            было, когда = 0, сейчас            # окно истекло, счёт заново
+        _неудачи[adr] = (было + 1, когда)
+        if было + 1 > ПОПЫТОК:
+            return int(ОКНО + ОСТЫТЬ - (сейчас - когда)) or 1
+        return 0
 
 
 # --- устройства -------------------------------------------------------------
@@ -205,33 +264,58 @@ class Handler(BaseHTTPRequestHandler):
             self.server._local.con = mi.connect(self.server.root)
         return self.server._local.con
 
+    timeout = 60                     # зависшая заливка иначе держит поток вечно
+
     def log_message(self, fmt, *args):
         pass                                  # свой лог, санитарный
 
-    def say(self, code, obj, ctype="application/json"):
+    def say(self, code, obj, ctype="application/json", closing=False, ещё=None):
         body = (obj if isinstance(obj, (bytes, bytearray)) else
                 json.dumps(obj, ensure_ascii=False).encode("utf-8")
                 if ctype == "application/json" else obj.encode("utf-8"))
         self.send_response(code)
+        if closing:
+            self.send_header("Connection", "close")
+        for k, v in (ещё or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > MAX_BODY:
-            raise ValueError("тело больше %d МиБ" % (MAX_BODY >> 20))
-        return self.rfile.read(n) if n else b""
+    def отлуп(self, code, текст, ещё=None):
+        """Ответ на тело, которое мы отказались читать.
+
+        Клиент в этот момент ещё шлёт: закроем соединение молча — он увидит
+        broken pipe вместо кода. Поэтому вычитываем в никуда, но не больше
+        СЛИВ: отказ читать полгигабайта — половина смысла лимита.
+        """
+        слить(self.rfile, min(длина(self) or 0, СЛИВ), Никуда())
+        self.close_connection = True
+        return self.say(code, {"error": текст}, closing=True, ещё=ещё)
 
     def authed(self, path):
         if path in OPEN_PATHS:
             return True
         if path == "/metrics" and self.client_address[0] in LOOPBACK:
             return True
+        adr = клиент(self)
+        # Считаем попытку до проверки токена, но верный токен всё равно
+        # проходит и обнуляет счёт: за одним NAT с подбирающим может сидеть
+        # телефон владельца, и запирать его заодно — это отказ в обслуживании
+        # своими руками.
+        ждать = под_замком(adr, False)
         if device_of(self.con(), self.headers.get("Authorization")):
+            под_замком(adr, True)
             return True
-        self.say(401, {"error": "устройство не опознано"})
+        if ждать:
+            print("429 %s %s: подбор токена, ждать %dс" % (adr, path, ждать), flush=True)
+            self.отлуп(429, "слишком много попыток", {"Retry-After": str(ждать)})
+            return False
+        print("401 %s %s" % (adr, path), flush=True)
+        # тело неопознанного запроса тоже вычитываем: иначе его хвост уедет в
+        # следующий запрос на том же соединении и сервер ответит 400 на мусор
+        self.отлуп(401, "устройство не опознано")
         return False
 
     def do_GET(self):
@@ -258,20 +342,32 @@ class Handler(BaseHTTPRequestHandler):
         p = urllib.parse.urlparse(self.path)
         if not self.authed(p.path):
             return
+        n = длина(self)
+        if n is None:
+            # границу тела мы не знаем: сливать нечего, а соединение дальше
+            # использовать нельзя — хвост уехал бы в следующий запрос
+            self.close_connection = True
+            return self.say(400, {"error": "нужен числовой Content-Length"},
+                            closing=True)
         con = self.con()
-        try:
-            raw = self.body()
-        except ValueError as e:
-            return self.say(413, {"error": str(e)})
         if p.path == "/v1/ingest/audio":
+            if n > MAX_BODY:
+                return self.отлуп(413, "тело больше %d МиБ" % (MAX_BODY >> 20))
             q = urllib.parse.parse_qs(p.query)
             code, out = ingest_audio(con, self.server.root,
-                                     (q.get("event") or [""])[0], raw)
+                                     (q.get("event") or [""])[0], self.rfile, n)
             print(log_line("POST", p.path, code), flush=True)
             return self.say(code, out)
+        if n > MAX_JSON:
+            return self.отлуп(413, "тело больше %d МиБ" % (MAX_JSON >> 20))
+        raw = self.rfile.read(n) if n else b""
         try:
             data = json.loads(raw or b"{}")
         except ValueError:
+            return self.say(400, {"error": "не json"})
+        if not isinstance(data, dict):
+            # `5` и `[]` — валидный json, но дальше по коду сплошь data.get,
+            # и обработчик падал без ответа
             return self.say(400, {"error": "не json"})
         if p.path in ("/v1/ingest/event", "/v1/ingest/message", "/v1/ingest/email"):
             kind = {"/v1/ingest/message": "message",
@@ -284,7 +380,8 @@ class Handler(BaseHTTPRequestHandler):
                 if err:
                     return self.say(400, {"error": err})
             eid, dup = mi.put_event(con, data)
-            need = bool((data.get("blob") or {}).get("sha256")) and not dup
+            need = need_blob(con, self.server.root, eid,
+                             (data.get("blob") or {}).get("sha256"))
             applied = None
             if kind == "correction" and not dup:
                 # синхронно, а не через очередь: Серёга ждёт ответа Мары, а не
@@ -309,37 +406,168 @@ class Handler(BaseHTTPRequestHandler):
         return self.say(404, {"error": "нет такого пути"})
 
 
-def ingest_audio(con, root, event_id, raw):
-    """Блоб на диск с проверкой содержимого. Хеш не сошёлся — не успех (ТЗ §20)."""
+КУСОК = 1 << 20                          # мегабайт за чтение
+
+
+class Никуда:
+    """Сток для тела, которое нужно вычитать, но некуда девать.
+
+    io.BytesIO на этом месте копил в памяти всё, что читал: заливка дубля на
+    128 МиБ поднимала RSS демона на те же 128 МиБ — ровно та беда, ради
+    которой заливку делали потоковой.
+    """
+
+    def write(self, кусок):
+        return len(кусок)
+
+
+def слить(поток, n, куда):
+    """Тело запроса на диск кусками, попутно считая sha256.
+
+    Читаем ровно `n` байт и не больше: `rfile` — это сокет, `read()` без
+    границы на keep-alive соединении заберёт и следующий запрос. Возвращает
+    (хеш, сколько байт легло).
+    """
+    h = hashlib.sha256()
+    осталось, всего = n, 0
+    while осталось > 0:
+        кусок = поток.read(min(КУСОК, осталось))
+        if not кусок:
+            break                            # клиент оборвался: вернём меньше n
+        h.update(кусок)
+        куда.write(кусок)
+        осталось -= len(кусок)
+        всего += len(кусок)
+    return h.hexdigest(), всего
+
+
+def длина(handler):
+    """Content-Length числом. None — читать тело нельзя, границы не знаем.
+
+    isdigit, а не int(): `int` глотает `+5`, `1_000` и `-1`, а HTTP — нет.
+    Сервер прочитал бы пять байт, а хвост тела уехал бы в следующий запрос по
+    тому же keep-alive соединению. isascii — потому что `isdigit` верен и для
+    `²`, на котором `int` падает. Длину ограничиваем 19 цифрами: с CPython 3.11
+    `int()` от строки длиннее 4300 цифр кидает ValueError, а заголовок влезает
+    в 64 КиБ — то есть анонимный запрос ронял обработчик без ответа вовсе.
+    Число из 19 цифр это 9 эксабайт, до лимита тела ему в любом случае далеко.
+
+    Chunked разбирать мы не умеем, поэтому любой Transfer-Encoding — отказ,
+    даже с Content-Length рядом: сервер прочитал бы столько байт, а в
+    соединении осталась бы чанковая обвязка. Два разных Content-Length — тот
+    же случай: выбирать один из них не наше дело.
+    """
+    if handler.headers.get("Transfer-Encoding"):
+        return None
+    все = handler.headers.get_all("Content-Length") or []
+    if len(все) > 1:
+        return None
+    s = (все[0] if все else "").strip()
+    if not s:
+        return 0
+    return int(s) if s.isascii() and s.isdigit() and len(s) <= 19 else None
+
+
+def blob_row(con, sha256):
+    """Что база знает о блобе. Спрашиваем её, а не файловую систему: путь
+    считается от даты загрузки, поэтому августовская запись, долитая в
+    сентябре, по вычисленному сегодня пути не находится (N5)."""
+    if not sha256:
+        return None
+    return con.execute("select path, bytes, purged_at from blobs where sha256=?",
+                       (sha256,)).fetchone()
+
+
+def finish_stored(con, root, event_id):
+    """Довести событие с уже лежащим блобом до `stored`: манифест и работа ASR.
+    Идемпотентно — второй вызов не заводит вторую работу. Нужно потому, что
+    между записью блоба и переводом события демон может умереть.
+
+    Перевод состояния — одним `update ... where state='new'`, а не проверкой и
+    записью по отдельности: обработчики живут в разных потоках со своими
+    соединениями, и два одновременных запроса по одному событию проходили
+    раздельную проверку оба. Ценой была вторая цепочка asr→extract→project→
+    digest: час GPU и второй дайджест в телеграм. `rowcount` показывает, кто
+    успел первым.
+    """
+    if con.execute("update events set state='stored' where id=? and state='new'",
+                   (event_id,)).rowcount != 1:
+        return
+    mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
+    mi.add_job(con, event_id, "asr")
+
+
+def need_blob(con, root, event_id, sha256):
+    """Нужен ли серверу блоб этого события.
+
+    Считается по базе блобов, а не по признаку «событие новое». Иначе повтор
+    после потерянного ответа получает `duplicate: true, need_blob: false`,
+    телефон закрывает работу успешной, и запись не приезжает никогда (N1).
+    Вычищенное ретеншеном аудио заново не просим: его удалили намеренно."""
+    if not sha256:
+        return False
+    row = blob_row(con, sha256)
+    if row is None:
+        return True
+    if not row["purged_at"]:
+        finish_stored(con, root, event_id)
+    return False
+
+
+def ingest_audio(con, root, event_id, поток, n=None):
+    """Блоб на диск с проверкой содержимого. Хеш не сошёлся — не успех (ТЗ §20).
+
+    `поток` — либо готовые байты (так зовут тесты), либо `rfile` запроса; во
+    втором случае тело льётся кусками, а не поднимается в память целиком.
+    """
+    if isinstance(поток, (bytes, bytearray)):
+        n = len(поток)
+        поток = io.BytesIO(поток)
     row = con.execute("select blob_sha256, payload_json, state from events where id=?",
                       (event_id,)).fetchone()
     if not row:
-        return 404, {"error": "нет такого события"}
+        слить(поток, n or 0, Никуда())    # тело всё равно вычитать, иначе
+        return 404, {"error": "нет такого события"}   # keep-alive поедет вразнос
     want = row["blob_sha256"]
     if not want:
+        слить(поток, n or 0, Никуда())
         return 400, {"error": "событие без аудио"}
     ext = (json.loads(row["payload_json"] or "{}").get("ext")) or "bin"
-    path = mi.blob_path(root, want, ext)
-    if os.path.exists(path):
+    известен = blob_row(con, want)
+    if известен is not None:
+        слить(поток, n or 0, Никуда())
+        # строку не трогаем: в ней pin, audio_until и purged_at, а insert or
+        # replace их обнулил бы
+        if not известен["purged_at"]:
+            finish_stored(con, root, event_id)
         return 200, {"event_id": event_id, "blob_sha256": want,
-                     "bytes": os.path.getsize(path), "duplicate": True}
-    got = hashlib.sha256(raw).hexdigest()
+                     "bytes": известен["bytes"], "duplicate": True,
+                     "purged": bool(известен["purged_at"])}
+    path = mi.blob_path(root, want, ext)
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".part"
-    with open(tmp, "wb") as fh:
-        fh.write(raw)
-    if got != want:
-        os.unlink(tmp)
-        return 409, {"error": "хеш не сошёлся", "expected": want, "got": got}
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-    con.execute("insert or replace into blobs(sha256,path,bytes,mime,created,audio_until)"
+    # каждой загрузке свой временный файл: на общем ".part" второй писатель
+    # усекал бы файл первого, и os.replace публиковал бы склейку (N12)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".part")
+    # finally, а не unlink по месту: обрыв связи посреди потоковой заливки
+    # оставлял .part навсегда, а уборщика для них в системе нет — десяток
+    # переключений WiFi→LTE забил бы диск платы
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            got, размер = слить(поток, n or 0, fh)
+        if got != want:
+            return 409, {"error": "хеш не сошёлся", "expected": want, "got": got}
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    # or ignore, а не or replace: две параллельные загрузки одного аудио не
+    # повод обнулять pin и audio_until уже лежащей строки
+    con.execute("insert or ignore into blobs(sha256,path,bytes,mime,created,audio_until)"
                 " values(?,?,?,?,?,?)",
-                (want, path, len(raw), "audio", mi.now_iso(), audio_until()))
-    con.execute("update events set state='stored' where id=?", (event_id,))
-    mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
-    mi.add_job(con, event_id, "asr")
-    return 200, {"event_id": event_id, "blob_sha256": want, "bytes": len(raw)}
+                (want, path, размер, "audio", mi.now_iso(), audio_until()))
+    finish_stored(con, root, event_id)
+    return 200, {"event_id": event_id, "blob_sha256": want, "bytes": размер}
 
 
 def manifest(con, root, event_id):

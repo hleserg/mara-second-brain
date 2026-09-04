@@ -273,3 +273,44 @@ object MessageFlow {
         else -> JobState.FAILED
     }
 }
+
+/**
+ * Проверка адреса сервера перед сохранением.
+ *
+ * Открытый HTTP допустим только внутрь своей сети: домашняя локалка, VPN
+ * роутера, петля. Наружу — только TLS: снаружи в открытом виде поедет
+ * bearer-токен, а за ним записи разговоров. Манифест разрешает cleartext
+ * глобально (иначе отвалился бы запасной путь по локалке), так что запрет
+ * держится здесь, в одном месте и с внятным текстом ошибки.
+ */
+object Адрес {
+
+    private val частные = Regex(
+        """^(127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|""" +
+        """172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|""" +
+        """localhost|[^.]+\.local)$""",
+        RegexOption.IGNORE_CASE)
+
+    /** Хост из своей сети: ему открытый HTTP прощаем. */
+    fun свой(host: String): Boolean = частные.matches(host)
+
+    /** null — адрес годится; иначе строка для показа владельцу. */
+    fun беда(url: String): String? {
+        val s = url.trim()
+        if (s.isEmpty()) return "адрес пустой"
+        val u = try {
+            java.net.URI(s)
+        } catch (e: Exception) {
+            return "адрес не разбирается"
+        }
+        val scheme = u.scheme?.lowercase() ?: return "нет http:// или https://"
+        val host = u.host ?: return "в адресе нет имени сервера"
+        if (s.endsWith("/")) return "лишний / на конце"
+        return when (scheme) {
+            "https" -> null
+            "http" -> if (свой(host)) null
+                      else "снаружи только https: по http туда уедет токен открытым текстом"
+            else -> "нужен http:// или https://"
+        }
+    }
+}
