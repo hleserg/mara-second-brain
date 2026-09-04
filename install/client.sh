@@ -72,6 +72,11 @@ say "MCP в клиентах"
 claude mcp add --transport http --scope user basic-memory http://127.0.0.1:8787/mcp 2>&1 | tail -1 || true
 command -v codex >/dev/null && { codex mcp add basic-memory --url http://127.0.0.1:8787/mcp 2>&1 | tail -1 || true; }
 
+say "read-only для Basic Memory (ADR-0009 решение 3)"
+# Сервер прав не различает, отказ живёт в конфиге клиента — и у Claude Code
+# с Codex он разный. Правит только эти два файла, чужие правила не трогает.
+python3 "$REPO/scripts/mcp-readonly.py"
+
 say "зеркалка Codex по расписанию (у Codex хуков нет, §6.2)"
 LINE="10 * * * * MARA_VAULT_SSH=$DEST $REPO/scripts/codex-mirror.sh # mara-second-brain"
 ( crontab -l 2>/dev/null | grep -v 'codex-mirror.sh'; echo "$LINE" ) | crontab -
@@ -79,3 +84,4 @@ LINE="10 * * * * MARA_VAULT_SSH=$DEST $REPO/scripts/codex-mirror.sh # mara-secon
 say "готово"
 echo "проверить: systemctl --user status mara-mcp-tunnel  (или launchctl list | grep mara)"
 echo "           claude mcp list | grep basic-memory"
+echo "           python3 scripts/mcp-readonly.py --check"

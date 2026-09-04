@@ -234,6 +234,16 @@ gateway его не обновляет (см. decisions, 2 сентября). П
 `mcp_servers.basic-memory.tools.exclude` на маке: новые читающие инструменты
 подхватятся сами.
 
+**У Claude Code и Codex — не все тоже, и по-другому.** Эти два клиента ставит
+`install/client.sh`, и до ADR-0009 у них не было исключений вовсе: сервер прав
+не различает, а серверной ручки read-only у `basic-memory` 0.22.1 нет. Поэтому
+запись закрывается на стороне клиента, и у каждого клиента свой ключ —
+`permissions.deny` в `~/.claude/settings.json` и `disabled_tools` в секции
+`[mcp_servers.basic-memory]` файла `~/.codex/config.toml`. Пишет их
+`scripts/mcp-readonly.py`, список белым не бывает: семь пишущих инструментов
+(вместе с `canvas`, он создаёт файл в волте), остальные читающие остаются.
+Проверить, не разъехалось ли: `python3 scripts/mcp-readonly.py --check`.
+
 ## Бэкапы (§12)
 
 Копий три, но защищают они от разного. `/srv/vault` и bare-зеркало
