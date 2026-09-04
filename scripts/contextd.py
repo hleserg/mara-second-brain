@@ -253,7 +253,8 @@ def audio_until(days=None):
 def job_view(row, loopback):
     """Строка `jobs` наружу.
 
-    `last_error` — хвост stderr шага, последние 500 байт (`run_step`). Шаги
+    `last_error` — хвост stderr шага, последние 500 символов (`run_step`
+    режет уже декодированный текст). Шаги
     зовут `call_asr.py` и `call_extract.py`, а там в текст исключения попадают
     пути и вывод ffmpeg; расшифровки аудит там не нашёл
     (`docs/current-state-audit.md:239-244`), но канал существует и держится на
@@ -351,7 +352,8 @@ class Handler(BaseHTTPRequestHandler):
             if not row:
                 return self.say(404, {"error": "нет такой работы"})
             # проверка на петлю — по адресу сокета, как у /metrics: заголовком
-            # петлёй не притвориться (см. `клиент`)
+            # петлёй не притвориться (см. `клиент`). Обманул бы прокси на самом
+            # doctor; такого нет — KeenDNS живёт на роутере, отдельной коробкой
             петля = self.client_address[0] in LOOPBACK
             return self.say(200, job_view(row, петля))
         if p.path == "/v1/context/bootstrap":
