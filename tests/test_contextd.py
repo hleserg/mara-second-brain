@@ -1122,6 +1122,11 @@ class ТестScopes(unittest.TestCase):
                              "where source_id='s10'").fetchone()["c"]
         self.assertEqual(n, 0, "400 всё равно записал событие")
 
+    def test_потолок_длины_вида(self):
+        """Отдельно от формы: без него `{0,31}` можно снять и ничего не упадёт."""
+        self.assertEqual(self.послать("a" * 32, "s16"), 200)
+        self.assertEqual(self.послать("a" * 33, "s17"), 400)
+
     def test_вид_не_строка_не_роняет_обработчик(self):
         """`{"kind": 7}` — валидный json; `kind.split()` на нём падал."""
         self.assertEqual(self.послать(7, "s11"), 400)
@@ -1146,6 +1151,20 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(self.послать(None, "s15"), 200)
         row = self.con.execute("select kind from events where source_id='s15'").fetchone()
         self.assertEqual(row["kind"], "event")
+
+    def test_отказ_history_подсказывает_обход(self):
+        """База, набравшая кривой вид до #29, не должна запирать владельца.
+
+        Отказ громкий намеренно (тихо выбросить вид — молча отнять у устройства
+        разрешение, которым оно пользуется), но громкий отказ обязан говорить,
+        куда идти. Событие кладём мимо ручки: приём такой вид больше не пустит,
+        а в чужой старой базе он уже мог осесть.
+        """
+        mi.put_event(self.con, {"kind": "call correction", "source": "т",
+                                "device_id": self.dev, "source_id": "s18"})
+        код, вывод = self.запуск("--allow", self.dev, "@history")
+        self.assertEqual(код, 1)
+        self.assertIn("--allow %s call message" % self.dev, вывод)
 
     def test_гонка_миграции_не_валит_открытие(self):
         """Колонку добавил сосед между `pragma` и `alter` — это не ошибка.

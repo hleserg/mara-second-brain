@@ -1001,7 +1001,13 @@ def main(argv=None):
         try:
             found, val = set_scopes(con, dev, kinds)
         except ValueError as e:
-            print("не записал: %s" % e); return 1
+            # «@history» собирает список из того, что устройство реально слало,
+            # и один кривой вид в истории роняет запись целиком. Без подсказки
+            # владелец на этом месте идёт читать таблицу событий руками
+            print("не записал: %s" % e)
+            print("виды можно задать явно, минуя историю: "
+                  "--allow %s call message" % dev)
+            return 1
         if not found:
             print("нет такого устройства"); return 1
         print("%s: %s" % (dev, val if val is not None else "без ограничения (null)"))
