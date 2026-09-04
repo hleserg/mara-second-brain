@@ -80,6 +80,37 @@ def блоб_без_манифеста(con, root):
     return out
 
 
+def запись_без_расшифровки(con, root):
+    """Событие доведено до `stored`, а работы `asr` нет вовсе — поставить.
+
+    Дыра §5.2 в чистом виде. `finish_stored` переводит состояние, потом пишет
+    манифест, потом ставит работу — тремя отдельными коммитами, транзакции
+    вокруг них нет (ADR-0005). Смерть демона между первым и третьим оставляет
+    запись, которую никто не расшифрует, и сам по себе повтор не спасает:
+    перевод уже сделан, и `update ... where state='new'` больше не сработает.
+    Заметить это может только сверка — до неё дыра держалась на человеке.
+
+    Пропавший манифест чинится не здесь: собрать его заново — это дело демона,
+    у которого лежит payload. Сверка о нём докладывает.
+    """
+    out = []
+    for r in con.execute("select id from events where state='stored' "
+                         "and blob_sha256 is not null order by id"):
+        eid = r["id"]
+        if not os.path.exists(mi.manifest_path(root, eid)):
+            out.append(находка("манифест-не-дописан", "warn",
+                               "событие %s доведено до stored без манифеста" % eid,
+                               event_id=eid))
+        if con.execute("select 1 from jobs where event_id=? and kind='asr'",
+                       (eid,)).fetchone():
+            continue
+        mi.add_job(con, eid, "asr")
+        out.append(находка("расшифровка-поставлена", "fixed",
+                           "у %s была запись без работы расшифровки" % eid,
+                           event_id=eid))
+    return out
+
+
 def транскрипт_без_извлечения(con, root):
     """Расшифровка есть, извлечения нет и работу никто не поставил — поставить."""
     out = []
@@ -276,6 +307,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out = []
     out += манифест_без_блоба(con, root)
     out += блоб_без_манифеста(con, root)
+    out += запись_без_расшифровки(con, root)
     out += транскрипт_без_извлечения(con, root)
     out += лаг_индекса(vault, bm_db)
     out += ретеншен_просрочен(con)

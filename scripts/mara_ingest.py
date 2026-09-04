@@ -165,11 +165,30 @@ def put_event(con, ev):
 
 
 def add_job(con, event_id, kind):
+    """Поставить работу. Пока живая работа того же вида на это событие уже
+    стоит, второй не заводится.
+
+    Цепочку asr→extract→project→digest ставят из трёх мест, и каждое умеет
+    сработать дважды: `finish_stored` после недописанной записи, конвейер
+    воркера после смерти между работой и отметкой, сверка после сбоя. Вторая
+    работа — это второй час GPU и второй дайджест в телеграм.
+
+    Отработавшая (`done`) и брошенная (`dlq`) живой не считаются: на них стоит
+    починка руками, и сверка ровно ими и чинит — ставит извлечение заново
+    поверх сдохшего. Возвращается id той работы, что в итоге стоит в очереди.
+    """
     jid = str(uuid.uuid4())
-    con.execute("insert into jobs(id,event_id,kind,created,updated,next_at) "
-                "values(?,?,?,?,?,?)",
-                (jid, event_id, kind, now_iso(), now_iso(), int(time.time())))
-    return jid
+    # одним запросом, а не «проверить и вставить»: обработчики живут в разных
+    # потоках со своими соединениями и раздельную проверку проходили оба
+    if con.execute("insert into jobs(id,event_id,kind,created,updated,next_at) "
+                   "select ?,?,?,?,?,? where not exists ("
+                   "select 1 from jobs where event_id=? and kind=? and state='ready')",
+                   (jid, event_id, kind, now_iso(), now_iso(), int(time.time()),
+                    event_id, kind)).rowcount == 1:
+        return jid
+    row = con.execute("select id from jobs where event_id=? and kind=? and "
+                      "state='ready'", (event_id, kind)).fetchone()
+    return row["id"] if row else None
 
 
 def claim_job(con, kinds=None, now=None):
@@ -185,9 +204,17 @@ def claim_job(con, kinds=None, now=None):
     row = con.execute(q, args).fetchone()
     if not row:
         return None
-    con.execute("update jobs set lease_until=?, updated=? where id=?",
-                (now + LEASE_SEC, now_iso(), row["id"]))
-    return dict(row)
+    # Аренда берётся тем же условием, по которому работа выбиралась. Раздельные
+    # `select` и `update` два воркера проходили оба, и час GPU уходил дважды —
+    # та же болезнь, что вылечена в `finish_stored`. Проигравший вернётся сюда
+    # следующим тиком: работа никуда не делась, а спешить некуда.
+    if con.execute("update jobs set lease_until=?, updated=? "
+                   "where id=? and lease_until<?",
+                   (now + LEASE_SEC, now_iso(), row["id"], now)).rowcount != 1:
+        return None
+    job = dict(row)
+    job["lease_until"] = now + LEASE_SEC
+    return job
 
 
 def next_delay(attempts):
