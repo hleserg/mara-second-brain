@@ -27,10 +27,9 @@ class ЗаписьБезРасшифровки(unittest.TestCase):
         self.con.execute("update events set state='stored' where id=?", (self.eid,))
         mi.write_json(mi.manifest_path(self.root, self.eid), {"id": self.eid})
 
-    def блоб(self, purged=None, файл=True):
+    def блоб(self, purged=None):
         путь = os.path.join(self.root, "b.m4a")
-        if файл:
-            open(путь, "wb").write(b"a" * 10)
+        open(путь, "wb").write(b"a" * 10)
         self.con.execute(
             "insert or replace into blobs"
             "(sha256,path,bytes,mime,created,purged_at) values(?,?,?,?,?,?)",
