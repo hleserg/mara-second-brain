@@ -1020,6 +1020,52 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(contextd.scopes_from_history(self.con, self.dev),
                          ["call", "message"])
 
+    def test_гонка_миграции_не_валит_открытие(self):
+        """Колонку добавил сосед между `pragma` и `alter` — это не ошибка.
+
+        Гонку тут не ждут случайно, а устраивают: подменённый `sqlite3.connect`
+        добавляет колонку ровно в тот момент, когда наш `pragma table_info` уже
+        отработал и сказал «колонки нет». Без `except OperationalError` в
+        `mi.connect` этот тест падает с `duplicate column name`.
+        """
+        import sqlite3
+        каталог = tempfile.mkdtemp()
+        путь = os.path.join(каталог, "contextd.db")
+        con = sqlite3.connect(путь)
+        con.execute("create table devices(id text primary key, name text, "
+                    "token_sha256 text not null, created text, last_seen text, "
+                    "revoked_at text)")
+        con.commit(); con.close()
+
+        настоящий = sqlite3.connect
+
+        class Соседский(sqlite3.Connection):
+            """Соединение, за спиной которого колонку добавляет кто-то другой."""
+            подставил = False
+
+            def execute(self, sql, *a):
+                r = super().execute(sql, *a)
+                if not Соседский.подставил and "table_info(devices)" in sql:
+                    Соседский.подставил = True
+                    сосед = настоящий(путь)
+                    сосед.execute("alter table devices add column scopes text")
+                    сосед.commit(); сосед.close()
+                return r
+
+        sqlite3.connect = lambda *a, **k: настоящий(*a, factory=Соседский,
+                                                    **{k_: v for k_, v in k.items()
+                                                       if k_ != "factory"})
+        try:
+            mi.connect(каталог).close()
+        finally:
+            sqlite3.connect = настоящий
+        self.assertTrue(Соседский.подставил,
+                        "гонка не состоялась, тест ничего не проверил")
+        con = sqlite3.connect(путь)
+        имена = {r[1] for r in con.execute("pragma table_info(devices)")}
+        con.close()
+        self.assertIn("scopes", имена)
+
     def test_история_пуста_у_нового_устройства(self):
         dev2, _ = contextd.pair(self.con, "ещё не звонил")
         self.assertEqual(contextd.scopes_from_history(self.con, dev2), [],
@@ -1087,6 +1133,14 @@ class ТестScopes(unittest.TestCase):
         self.assertIn("пробел", вывод)
         self.assertIsNone(self.scopes())
 
+    def test_пробел_это_не_только_пробел(self):
+        """`split()` считает пробелом и табуляцию, и NBSP — проверка тоже."""
+        for вид in ("call\tcorrection", "call\ncorrection", "call\xa0correction"):
+            with self.subTest(вид=repr(вид)):
+                код, _ = self.запуск("--allow", self.dev, вид)
+                self.assertEqual(код, 1, "вид %r принят" % вид)
+                self.assertIsNone(self.scopes())
+
     def test_снять_ограничение_можно_только_явно(self):
         contextd.set_scopes(self.con, self.dev, ["call"])
         код, _ = self.запуск("--allow", self.dev)
@@ -1117,6 +1171,11 @@ class ТестScopes(unittest.TestCase):
         except urllib.error.HTTPError as e:
             e.read()
             self.assertEqual(e.code, 403)
+            # Именно `отлуп`, а не `say`: тело здесь ещё не читали, и сервер
+            # обязан его слить и закрыть соединение. С `say` клиент слал бы в
+            # закрытое, а маленькое тело успело бы уехать и скрыло бы разницу.
+            self.assertEqual(e.headers.get("Connection"), "close",
+                             "403 отдан не через `отлуп`")
         self.assertFalse(os.path.exists(mi.blob_path(self.dir, sha, "wav")),
                          "блоб лёг на диск в обход allowlist")
 
