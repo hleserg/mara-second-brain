@@ -100,6 +100,22 @@ class Api(unittest.TestCase):
         code, d = self.get("/v1/jobs/" + jid)
         self.assertEqual(code, 200)
         self.assertEqual(d["state"], "ready")
+        self.assertIn("last_error", d, "с петли отдаётся целиком")
+
+    def test_last_error_только_с_петли(self):
+        """Хвост stderr шага наружу не отдаём (ADR-0009, «Откат» п. 3).
+
+        Живой роут в тесте всегда с петли, поэтому состав ответа проверяем
+        прямо у `job_view`: HTTP-обёртка отличается только тем, откуда
+        приходит флаг.
+        """
+        row = {"id": "j1", "kind": "asr", "state": "dlq", "attempts": 3,
+               "next_at": 0, "last_error": "ffmpeg: /srv/mara-blobs/ab/cd.m4a"}
+        self.assertIn("last_error", contextd.job_view(row, True))
+        наружу = contextd.job_view(row, False)
+        self.assertNotIn("last_error", наружу)
+        self.assertEqual(наружу["state"], "dlq", "остальные поля пропали")
+        self.assertIn("last_error", row, "исходную строку испортили")
 
     def test_статус_работы_требует_токен(self):
         code, _ = self.get("/v1/jobs/no-such-job", token="wrong-token")
