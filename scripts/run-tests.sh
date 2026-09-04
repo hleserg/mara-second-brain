@@ -16,8 +16,11 @@ export MARA_ENV_FILE=/nonexistent/mara-env
 # снова потечёт. Поэтому границей ставим процесс — свою песочницу на прогон,
 # и её целиком сносим на выходе. Отдельная переменная, а не $TMPDIR: если
 # mktemp не сработает, rm -rf не должен получить чужой каталог.
+# MARA_KEEP_TMP=1 — оставить песочницу: у красного гейта волт и база упавшего
+# теста нужны именно после прогона, а не до.
 sand="$(mktemp -d "${TMPDIR:-/tmp}/mara-tests.XXXXXX")" || exit 1
-trap 'rm -rf "$sand"' EXIT
+trap '[ -n "${MARA_KEEP_TMP:-}" ] && echo "песочница оставлена: $sand" || rm -rf "$sand"' EXIT
+TMPDIR_ORIG="${TMPDIR:-/tmp}"
 export TMPDIR="$sand"
 fail=0
 echo "== unittest =="
@@ -57,7 +60,10 @@ echo "== android =="
 if [ "${SKIP_ANDROID:-0}" = 1 ]; then
   echo "skip android — SKIP_ANDROID=1 (пропущен по запросу)"
 elif [ -x android/gradlew ] && command -v java >/dev/null 2>&1; then
-  if out=$(cd android && ./gradlew test --console=plain -q 2>&1); then
+  # JVM берёт java.io.tmpdir из /tmp и на TMPDIR не смотрит — песочница ей всё
+  # равно не помогает. Зато демон gradle переживает прогон, и TMPDIR, указующий
+  # на снесённый каталог, ломал бы уже следующую сборку. Отдаём ему исходный.
+  if out=$(cd android && TMPDIR="$TMPDIR_ORIG" ./gradlew test --console=plain -q 2>&1); then
     echo "ok   android/app (JVM-тесты ядра)"
   else
     echo "FAIL android/app"; echo "$out" | tail -15 | sed 's/^/     /'; fail=1
