@@ -27,12 +27,14 @@ class ЗаписьБезРасшифровки(unittest.TestCase):
         self.con.execute("update events set state='stored' where id=?", (self.eid,))
         mi.write_json(mi.manifest_path(self.root, self.eid), {"id": self.eid})
 
-    def блоб(self, purged=None):
+    def блоб(self, purged=None, файл=True):
+        путь = os.path.join(self.root, "b.m4a")
+        if файл:
+            open(путь, "wb").write(b"a" * 10)
         self.con.execute(
             "insert or replace into blobs"
             "(sha256,path,bytes,mime,created,purged_at) values(?,?,?,?,?,?)",
-            ("b" * 64, os.path.join(self.root, "b.m4a"), 10, "audio",
-             mi.now_iso(), purged))
+            ("b" * 64, путь, 10, "audio", mi.now_iso(), purged))
 
     def tearDown(self):
         self.con.close()
@@ -87,6 +89,16 @@ class ЗаписьБезРасшифровки(unittest.TestCase):
         такое событие получало работу и уходило в DLQ на пустом месте."""
         self.блоб(purged=mi.now_iso())
         self.assertEqual([], rc.запись_без_расшифровки(self.con, self.root))
+        self.assertEqual(0, self.con.execute(
+            "select count(*) from jobs").fetchone()[0], "работать не над чем")
+
+    def test_строка_в_blobs_без_файла_работу_не_ставит(self):
+        """Ретеншен удаляет файл и только потом ставит `purged_at`
+        (`blob_retention.py:82-87`). Смерть между шагами оставляет живую
+        строку при пустом диске — работа на ней уйдёт в DLQ и только."""
+        os.unlink(os.path.join(self.root, "b.m4a"))
+        self.assertEqual([], [f for f in rc.запись_без_расшифровки(
+            self.con, self.root) if f["check"] == "расшифровка-поставлена"])
         self.assertEqual(0, self.con.execute(
             "select count(*) from jobs").fetchone()[0], "работать не над чем")
 

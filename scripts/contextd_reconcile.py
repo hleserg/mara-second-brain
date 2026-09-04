@@ -105,8 +105,9 @@ def запись_без_расшифровки(con, root):
     чинить достаточно постановкой работы.
 
     Вычищенное ретеншеном сюда не попадает намеренно — раньше `stored` без
-    блоба получал работу и уходил в DLQ на пустом месте. Пропажу записи,
-    которую не вычищали, ловит `манифест_без_блоба`.
+    блоба получал работу и уходил в DLQ на пустом месте. По той же причине
+    работа не ставится, если строка есть, а файла по её пути нет. Пропажу
+    записи, которую не вычищали, ловит `манифест_без_блоба`.
 
     Известное ограничение, не заведённое этой веткой: проверка манифеста
     живёт в этом же цикле, поэтому после успешной расшифровки (состояние
@@ -118,7 +119,8 @@ def запись_без_расшифровки(con, root):
     # недочитанным курсором в WAL упирается в снимок и валит весь часовой
     # прогон крона `database is locked` — ровно тогда, когда чинить и надо
     for r in con.execute(
-            "select e.id from events e join blobs b on b.sha256=e.blob_sha256 "
+            "select e.id, b.path from events e "
+            "join blobs b on b.sha256=e.blob_sha256 "
             "where b.purged_at is null and e.state in ('stored','new','stale') "
             "order by e.id").fetchall():
         eid = r["id"]
@@ -129,6 +131,15 @@ def запись_без_расшифровки(con, root):
                 event_id=eid))
         if con.execute("select 1 from jobs where event_id=? and kind='asr'",
                        (eid,)).fetchone():
+            continue
+        if not (r["path"] and os.path.exists(r["path"])):
+            # строка в `blobs` — ещё не файл: ретеншен удаляет запись и только
+            # потом ставит `purged_at` (`blob_retention.py:82-87`), и смерть
+            # между этими двумя шагами оставляет строку живой при пустом
+            # диске. Работа на таком событии не расшифруется никогда
+            # (`call_asr.py:119` требует существующий путь) — только займёт
+            # очередь и уйдёт в DLQ. Пропажу докладывает `манифест_без_блоба`,
+            # а событие без манифеста уже названо находкой выше
             continue
         mi.add_job(con, eid, "asr")
         out.append(находка("расшифровка-поставлена", "fixed",
@@ -484,10 +495,13 @@ def self_check():
     con.execute("update events set state='stale' where id=?", (sid,))
     запись_без_расшифровки(con, root)
     assert not есть_asr(), "блоба ещё нет — работе неоткуда взяться"
+    путь = os.path.join(root, "есть.m4a")
     con.execute("insert into blobs(sha256,path,bytes,mime,created) "
                 "values(?,?,?,?,?)",
-                ("e" * 64, os.path.join(root, "нет.m4a"), 1, "audio",
-                 mi.now_iso()))
+                ("e" * 64, путь, 1, "audio", mi.now_iso()))
+    run(con, root, vault=None)
+    assert not есть_asr(), "строка в blobs — ещё не файл"
+    open(путь, "wb").write(b"a")
     run(con, root, vault=None)
     assert есть_asr(), "принятая запись осталась без расшифровки"
     # вычищенное ретеншеном работу не получает: расшифровывать нечего, а
