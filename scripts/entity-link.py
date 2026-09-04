@@ -217,7 +217,7 @@ def self_check():
     assert DENY.search("dependabot[bot]") and DENY.search("unknown")
     assert not DENY.search("Сергей") and not DENY.search("Robot Framework")
     assert DENY.search("dependabot") and DENY.search("Blocks Task Runner")
-    canon = {"сергей": "sergey", "sergey khlebnikov": "sergey", "sergey": "sergey",
+    canon = {"сергей": "sergey", "sergey": "sergey",
              "attadipa": "attadipa", "meshcore": "meshcore"}
     # ссылка всегда на канон: голый [[алиас]] Obsidian не резолвит
     assert linkify(["Сергей", "attadipa", "Вася"], canon) == \
