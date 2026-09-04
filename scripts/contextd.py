@@ -460,9 +460,9 @@ class Handler(BaseHTTPRequestHandler):
         con = self.con()
         if p.path == "/v1/ingest/audio":
             if n > MAX_BODY:
-                # единственный отказ, который раньше не оставлял следа: на
-                # телефоне он терминален (`Core.kt:148`), то есть звонок
-                # пропадал совсем, а в логе не было ни строчки
+                # в логе не было ни строчки, а на телефоне отказ терминален
+                # (`Core.kt:148`) — звонок пропадал совсем и молча. Прочие
+                # 400/404 молчат так же, но чинятся не здесь (#30)
                 print(log_line("POST", p.path, 413), flush=True)
                 return self.отлуп(413, "тело больше %d МиБ" % (MAX_BODY >> 20))
             q = urllib.parse.parse_qs(p.query)

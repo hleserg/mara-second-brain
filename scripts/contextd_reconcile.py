@@ -93,32 +93,40 @@ def запись_без_расшифровки(con, root):
     Пропавший манифест чинится не здесь: собрать его заново — это дело демона,
     у которого лежит payload. Сверка о нём докладывает.
 
-    Ловим не только `stored`, но и `new`/`stale` с реально лежащим блобом:
-    признак принятой записи — строка в `blobs`, а не состояние события. Такая
-    пара («блоб есть, событие не сдвинулось») получается, если демон умер
-    между `insert into blobs` и переводом состояния, а ещё — если после
-    выката откатили один только демон: старый `finish_stored` знает лишь
-    `state='new'` и на `stale` промолчит, ответив телефону 200. Ни одна другая
-    проверка такую строку не видит: `запись_не_долита` ищет отсутствие блоба,
-    а блоб-то как раз есть. `call_asr` доведёт состояние до `transcribed` сам,
-    поэтому чинить достаточно постановкой работы.
+    Признак принятой записи — невычищенная строка в `blobs`, а не состояние
+    события, поэтому берём `stored`, `new` и `stale` одинаково: `join blobs`
+    и `purged_at is null` для всех трёх. Пара «блоб есть, событие не
+    сдвинулось» получается, если демон умер между `insert into blobs` и
+    переводом состояния, а ещё — если после выката откатили один только
+    демон: старый `finish_stored` знает лишь `state='new'`, на `stale`
+    промолчит и всё равно ответит телефону 200. До этой правки такую строку
+    не видел никто: `запись_не_долита` ищет отсутствие блоба, а блоб-то как
+    раз есть. `call_asr` доведёт состояние до `transcribed` сам, поэтому
+    чинить достаточно постановкой работы.
+
+    Вычищенное ретеншеном сюда не попадает намеренно — раньше `stored` без
+    блоба получал работу и уходил в DLQ на пустом месте. Пропажу записи,
+    которую не вычищали, ловит `манифест_без_блоба`.
+
+    Известное ограничение, не заведённое этой веткой: проверка манифеста
+    живёт в этом же цикле, поэтому после успешной расшифровки (состояние
+    ушло в `transcribed`) пропавший манифест больше не находится. Так было и
+    до правки, разбирается отдельно.
     """
     out = []
     # `fetchall` не для удобства: `add_job` ниже пишет, а запись под
     # недочитанным курсором в WAL упирается в снимок и валит весь часовой
     # прогон крона `database is locked` — ровно тогда, когда чинить и надо
     for r in con.execute(
-            "select e.id from events e "
-            "left join blobs b on b.sha256=e.blob_sha256 "
-            "where e.blob_sha256 is not null and (e.state='stored' or ("
-            "  e.state in ('new','stale') "
-            "  and b.sha256 is not null and b.purged_at is null)) "
+            "select e.id from events e join blobs b on b.sha256=e.blob_sha256 "
+            "where b.purged_at is null and e.state in ('stored','new','stale') "
             "order by e.id").fetchall():
         eid = r["id"]
         if not os.path.exists(mi.manifest_path(root, eid)):
-            out.append(находка("манифест-не-дописан", "warn",
-                               "событие %s доведено до stored без манифеста" % eid,
-                               event_id=eid))
+            out.append(находка(
+                "манифест-не-дописан", "warn",
+                "у события %s принята запись, манифеста нет" % eid,
+                event_id=eid))
         if con.execute("select 1 from jobs where event_id=? and kind='asr'",
                        (eid,)).fetchone():
             continue
@@ -482,6 +490,14 @@ def self_check():
                  mi.now_iso()))
     run(con, root, vault=None)
     assert есть_asr(), "принятая запись осталась без расшифровки"
+    # вычищенное ретеншеном работу не получает: расшифровывать нечего, а
+    # раньше `stored` без блоба уходил в DLQ на пустом месте
+    con.execute("delete from jobs where event_id=?", (sid,))
+    con.execute("update events set state='stored' where id=?", (sid,))
+    con.execute("update blobs set purged_at=? where sha256=?",
+                (mi.now_iso(), "e" * 64))
+    run(con, root, vault=None)
+    assert not есть_asr(), "у вычищенной записи расшифровывать нечего"
     con.execute("delete from jobs where event_id=?", (sid,))
     con.execute("delete from events where id=?", (sid,))
     con.execute("delete from blobs where sha256=?", ("e" * 64,))

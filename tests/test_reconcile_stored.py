@@ -20,9 +20,19 @@ class ЗаписьБезРасшифровки(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         self.con = mi.connect(self.root)
         self.eid, _ = mi.put_event(self.con, dict(EV))
-        # ровно то состояние, в котором демона убили: перевод сделан, дальше нет
+        # ровно то состояние, в котором демона убили: перевод сделан, а
+        # дальше нет. Блоб при этом лежит — `finish_stored` иначе бы и не
+        # позвался, и строка в `blobs` служит сверке признаком принятой записи
+        self.блоб()
         self.con.execute("update events set state='stored' where id=?", (self.eid,))
         mi.write_json(mi.manifest_path(self.root, self.eid), {"id": self.eid})
+
+    def блоб(self, purged=None):
+        self.con.execute(
+            "insert or replace into blobs"
+            "(sha256,path,bytes,mime,created,purged_at) values(?,?,?,?,?,?)",
+            ("b" * 64, os.path.join(self.root, "b.m4a"), 10, "audio",
+             mi.now_iso(), purged))
 
     def tearDown(self):
         self.con.close()
@@ -55,10 +65,38 @@ class ЗаписьБезРасшифровки(unittest.TestCase):
         self.assertEqual([], rc.запись_без_расшифровки(self.con, self.root),
                          "звонок уже расшифрован, чинить нечего")
 
-    def test_событие_в_new_не_трогаем(self):
-        self.con.execute("update events set state='new' where id=?", (self.eid,))
+    def состояние(self, s):
+        self.con.execute("update events set state=? where id=?", (s, self.eid))
+
+    def test_событие_в_new_без_блоба_не_трогаем(self):
+        self.состояние("new")
+        self.con.execute("delete from blobs where sha256=?", ("b" * 64,))
         self.assertEqual([], rc.запись_без_расшифровки(self.con, self.root),
                          "`new` доедет своим ходом — блоб ещё не лежит")
+
+    def test_событие_в_new_с_принятым_блобом_чинится(self):
+        """Обратная сторона того же правила: блоб лёг, а состояние не
+        сдвинулось (демон умер между `insert into blobs` и переводом) — эту
+        пару до сих пор не видела ни одна проверка."""
+        self.состояние("new")
+        self.assertIn("расшифровка-поставлена",
+                      self.виды(rc.запись_без_расшифровки(self.con, self.root)))
+
+    def test_вычищенную_ретеншеном_запись_не_чиним(self):
+        """Аудио удалили намеренно (ТЗ §14) — расшифровывать нечего. Раньше
+        такое событие получало работу и уходило в DLQ на пустом месте."""
+        self.блоб(purged=mi.now_iso())
+        self.assertEqual([], rc.запись_без_расшифровки(self.con, self.root))
+        self.assertEqual(0, self.con.execute(
+            "select count(*) from jobs").fetchone()[0], "работать не над чем")
+
+    def test_брошенное_событие_с_принятым_блобом_чинится(self):
+        """`stale` (хеш не сошёлся) с реально лежащим блобом бывает после
+        отката одного демона: старый `finish_stored` знает лишь `state='new'`,
+        молчит и всё равно отвечает телефону 200."""
+        self.состояние("stale")
+        self.assertIn("расшифровка-поставлена",
+                      self.виды(rc.запись_без_расшифровки(self.con, self.root)))
 
     def test_недописанный_манифест_докладывается(self):
         os.unlink(mi.manifest_path(self.root, self.eid))
