@@ -68,6 +68,47 @@ class Api(unittest.TestCase):
         self.assertFalse(os.path.exists(mi.blob_path(self.dir, sha, "wav")),
                          "частичный файл должен быть удалён")
 
+    def test_несошедшийся_хеш_бросает_событие(self):
+        """409 — конец для этой строки: телефон пересчитает файл с начала
+        (`Core.kt:145-147`), дописанный за время чтения даст другой sha и
+        новую строку. Оставшаяся в `new` звенела бы в реконсиляторе вечно."""
+        sha = hashlib.sha256("полный файл".encode("utf-8")).hexdigest()
+        _, r = self.post("/v1/ingest/event", {
+            "kind": "call", "source": "phone", "source_id": "брошено-1",
+            "blob": {"sha256": sha, "bytes": 11, "ext": "wav"}})
+        code, _ = self.post("/v1/ingest/audio?event=" + r["event_id"],
+                            "недочитанный".encode("utf-8"), raw=True,
+                            ctype="application/octet-stream")
+        self.assertEqual(code, 409)
+        self.assertEqual(self.con.execute(
+            "select state from events where id=?",
+            (r["event_id"],)).fetchone()[0], "stale")
+
+    def test_брошенное_событие_ещё_можно_долить(self):
+        """409 бывает и от порчи в канале при неизменном файле: тогда телефон
+        пересчитает тот же хеш, попадёт по дедупу в ту же строку и дольёт.
+        Принимай `finish_stored` только `new` — событие осталось бы `stale`
+        навсегда: блоб на диске, расшифровки нет, и никто об этом не скажет."""
+        тело = "это аудио дошло со второго раза".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        _, r = self.post("/v1/ingest/event", {
+            "kind": "call", "source": "phone", "source_id": "брошено-2",
+            "blob": {"sha256": sha, "bytes": len(тело), "ext": "wav"}})
+        eid = r["event_id"]
+        код, _ = self.post("/v1/ingest/audio?event=" + eid,
+                           "обрывок".encode("utf-8"), raw=True,
+                           ctype="application/octet-stream")
+        self.assertEqual(код, 409)
+        код, _ = self.post("/v1/ingest/audio?event=" + eid, тело, raw=True,
+                           ctype="application/octet-stream")
+        self.assertEqual(код, 200)
+        self.assertEqual(self.con.execute(
+            "select state from events where id=?",
+            (eid,)).fetchone()[0], "stored")
+        self.assertEqual(self.con.execute(
+            "select count(*) from jobs where event_id=? and kind='asr'",
+            (eid,)).fetchone()[0], 1, "расшифровка должна встать в очередь")
+
     def test_правильный_блоб_принимается_и_ставит_работу(self):
         body = "это как бы аудио".encode("utf-8")
         sha = hashlib.sha256(body).hexdigest()
@@ -128,6 +169,7 @@ class Api(unittest.TestCase):
             body = r.read().decode("utf-8")
         self.assertIn("mara_ingest_queue_depth", body)
         self.assertIn("mara_dlq_count", body)
+        self.assertIn("mara_ingest_stale_events", body)
         # устройство поимённо: спаренное, но ни разу не выходившее на связь — −1
         contextd.pair(self.con, "тел\"ефон")
         with urllib.request.urlopen(self.base + "/metrics", timeout=5) as r:
@@ -723,6 +765,37 @@ class ТестРазмерТела(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+    def test_413_оставляет_строку_в_логе(self):
+        """Единственный отказ, который раньше не оставлял следа. На телефоне
+        он терминален (`Core.kt:148`), то есть звонок пропадал совсем."""
+        import contextlib
+        dir = tempfile.mkdtemp()
+        mi.ROOT = dir
+        srv = contextd.make_server(dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        _, токен = contextd.pair(mi.connect(dir), "телефон")
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        было = (contextd.MAX_JSON, contextd.MAX_BODY)
+        contextd.MAX_JSON = contextd.MAX_BODY = 8
+        лог = io.StringIO()
+        try:
+            for путь in ("/v1/ingest/event", "/v1/ingest/audio?event=none"):
+                req = urllib.request.Request(base + путь, data=b"a" * 64,
+                                             method="POST")
+                req.add_header("Authorization", "Bearer " + токен)
+                req.add_header("Content-Type", "application/json")
+                with contextlib.redirect_stdout(лог):
+                    with self.assertRaises(urllib.error.HTTPError) as e:
+                        urllib.request.urlopen(req, timeout=10)
+                self.assertEqual(e.exception.code, 413)
+        finally:
+            contextd.MAX_JSON, contextd.MAX_BODY = было
+            srv.shutdown()
+            srv.server_close()
+        строки = [s for s in лог.getvalue().splitlines() if " 413" in s]
+        self.assertEqual(len(строки), 2, лог.getvalue())
+        self.assertTrue(any("/v1/ingest/audio" in s for s in строки), строки)
 
     def test_аудио_льётся_кусками_а_не_в_память(self):
         """Файл больше одного КУСКА проходит целиком и с верным хешем."""

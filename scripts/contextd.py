@@ -269,6 +269,11 @@ def metrics(con, root=None, vault=None):
           for n, a in devices],
         ("mara_mobile_pending_uploads",
          q("select count(*) from events where state='new' and blob_sha256 is not null")),
+        # брошенные: телефон объявил один хеш, а прислал байты с другим и
+        # ушёл заводить новое событие. Растёт при каждом звонке — значит
+        # диктофон дописывает файл после того, как телефон его посчитал
+        ("mara_ingest_stale_events",
+         q("select count(*) from events where state='stale'")),
         ("mara_tdlib_lag_seconds", heartbeat_lag(root, "tdlib")),
         ("mara_gmail_lag_seconds", heartbeat_lag(root, "gmail")),
         ("mara_whatsapp_lag_seconds", source_lag(con, "whatsapp")),
@@ -455,6 +460,10 @@ class Handler(BaseHTTPRequestHandler):
         con = self.con()
         if p.path == "/v1/ingest/audio":
             if n > MAX_BODY:
+                # единственный отказ, который раньше не оставлял следа: на
+                # телефоне он терминален (`Core.kt:148`), то есть звонок
+                # пропадал совсем, а в логе не было ни строчки
+                print(log_line("POST", p.path, 413), flush=True)
                 return self.отлуп(413, "тело больше %d МиБ" % (MAX_BODY >> 20))
             q = urllib.parse.parse_qs(p.query)
             eid = (q.get("event") or [""])[0]
@@ -483,6 +492,7 @@ class Handler(BaseHTTPRequestHandler):
             print(log_line("POST", p.path, code), flush=True)
             return self.say(code, out)
         if n > MAX_JSON:
+            print(log_line("POST", p.path, 413), flush=True)
             return self.отлуп(413, "тело больше %d МиБ" % (MAX_JSON >> 20))
         raw = self.rfile.read(n) if n else b""
         try:
@@ -643,7 +653,8 @@ def finish_stored(con, root, event_id):
     digest: час GPU и второй дайджест в телеграм. `rowcount` показывает, кто
     успел первым.
     """
-    if con.execute("update events set state='stored' where id=? and state='new'",
+    if con.execute("update events set state='stored' "
+                   "where id=? and state in ('new','stale')",
                    (event_id,)).rowcount != 1:
         return
     mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
@@ -708,6 +719,14 @@ def ingest_audio(con, root, event_id, поток, n=None):
         with os.fdopen(fd, "wb") as fh:
             got, размер = слить(поток, n or 0, fh)
         if got != want:
+            # Событие с этим хешем не долить уже некому: телефон на 409
+            # пересчитывает файл с начала (`Core.kt:145-147`), а дописанный
+            # за время чтения файл даёт другой sha — значит другой
+            # `source_id`, другой ключ дедупа и новая строка. Старая иначе
+            # осталась бы в `new` навсегда и час за часом поднимала бы
+            # «запись не долита», заслоняя настоящее «телефон замолчал».
+            con.execute("update events set state='stale' "
+                        "where id=? and state='new'", (event_id,))
             return 409, {"error": "хеш не сошёлся", "expected": want, "got": got}
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)

@@ -234,10 +234,17 @@ def источник_замолчал(con, days=3, fresh_hours=24):
 def запись_не_долита(con, hours=24):
     """Телефон объявил звонок с записью, а сама запись за сутки не пришла —
     очередь загрузки на телефоне против серверной базы (ТЗ §17). Свежий
-    звонок ещё может долиться с плохой сети, поэтому порог в сутки."""
+    звонок ещё может долиться с плохой сети, поэтому порог в сутки.
+
+    Брошенные (`stale`) сюда не попадают: там телефон уже ушёл заводить новое
+    событие, доливать нечего, и такая находка не погасла бы никогда — а
+    вечное предупреждение заслоняет ровно то, ради чего эта проверка и
+    заведена. Их считает `mara_ingest_stale_events`."""
     rows = con.execute(
-        "select e.id, e.received from events e left join blobs b on b.sha256=e.blob_sha256 "
-        "where e.blob_sha256 is not null and b.sha256 is null order by e.received").fetchall()
+        "select e.id, e.received from events e "
+        "left join blobs b on b.sha256=e.blob_sha256 "
+        "where e.blob_sha256 is not null and b.sha256 is null "
+        "and e.state!='stale' order by e.received").fetchall()
     старые = [r["id"] for r in rows if (_возраст(r["received"]) or 0) > hours * 3600]
     if not старые:
         return []
@@ -441,6 +448,10 @@ def self_check():
     con.execute("update events set received=? where id=?", (давно, eid))
     z = запись_не_долита(con)
     assert z and z[0]["count"] == 1 and z[0]["sample"] == [eid], z
+    # брошенное событие не должно звенеть вечно
+    con.execute("update events set state='stale' where id=?", (eid,))
+    assert запись_не_долита(con) == [], "брошенную запись доливать некому"
+    con.execute("update events set state='new' where id=?", (eid,))
     assert текст([]) is None and текст([находка("x", "fixed", "починено")]) is None, \
         "без проблем в канал не пишем"
     assert "проблем 1" in текст([находка("x", "warn", "беда")])
