@@ -80,7 +80,7 @@ kb/commitments/*.md
    ▼
 _system/context/now.md ──► contextd GET /v1/context/bootstrap
    + manifest.json                    ▲
-                                      │ http://100.64.0.1:8788 (relay -L)
+                                      │ http://<tailnet-адрес мака>:8788 (relay -L)
                                       │
                         плагин ~/.hermes/plugins/mara-context
                                       │ pre_llm_call

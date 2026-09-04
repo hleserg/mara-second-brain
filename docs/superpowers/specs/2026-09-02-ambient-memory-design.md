@@ -23,7 +23,7 @@ blob store, приём звонка из готовых файлов, ASR, тр�
 | GPU bigpc | занято 10.8 из 16.3 ГиБ, whisper уже в памяти |
 | ollama | 0.23.2, `qwen3.5:9b` 6.6 ГБ, structured output по JSON-схеме поддержан |
 | whisper на bigpc | `WhisperForConditionalGeneration.generate`, жёсткий потолок 30 с, ответ 413 при превышении |
-| мак | `GatewayPorts no`, sudo только с паролем, tailnet-адрес `100.64.0.1` |
+| мак | `GatewayPorts no`, sudo только с паролем, tailnet-адрес `<tailnet-адрес мака>` |
 | Hermes | плагины умеют `register_tool` и `inject_message`; бот и `TELEGRAM_HOME_CHANNEL` в `~/.hermes/.env` |
 
 Из этого следуют два неочевидных ограничения, которые дальше определяют дизайн:
@@ -52,7 +52,7 @@ ASR и извлечение нельзя гонять параллельно (VR
 нему приходит, приходит через ssh-туннель. Наружу в интернет он не смотрит вообще.
 
 **Релей на маке.** launchd-агент `com.mara.relay` держит
-`ssh -N -L 100.64.0.1:8788:127.0.0.1:8788 doctor` с `KeepAlive`. Адрес привязки задаёт
+`ssh -N -L <tailnet-адрес мака>:8788:127.0.0.1:8788 doctor` с `KeepAlive`. Адрес привязки задаёт
 клиент, серверный `GatewayPorts` тут ни при чём, поэтому sudo на маке не нужен. Мак
 остаётся тупой трубой: ни байта аудио на нём не оседает.
 
