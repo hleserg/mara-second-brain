@@ -1116,6 +1116,37 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(contextd.scopes_from_history(self.con, self.dev),
                          ["call", "message"])
 
+    def test_вид_не_по_форме_отбивается(self):
+        self.assertEqual(self.послать("Call", "s10"), 400)
+        n = self.con.execute("select count(*) c from events "
+                             "where source_id='s10'").fetchone()["c"]
+        self.assertEqual(n, 0, "400 всё равно записал событие")
+
+    def test_вид_не_строка_не_роняет_обработчик(self):
+        """`{"kind": 7}` — валидный json; `kind.split()` на нём падал."""
+        self.assertEqual(self.послать(7, "s11"), 400)
+        self.assertEqual(self.послать("call", "s12"), 200,
+                         "демон пережил кривой вид и принимает следующее")
+
+    def test_кривой_вид_больше_не_ломает_allow_history(self):
+        """Ради этого всё и затевалось (#29).
+
+        Вид с пробелом принимался, оседал в истории — и `@history` после этого
+        не записывал уже ничего, включая настоящие виды. Владелец получал
+        «не записал» на первом же шаге утреннего чеклиста.
+        """
+        self.assertEqual(self.послать("call", "s13"), 200)
+        self.assertEqual(self.послать("call correction", "s14"), 400)
+        код, вывод = self.запуск("--allow", self.dev, "@history")
+        self.assertEqual(код, 0, вывод)
+        self.assertEqual(self.scopes(), "call")
+
+    def test_вид_по_умолчанию_принимается(self):
+        """`event` — заглушка для события без вида, и она остаётся законной."""
+        self.assertEqual(self.послать(None, "s15"), 200)
+        row = self.con.execute("select kind from events where source_id='s15'").fetchone()
+        self.assertEqual(row["kind"], "event")
+
     def test_гонка_миграции_не_валит_открытие(self):
         """Колонку добавил сосед между `pragma` и `alter` — это не ошибка.
 
