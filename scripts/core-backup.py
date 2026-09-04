@@ -398,6 +398,13 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
 
 
 def ротация(target, keep):
+    for огрызок in glob.glob(os.path.join(target, ".core-*.tmp")):
+        # Огрызок неудачной ночи, который не удалось убрать тогда же (носитель
+        # ушёл в read-only). Имя с датой — следующая ночь его не перезапишет, а
+        # `core-*` ниже точечных имён не видит: без этой уборки он лежал бы на
+        # носителе вечно. Сюда доходят только записанные носители, то есть те,
+        # на которых писать снова получается.
+        os.unlink(огрызок)
     for шаблон in ("core-*.tar.gz.gpg", "core-*.manifest.json"):
         файлы = sorted(glob.glob(os.path.join(target, шаблон)))
         for старый in файлы[:-keep] if keep > 0 else []:

@@ -202,9 +202,27 @@ class Прогон(unittest.TestCase):
                 r = self.cb.прогон(root, [второй, цель], пароль, keep=2,
                                    work=os.path.join(self.tmp, "work"))
         finally:
-            os.chmod(второй, 0o700)         # иначе tearDown не уберёт каталог
+            # Иначе tearDown не уберёт каталог; `isdir` — чтобы падение до
+            # `makedirs` не пряталось за `FileNotFoundError` отсюда.
+            if os.path.isdir(второй):
+                os.chmod(второй, 0o700)
         self.assertEqual(r["носители"], [цель])
         self.assertIn("проверка", r, "учение не дошло из-за уборки огрызка")
+
+    def test_огрызок_прошлой_ночи_убирается(self):
+        """Носитель, ушедший в read-only, оставил временный файл: убрать его
+        тогда было нечем. Имя с датой — следующая ночь его не перезапишет, а
+        ротация ходит по `core-*` и точечных имён не видит, так что без
+        отдельной уборки он остался бы на носителе навсегда."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        os.makedirs(цель)
+        огрызок = os.path.join(цель, ".core-2000-01-01.tar.gz.gpg.tmp")
+        open(огрызок, "w").close()
+        self.cb.прогон(root, [цель], пароль, keep=2,
+                       work=os.path.join(self.tmp, "work"))
+        self.assertFalse(os.path.exists(огрызок), "огрызок остался навсегда")
 
     def test_носитель_без_каталога_не_роняет_прогон(self):
         """`makedirs` падает до того, как появился временный файл.
