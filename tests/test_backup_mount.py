@@ -6,7 +6,8 @@
 и выглядит это ровно как норма: каталог на месте, архив свежий, сверка молчит.
 Проверяем, что теперь не молчит — во всех трёх местах, где вопрос задавался.
 """
-import os, sys, shutil, subprocess, tempfile, unittest
+import glob, json, os, sys, shutil, subprocess, tempfile, unittest
+import unittest.mock
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -116,17 +117,62 @@ class Прогон(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.cb = load("core-backup.py")
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
+        # Удавшийся прогон пишет отметку носителей, и без подмены она уляжется
+        # в боевой `~/.local/state/mara` хозяина машины. До сих пор тут все
+        # прогоны падали раньше отметки, потому и не мешало.
+        self.боевая_отметка = mi.ОТМЕТКА_НОСИТЕЛЕЙ
+        self.отметка = os.path.join(self.tmp, "state", "core-targets.json")
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.отметка
 
     def tearDown(self):
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.боевая_отметка
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
-    def test_единственный_носитель_на_корневой_фс_валит_прогон(self):
+    def стенд(self):
+        """Корень с базой и парольная фраза — общее начало любого прогона."""
         root = os.path.join(self.tmp, "blobs")
         mi.connect(root).close()
         пароль = os.path.join(self.tmp, "pass")
         open(пароль, "w").write("проверочная фраза\n")
         os.chmod(пароль, 0o600)
+        return root, пароль
+
+    def test_битая_копия_не_идёт_в_зачёт(self):
+        """Носитель принял запись и отдал не то, что писали.
+
+        Учение восстановления разворачивает только первый носитель, так что
+        второй мог лечь битым и молчать до дня, когда он единственный уцелел.
+        Порчу вносим на уровне записи в файл, а не подменой сверки: оракул
+        тут — сам испорченный байт, а не мнение проверяемого кода."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        второй = os.path.join(self.tmp, "target2")
+        настоящий = shutil.copy2
+
+        def подмена(src, dst, **kw):
+            r = настоящий(src, dst, **kw)
+            if os.path.dirname(dst) == второй:
+                with open(dst, "ab") as fh:
+                    fh.write(b"\0")
+            return r
+
+        with unittest.mock.patch.object(self.cb.shutil, "copy2", подмена):
+            r = self.cb.прогон(root, [цель, второй], пароль, keep=2,
+                               work=os.path.join(self.tmp, "work"))
+        self.assertEqual(r["носители"], [цель], "битая копия зачтена")
+        self.assertEqual(glob.glob(os.path.join(второй, "core-*")), [],
+                         "битый архив остался лежать под боевым именем")
+        self.assertEqual(glob.glob(os.path.join(второй, ".*")), [],
+                         "временный огрызок остался на носителе")
+        # Отметка — то, по чему сверка §12 отличает отвал от пропажи; носитель,
+        # на который не легло ничего, обязан в ней отсутствовать.
+        self.assertEqual(list(json.load(open(self.отметка, encoding="utf-8"))),
+                         [цель])
+
+    def test_единственный_носитель_на_корневой_фс_валит_прогон(self):
+        root, пароль = self.стенд()
         with self.assertRaises(RuntimeError) as e:
             self.cb.прогон(root, [os.path.join(self.tmp, "target")], пароль,
                            keep=2, work=os.path.join(self.tmp, "work"))
