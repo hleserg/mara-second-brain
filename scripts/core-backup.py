@@ -184,6 +184,13 @@ def проверка(target, пароль, root, имя=None):
         con = sqlite3.connect(db)
         try:
             ц = con.execute("pragma integrity_check").fetchone()[0]
+        except sqlite3.DatabaseError as e:
+            # На одной сборке sqlite порченая страница возвращается строкой, на
+            # другой — бросается. Проверено: 3.46.1 отдаёт «Tree N page N:
+            # btreeInitPage() returns error code 11», сборка на CI бросает
+            # «database disk image is malformed». Разница версии, не бэкапа, и
+            # сторож обязан сработать одинаково на обеих.
+            ц = str(e)
         finally:
             con.close()
         if ц != "ok":
@@ -403,6 +410,27 @@ def самопроверка():
         r2 = прогон(**общее)
         assert r2["аудио"]["новых"] == 0, "уже зашифрованное аудио перешифровано"
 
+        # Два сторожа `проверить_аудио` доступны только пока зеркало живое, то
+        # есть до ретеншена ниже: после него сверять нечего и оба молчат.
+        зерк = os.path.join(target, os.path.relpath(p, root) + ".gpg")
+        assert oct(os.stat(зерк).st_mode & 0o777) == oct(0o600), зерк
+        os.unlink(зерк)
+        try:
+            проверка(target, пароль, root)
+            raise AssertionError("зеркало без файла прошло проверку")
+        except RuntimeError as e:
+            assert "нет в зеркале" in str(e), str(e)
+        шифр(пароль, зерк, пароль)      # файл на месте, но внутри не то аудио
+        try:
+            проверка(target, пароль, root)
+            raise AssertionError("чужое аудио в зеркале прошло проверку")
+        except RuntimeError as e:
+            assert "расшифровалось не тем" in str(e), str(e)
+        os.unlink(зерк)
+        вернули = зеркало_аудио(os.path.join(root, "contextd.db"), root,
+                                target, пароль)
+        assert вернули["новых"] == 1, вернули
+
         # ретеншен вычистил запись — из зеркала она обязана уйти
         con = mi.connect(root)
         con.execute("update blobs set purged_at=?", (mi.now_iso(),))
@@ -451,6 +479,9 @@ def самопроверка():
             with open(копия, "r+b") as fh:
                 fh.seek(номер * страница)
                 fh.write(b"\x7f")
+            # иначе порча ломает два сторожа сразу — и целостность, и хеш базы,
+            # а сверка хеша самой базы остаётся без отрицательного входа
+            м["files"]["contextd.db"] = sha(копия)
 
         def разошлись(копия, дерево, м):
             м["counts"]["blobs"] += 1
@@ -458,11 +489,16 @@ def самопроверка():
         def подменён(копия, дерево, м):
             open(os.path.join(дерево, "manifests", "e1.json"), "w").write("{ }")
 
+        def база_не_та(копия, дерево, м):
+            м["files"]["contextd.db"] = "0" * 64
+
         плохие = os.path.join(tmp, "плохие")
         os.makedirs(плохие)
         имя_п = "core-1999-01-01.tar.gz.gpg"
         for порча, слово in ((утечка, "секреты"), (гниль, "битая"),
-                             (разошлись, "счётчики"), (подменён, "манифестом")):
+                             (разошлись, "счётчики"),
+                             (подменён, "manifests/e1.json не совпал"),
+                             (база_не_та, "contextd.db не совпал")):
             подделка(root, tmp, пароль, os.path.join(плохие, имя_п), порча)
             try:
                 проверка(плохие, пароль, root, имя=имя_п)
