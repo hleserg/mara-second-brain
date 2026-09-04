@@ -41,6 +41,10 @@ bind. Но из локалки он виден, и это осознанный �
 список хранится строкой через пробел и такой вид развалился бы на два
 разрешения. Дозагрузка аудио (`/v1/ingest/audio`) идёт под тем же allowlist,
 что и событие, к которому она прикладывается.
+
+Слова в списке — это виды из `events.kind`: `call`, `message`, `correction`,
+`email`, `git`. `audio` из ADR-0009 в их число не входит — это не вид, а
+дозагрузка к уже принятому событию, и телефону в список пишется `call`.
 """
 import os, sys, io, json, time, hashlib, secrets, argparse, threading, subprocess
 from datetime import datetime, timedelta
