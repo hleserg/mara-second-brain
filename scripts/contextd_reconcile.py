@@ -324,7 +324,10 @@ def бэкап_ядра(targets=None, days=БЭКАП_СУТКИ):
     targets = НОСИТЕЛИ if targets is None else targets
     свежий, доступных = None, 0
     for t in targets:
-        if not os.path.isdir(t):
+        # isdir мало: отвалившийся носитель бэкап сам себе воссоздаёт на
+        # корневой ФС (mkdir -p), и тогда «смонтирован» ложно истинно —
+        # мониторинг зелёный, а копия одна.
+        if not os.path.isdir(t) or not mi.смонтирован(t, mi.ROOT):
             continue
         доступных += 1
         for f in glob.glob(os.path.join(t, "core-*.tar.gz.gpg")):
@@ -425,6 +428,7 @@ def main():
 
 def self_check():
     import tempfile
+    os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"   # см. mi.смонтирован
     root = tempfile.mkdtemp()
     mi.ROOT = root
     con = mi.connect(root)
