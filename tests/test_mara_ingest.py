@@ -117,13 +117,17 @@ class ГонкаЗаАренду:
     тест на потоках зеленел бы через раз. Здесь окно открывается руками.
     """
 
-    def __init__(self, con, второй):
+    def __init__(self, con, второй=None, в_щели=None):
         self.con, self.второй, self.влез = con, второй, False
+        self.в_щели = в_щели
 
     def execute(self, sql, args=()):
         if sql.startswith("update jobs set lease_until") and not self.влез:
             self.влез = True
-            mi.claim_job(self.второй)
+            if self.в_щели:
+                self.в_щели(self.con)
+            else:
+                mi.claim_job(self.второй)
         return self.con.execute(sql, args)
 
 
@@ -139,6 +143,18 @@ class Работы(unittest.TestCase):
         гонка = ГонкаЗаАренду(self.con, второй)
         self.assertIsNone(mi.claim_job(гонка),
                           "работа выдана обоим: аренда взята без проверки")
+        self.assertTrue(гонка.влез, "щель не открылась — тест ничего не проверил")
+
+    def test_доигравшему_не_выдают_уже_отработавшую(self):
+        # аренда истекла на середине транскрипта, второй воркер работу выбрал,
+        # а первый в этот момент доиграл: `finish_job` ставит `done` и сбрасывает
+        # `lease_until` в ноль, не глядя на аренду. По одному `lease_until<?`
+        # второй увидел бы `0 < now` и час GPU ушёл бы на уже сделанное
+        jid = mi.add_job(self.con, self.eid, "asr")
+        гонка = ГонкаЗаАренду(self.con, в_щели=lambda c: c.execute(
+            "update jobs set state='done', lease_until=0 where id=?", (jid,)))
+        self.assertIsNone(mi.claim_job(гонка),
+                          "выдана отработавшая работа: в аренде нет проверки state")
         self.assertTrue(гонка.влез, "щель не открылась — тест ничего не проверил")
 
     def test_вторая_работа_того_же_вида_не_заводится(self):

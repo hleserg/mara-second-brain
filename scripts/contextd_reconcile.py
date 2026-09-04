@@ -94,8 +94,11 @@ def запись_без_расшифровки(con, root):
     у которого лежит payload. Сверка о нём докладывает.
     """
     out = []
+    # `fetchall` не для удобства: `add_job` ниже пишет, а запись под
+    # недочитанным курсором в WAL упирается в снимок и валит весь часовой
+    # прогон крона `database is locked` — ровно тогда, когда чинить и надо
     for r in con.execute("select id from events where state='stored' "
-                         "and blob_sha256 is not null order by id"):
+                         "and blob_sha256 is not null order by id").fetchall():
         eid = r["id"]
         if not os.path.exists(mi.manifest_path(root, eid)):
             out.append(находка("манифест-не-дописан", "warn",
