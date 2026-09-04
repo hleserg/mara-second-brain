@@ -42,9 +42,10 @@ bind. Но из локалки он виден, и это осознанный �
 разрешения. Дозагрузка аудио (`/v1/ingest/audio`) идёт под тем же allowlist,
 что и событие, к которому она прикладывается.
 
-Слова в списке — это виды из `events.kind`: `call`, `message`, `correction`,
-`email`, `git`. `audio` из ADR-0009 в их число не входит — это не вид, а
-дозагрузка к уже принятому событию, и телефону в список пишется `call`.
+Слова в списке — это виды из `events.kind`: сегодня заводятся `call`,
+`message`, `correction` и `email`. `audio` из ADR-0009 в их число не входит —
+это не вид, а дозагрузка к уже принятому событию, и телефону в список пишется
+`call`.
 """
 import os, sys, io, json, time, hashlib, secrets, argparse, threading, subprocess
 from datetime import datetime, timedelta
@@ -461,6 +462,15 @@ class Handler(BaseHTTPRequestHandler):
             # обязан её накрывать: ADR-0009 прямо ждёт, что телефон с пустым
             # списком получит отлуп на первом же `audio`. Тело здесь ещё не
             # вычитано, поэтому отказ идёт через `отлуп`, а не через `say`.
+            # Владельца события здесь не сверяем, и это решение, а не
+            # недосмотр (#26). Событие адресуется содержимым: `dedupe_key`
+            # у аудио — само содержимое, один на всю базу, иначе два
+            # события на один блоб дали бы две цепочки ASR. Значит телефон
+            # получает на свой же звонок старое событие со старым
+            # `device_id`, и проверка по устройству похоронила бы очередь
+            # навсегда: `Core.kt:137` считает 403 терминальным. Содержимое
+            # при этом защищено само: `ingest_audio` сверяет хеш (ТЗ §20) и
+            # чужие байты не примет.
             row = con.execute("select kind from events where id=?",
                               (eid,)).fetchone()
             if row and not scope_ok(con, device_of(
@@ -488,6 +498,30 @@ class Handler(BaseHTTPRequestHandler):
                     "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
+            # Ключ дедупа считает сервер по полям самого события. Присланный
+            # ключ позволял завести строку `blob:<sha>` вообще без `blob`, и
+            # тогда настоящий звонок с тем же хешем дедуплицировался в неё, а
+            # дозагрузка отвечала «событие без аудио» (400) — терминально для
+            # клиента. Из своих полей такая строка получиться не может.
+            data.pop("dedupe_key", None)
+            blob = data.get("blob") or {}
+            if blob and not isinstance(blob, dict):
+                # `"blob": 7` роняло обработчик на `.get()` — обрыв без ответа
+                return self.say(400, {"error": "blob — не объект"})
+            if blob:
+                # Блоб бывает только у звонка, и это не вкусовщина: ключ дедупа
+                # у события с блобом — сам блоб, один на всю базу. Без этой
+                # проверки устройство объявляло чужой sha под видом `message` и
+                # забирало себе будущий звонок — телефон получал на дозагрузке
+                # 403 по чужому виду, терминально (`Core.kt:137`).
+                sha = blob.get("sha256")
+                if kind != "call":
+                    return self.say(
+                        400, {"error": "блоб бывает только у звонка"})
+                if not (isinstance(sha, str) and len(sha) == 64
+                        and all(c in "0123456789abcdef" for c in sha)):
+                    # хеш идёт в имя файла и в сверку содержимого
+                    return self.say(400, {"error": "blob.sha256 — не sha256"})
             if not scope_ok(con, data["device_id"], kind):
                 print(log_line("POST", p.path, 403, data), flush=True)
                 # не `отлуп`: тело уже вычитано целиком, а он слил бы ещё
@@ -868,7 +902,10 @@ def main(argv=None):
     ap.add_argument("--revoke", metavar="ID")
     ap.add_argument("--scopes", metavar="ID", help="показать allowlist устройства")
     ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
-                    help="задать allowlist: `--allow ID вид вид`; "
+                    help="задать allowlist видов из `events.kind` "
+                         "(сегодня заводятся `call`, `message`, `correction`, "
+                         "`email`; `audio` — не вид, а дозагрузка): "
+                         "`--allow ID вид вид`; "
                          "`--allow ID` снимает ограничение (и только так); "
                          "`--allow ID @history` берёт виды из событий за 30 "
                          "дней, а при пустой истории ничего не меняет")

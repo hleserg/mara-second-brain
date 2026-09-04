@@ -972,6 +972,34 @@ class ТестScopes(unittest.TestCase):
             e.read()
             return e.code
 
+    def звонок(self, source_id, тело, token=None, **ещё):
+        """Событие звонка с обещанным блобом. Возвращает id события."""
+        sha = hashlib.sha256(тело).hexdigest()
+        ev = {"kind": "call", "source": "phone", "source_id": source_id,
+              "blob": {"sha256": sha, "bytes": len(тело), "ext": "wav"}}
+        ev.update(ещё)                       # `blob=` подменяется целиком
+        body = json.dumps(ev).encode("utf-8")
+        req = urllib.request.Request(self.base + "/v1/ingest/event", data=body,
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + (token or self.token))
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())["event_id"]
+
+    def залить(self, eid, тело, token=None):
+        """Дозагрузка аудио. Возвращает (код, значение заголовка Connection)."""
+        url = self.base + "/v1/ingest/audio?event=" + eid
+        req = urllib.request.Request(url, data=тело, method="POST")
+        req.add_header("Content-Type", "application/octet-stream")
+        req.add_header("Authorization", "Bearer " + (token or self.token))
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                r.read()
+                return r.status, r.headers.get("Connection")
+        except urllib.error.HTTPError as e:
+            e.read()
+            return e.code, e.headers.get("Connection")
+
     def test_колонка_добавляется_к_старой_базе(self):
         """Существующая база без колонки доезжает сама, данные целы."""
         каталог = tempfile.mkdtemp()
@@ -1151,33 +1179,149 @@ class ТестScopes(unittest.TestCase):
         """ADR-0009 ждёт отлуп на первом `audio` у устройства без разрешения."""
         тело = "как бы аудио".encode("utf-8")
         sha = hashlib.sha256(тело).hexdigest()
-        body = json.dumps({"kind": "call", "source": "phone", "source_id": "a1",
-                           "blob": {"sha256": sha, "bytes": len(тело),
-                                    "ext": "wav"}}).encode("utf-8")
-        req = urllib.request.Request(self.base + "/v1/ingest/event", data=body,
-                                     method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", "Bearer " + self.token)
-        with urllib.request.urlopen(req, timeout=10) as r:
-            eid = json.loads(r.read())["event_id"]
+        eid = self.звонок("a1", тело)
         contextd.set_scopes(self.con, self.dev, ["message"])
-        req = urllib.request.Request(
-            self.base + "/v1/ingest/audio?event=" + eid, data=тело, method="POST")
-        req.add_header("Content-Type", "application/octet-stream")
-        req.add_header("Authorization", "Bearer " + self.token)
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                self.fail("аудио принято при allowlist без `call`: %d" % r.status)
-        except urllib.error.HTTPError as e:
-            e.read()
-            self.assertEqual(e.code, 403)
-            # Именно `отлуп`, а не `say`: тело здесь ещё не читали, и сервер
-            # обязан его слить и закрыть соединение. С `say` клиент слал бы в
-            # закрытое, а маленькое тело успело бы уехать и скрыло бы разницу.
-            self.assertEqual(e.headers.get("Connection"), "close",
-                             "403 отдан не через `отлуп`")
+        код, conn = self.залить(eid, тело)
+        self.assertEqual(код, 403, "аудио принято при allowlist без `call`")
+        # Именно `отлуп`, а не `say`: тело здесь ещё не читали, и сервер
+        # обязан его слить и закрыть соединение. С `say` клиент слал бы в
+        # закрытое, а маленькое тело успело бы уехать и скрыло бы разницу.
+        self.assertEqual(conn, "close", "403 отдан не через `отлуп`")
         self.assertFalse(os.path.exists(mi.blob_path(self.dir, sha, "wav")),
                          "блоб лёг на диск в обход allowlist")
+
+    def test_своё_событие_дозагружается(self):
+        """Обратная сторона: разрешённый вид дозагрузке не мешает."""
+        тело = "свой звонок".encode("utf-8")
+        eid = self.звонок("a3", тело)
+        код, _ = self.залить(eid, тело)
+        self.assertEqual(код, 200)
+
+    def test_перепаренный_телефон_дочищает_очередь(self):
+        """#26. Событие адресуется содержимым, а не устройством.
+
+        Телефон переставили, токен потеряли, владелец сделал `--pair` заново —
+        `device_id` стал другим. Недоотправленные звонки телефон шлёт снова, и
+        дедуп по `blob:<sha>` возвращает **старое** событие со старым
+        владельцем. Если бы дозагрузка сверяла устройство, эти звонки не
+        доехали бы никогда: `Core.kt:137` считает 403 терминальным, и
+        `retryFailed()` упирался бы в тот же 403.
+        """
+        тело = "звонок из прошлой жизни".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        старый = self.звонок("a4", тело)
+        новый_dev, новый = contextd.pair(self.con, "телефон переставили")
+        self.assertNotEqual(новый_dev, self.dev)
+        # source_id другой намеренно: совпадает только содержимое, и если
+        # событие вернулось то же — дедуп идёт по блобу, а не по источнику
+        self.assertEqual(self.звонок("a4-заново", тело, token=новый), старый)
+        код, _ = self.залить(старый, тело, token=новый)
+        self.assertEqual(код, 200, "перепаренный телефон не смог долить звонок")
+        self.assertTrue(os.path.exists(mi.blob_path(self.dir, sha, "wav")))
+        строка = self.con.execute("select state, device_id from events "
+                                  "where id=?", (старый,)).fetchone()
+        self.assertEqual(строка["state"], "stored", "звонок не доведён")
+        # владение не передаётся: событие так и числится за старым устройством.
+        # Это осознанно — передача владения при дедупе завела бы воровство
+        # ждущих событий. Кривая атрибуция после перепаривания — отдельно.
+        self.assertEqual(строка["device_id"], self.dev)
+
+    def отправить(self, путь, событие, token=None):
+        """POST события целиком своими руками. Возвращает (код, тело)."""
+        req = urllib.request.Request(
+            self.base + путь, data=json.dumps(событие).encode("utf-8"),
+            method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + (token or self.token))
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_блоб_бывает_только_у_звонка(self):
+        """Иначе чужой вид забирает будущий звонок себе.
+
+        Ключ дедупа у события с блобом — сам блоб, один на всю базу (делить его
+        по виду нельзя: два события на один блоб — две цепочки ASR). Значит
+        `message` с чужим sha занимал строку первым, настоящий звонок
+        дедуплицировался в неё, и дозагрузка проверяла сохранённый `message`
+        против телефонного списка — 403, для клиента терминальный.
+        """
+        тело = "звонок, на который позарились".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        _, чужой = contextd.pair(self.con, "ноутбук")
+        код, ответ = self.отправить(
+            "/v1/ingest/message",
+            {"source": "x", "source_id": "z",
+             "blob": {"sha256": sha, "bytes": len(тело), "ext": "wav"}},
+            token=чужой)
+        self.assertEqual(код, 400, "сообщение с блобом принято")
+        self.assertIn("только у звонка", ответ["error"])
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        eid = self.звонок("a6", тело)
+        код, _ = self.залить(eid, тело)
+        self.assertEqual(код, 200, "звонок не доехал")
+
+    def test_кривой_хеш_и_расширение_не_уводят_запись_из_дерева(self):
+        """`sha256` и `ext` приходят из тела и попадают в путь файла."""
+        тело = "аудио".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        код, ответ = self.отправить("/v1/ingest/event", {
+            "kind": "call", "source": "phone", "source_id": "b1",
+            "blob": {"sha256": "../../../etc/passwd", "bytes": 5}})
+        self.assertEqual(код, 400, "хеш не проверен")
+        self.assertIn("sha256", ответ["error"])
+        # расширение чистится там, где становится путём, — в `blob_path`
+        год = os.path.join(self.dir, "calls", "%04d" % datetime.now(mi.TZ).year)
+        for ext, ждём in (("../../etc/x", "bin"), (7, "7"), (".wav", "wav"),
+                          (None, "bin"), ("w" * 99, "bin"), ("жwav", "bin"),
+                          ({}, "bin"), (["wav"], "bin"), ("WAV", "wav")):
+            путь = mi.blob_path(self.dir, sha, ext)
+            self.assertEqual(os.path.dirname(os.path.dirname(путь)), год,
+                             "ext %r увёл запись из дерева" % (ext,))
+            self.assertEqual(путь.rsplit(".", 1)[1], ждём,
+                             "ext %r дал не то расширение" % (ext,))
+        # не-объект в `blob` роняло обработчик до ответа
+        код, _ = self.отправить("/v1/ingest/event", {
+            "kind": "call", "source": "phone", "source_id": "b3", "blob": 7})
+        self.assertEqual(код, 400)
+        eid = self.звонок("b2", тело, blob={"sha256": sha, "bytes": len(тело),
+                                            "ext": "../../etc/x"})
+        код, _ = self.залить(eid, тело)
+        self.assertEqual(код, 200)
+        путь = self.con.execute("select path from blobs where sha256=?",
+                                (sha,)).fetchone()["path"]
+        self.assertTrue(путь.startswith(os.path.join(self.dir, "calls")), путь)
+
+    def test_присланный_dedupe_key_не_принимается(self):
+        """Ключ дедупа считает сервер: иначе чужое событие можно похоронить.
+
+        Устройство, узнавшее sha ждущего звонка, объявляло ключ `blob:<sha>`
+        без самого блоба. Настоящий звонок дедуплицировался в эту строку, и
+        дозагрузка отвечала «событие без аудио» (400) — для клиента это
+        терминально (`Core.kt`), звонок пропадал молча.
+        """
+        тело = "звонок, который хотели похоронить".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        _, чужой = contextd.pair(self.con, "ноутбук")
+        req = urllib.request.Request(
+            self.base + "/v1/ingest/event",
+            data=json.dumps({"kind": "call", "source": "x", "source_id": "z",
+                             "dedupe_key": "blob:" + sha}).encode("utf-8"),
+            method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + чужой)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            захват = json.loads(r.read())["event_id"]
+        ключ = self.con.execute("select dedupe_key from events where id=?",
+                                (захват,)).fetchone()["dedupe_key"]
+        self.assertTrue(ключ.startswith("src:"),
+                        "присланный ключ принят: %s" % ключ)
+        eid = self.звонок("a5", тело)
+        self.assertNotEqual(eid, захват, "настоящий звонок съеден захватом")
+        код, _ = self.залить(eid, тело)
+        self.assertEqual(код, 200)
 
     def test_неизвестное_устройство_не_пускается(self):
         """Отзыв между `authed()` и проверкой не должен открывать дверь."""
