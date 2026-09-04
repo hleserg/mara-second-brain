@@ -102,11 +102,11 @@
 |---|---:|---|
 | `smart-home/iot stack/MESHCORE.md` | 60 | «железо не подключено» + готовая автоматизация `meshcore_mirror_to_mqtt` целиком |
 | `smart-home/iot stack/ACCEPTANCE.md` | 37 | живые цифры аудита: 70 сущностей в реестре, 38 от стека, почему 14 в `unknown` |
-| `smart-home/iot stack/ARCHITECTURE.md` | 19 | разбор сети doctor: наружу открыт только 443 на `intronet-demo`, VPN нет, `cf tunnel` временный |
+| `smart-home/iot stack/ARCHITECTURE.md` | 19 | разбор сети doctor: наружу открыт только 443 на рабочий стенд, VPN нет, `cf tunnel` временный |
 | `smart-home/iot stack/README.md` | 10 | десять строк ранней редакции |
 | `atman/development/ROADMAP.md` | 7 | то же: пакеты работ под локальный qwen3 |
 | `atman/MEMORY-ARCHITECTURE.md` | 6 | план на локальные Ollama-модели `qwen3-embedding:1.5b` (768d) и `qwen3:14b` — репа этот выбор не сохранила |
-| `atman/ENDPOINTS.md` | 4 | адреса стенда: WSL `172.31.192.143:3000`, LAN |
+| `atman/ENDPOINTS.md` | 4 | адреса стенда: WSL `<адрес стенда>:3000`, LAN |
 | `smart-home/iot stack/TROUBLESHOOTING.md` | 1 | одна строка, скорее всего шум |
 
 По пяти файлам `iot stack` репа **длиннее** волта (например `MESHCORE.md` — 345

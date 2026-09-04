@@ -1514,7 +1514,7 @@ ssh doctor 'sudo cp ~/mara-second-brain/install/contextd.service /etc/systemd/sy
 
 - [x] **Шаг 4: ключ и релей на маке**
 
-Ключ мак → doctor с ограничением, launchd-агент с `KeepAlive`, привязка к `100.64.0.1:8788`. Проверка с мака: `curl -s http://100.64.0.1:8788/healthz`.
+Ключ мак → doctor с ограничением, launchd-агент с `KeepAlive`, привязка к `<tailnet-адрес мака>:8788`. Проверка с мака: `curl -s http://<tailnet-адрес мака>:8788/healthz`.
 
 - [x] **Шаг 5: документация**
 
