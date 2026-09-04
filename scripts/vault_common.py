@@ -4,7 +4,7 @@
 есть в реестре» должно быть одно на всех: разъехавшись, две копии тихо начнут
 плодить фантомные узлы в графе, и заметит это только линтер §5.6.
 """
-import json, os, sys, fcntl, contextlib
+import json, os, sys, shlex, fcntl, contextlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from redact import SECRETS          # слой 1 §8.3, чистые регэкспы
@@ -83,6 +83,19 @@ def load_env(path=None):
     в начале и хвостовой комментарий шелл срезает, а буквальный разбор оставлял
     бы их внутри значения — в URL это заметят не сразу. Битая строка не
     обрывает файл: ключи после неё нужны не меньше.
+
+    Режет строку `shlex`, а не наши собственные правила. Самодельный разбор
+    расходился с шеллом на двух случаях, и оба тихие: `export`, отделённый
+    табом, уходил в имя ключа целиком — появлялась переменная
+    `export\tMARA_MAC`, а нужной не появлялось вовсе; а срез по ` #` не смотрел
+    на кавычки и обрезал `PASS='а # б'` до `а`. Ключ, укоротившийся на середине,
+    выглядит как неверный ключ, а не как испорченный файл, — и искать его пойдут
+    в облаке, а не здесь.
+
+    `comments=True` не годится: он режет и `p#ss`, где решётка внутри слова, —
+    шелл такое значение хранит целиком, и мы за ним. Без флага хвостовой
+    комментарий просто становится лишними токенами после первого, а первый нам
+    и нужен.
     """
     try:
         with open(os.path.expanduser(path or env_file()), errors="replace") as fh:
@@ -91,16 +104,19 @@ def load_env(path=None):
         return
     for l in lines:
         l = l.strip()
-        if l.startswith("export "):
-            l = l[7:].lstrip()
-        if not l or l.startswith("#") or "=" not in l:
+        if not l or l.startswith("#"):
             continue
-        k, v = l.split("=", 1)
-        k, v = k.strip(), v.strip()
-        if " #" in v:
-            v = v.split(" #", 1)[0].rstrip()
+        try:
+            токены = shlex.split(l)
+        except ValueError:      # незакрытая кавычка: теряем только эту строку
+            continue
+        if токены and токены[0] == "export":
+            токены = токены[1:]
+        if not токены or "=" not in токены[0]:
+            continue
+        k, _, v = токены[0].partition("=")
         if k:
-            os.environ.setdefault(k, v.strip("'\""))
+            os.environ.setdefault(k, v)   # кавычки снял shlex
 
 
 def нужен_адрес(имя, зачем):
