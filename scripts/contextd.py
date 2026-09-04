@@ -244,12 +244,14 @@ def set_scopes(con, device_id, kinds):
 
 # --- логи и метрики ---------------------------------------------------------
 
-def log_line(method, path, code, payload=None):
+def log_line(method, path, code, payload=None, adr=None):
     """Строка лога без единого байта содержимого (ТЗ §18)."""
     extra = ""
     if isinstance(payload, dict):
         keys = ",".join(sorted(k for k in payload if k != "payload"))
         extra = " keys=%s" % keys if keys else ""
+    if adr:
+        extra += " from=%s" % adr
     return "%s %s %s -> %s%s" % (mi.now_iso(), method, path, code, extra)
 
 
@@ -392,7 +394,19 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass                                  # свой лог, санитарный
 
-    def say(self, code, obj, ctype="application/json", closing=False, ещё=None):
+    def say(self, code, obj, ctype="application/json", closing=False,
+            ещё=None, поля=None):
+        if code >= 400:
+            # Через `say` проходят все отказы без исключения, и это
+            # единственное место, где их видно разом. Раньше строку писали
+            # руками у четырёх кодов, а прочие 400/403/404 не оставляли следа
+            # вообще — при том что на телефоне они терминальны (`Core.kt:137`,
+            # `:146`): событие пропадало совсем и молча (#30). Печатаем до
+            # ответа: на оборванном соединении `write` бросит, и лог тогда
+            # потерял бы ровно тот отказ, ради которого его читают.
+            print(log_line(self.command,
+                           urllib.parse.urlparse(self.path).path,
+                           code, поля, клиент(self)), flush=True)
         body = (obj if isinstance(obj, (bytes, bytearray)) else
                 json.dumps(obj, ensure_ascii=False).encode("utf-8")
                 if ctype == "application/json" else obj.encode("utf-8"))
@@ -432,10 +446,8 @@ class Handler(BaseHTTPRequestHandler):
             под_замком(adr, True)
             return True
         if ждать:
-            print("429 %s %s: подбор токена, ждать %dс" % (adr, path, ждать), flush=True)
             self.отлуп(429, "слишком много попыток", {"Retry-After": str(ждать)})
             return False
-        print("401 %s %s" % (adr, path), flush=True)
         # тело неопознанного запроса тоже вычитываем: иначе его хвост уедет в
         # следующий запрос на том же соединении и сервер ответит 400 на мусор
         self.отлуп(401, "устройство не опознано")
@@ -480,10 +492,6 @@ class Handler(BaseHTTPRequestHandler):
         con = self.con()
         if p.path == "/v1/ingest/audio":
             if n > MAX_BODY:
-                # в логе не было ни строчки, а на телефоне отказ терминален
-                # (`Core.kt:146`) — звонок пропадал совсем и молча. Прочие
-                # 400/404 молчат так же, но чинятся не здесь (#30)
-                print(log_line("POST", p.path, 413), flush=True)
                 return self.отлуп(413, "тело больше %d МиБ" % (MAX_BODY >> 20))
             q = urllib.parse.parse_qs(p.query)
             eid = (q.get("event") or [""])[0]
@@ -504,15 +512,15 @@ class Handler(BaseHTTPRequestHandler):
                               (eid,)).fetchone()
             if row and not scope_ok(con, device_of(
                     con, self.headers.get("Authorization")), row["kind"]):
-                print(log_line("POST", p.path, 403), flush=True)
                 return self.отлуп(
                     403, "устройству не разрешён вид «%s»" % row["kind"])
             code, out = ingest_audio(con, self.server.root,
                                      eid, self.rfile, n)
-            print(log_line("POST", p.path, code), flush=True)
+            if code < 400:
+                # отказ уже написал `say`, второй строки быть не должно
+                print(log_line("POST", p.path, code), flush=True)
             return self.say(code, out)
         if n > MAX_JSON:
-            print(log_line("POST", p.path, 413), flush=True)
             return self.отлуп(413, "тело больше %d МиБ" % (MAX_JSON >> 20))
         raw = self.rfile.read(n) if n else b""
         try:
@@ -532,8 +540,7 @@ class Handler(BaseHTTPRequestHandler):
                 # `--allow <id> @history` потом падал навсегда: он собирает
                 # список из истории, а `set_scopes` такой вид не принимает —
                 # не записывается ничего, включая настоящие виды (#29).
-                print(log_line("POST", p.path, 400, data), flush=True)
-                return self.say(400, {"error": беда})
+                return self.say(400, {"error": беда}, поля=data)
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
             # Ключ дедупа считает сервер по полям самого события. Присланный
@@ -545,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
             blob = data.get("blob") or {}
             if blob and not isinstance(blob, dict):
                 # `"blob": 7` роняло обработчик на `.get()` — обрыв без ответа
-                return self.say(400, {"error": "blob — не объект"})
+                return self.say(400, {"error": "blob — не объект"}, поля=data)
             if blob:
                 # Блоб бывает только у звонка, и это не вкусовщина: ключ дедупа
                 # у события с блобом — сам блоб, один на всю базу. Без этой
@@ -559,17 +566,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not (isinstance(sha, str) and len(sha) == 64
                         and all(c in "0123456789abcdef" for c in sha)):
                     # хеш идёт в имя файла и в сверку содержимого
-                    return self.say(400, {"error": "blob.sha256 — не sha256"})
+                    return self.say(400, {"error": "blob.sha256 — не sha256"},
+                                    поля=data)
             if not scope_ok(con, data["device_id"], kind):
-                print(log_line("POST", p.path, 403, data), flush=True)
                 # не `отлуп`: тело уже вычитано целиком, а он слил бы ещё
                 # столько же и повис бы, ожидая байты, которых не будет
-                return self.say(403, {"error": "устройству не разрешён вид «%s»" % kind})
+                return self.say(
+                    403, {"error": "устройству не разрешён вид «%s»" % kind},
+                    поля=data)
             if kind == "correction":
                 import call_project
                 err = call_project.check_correction(data.get("payload") or {})
                 if err:
-                    return self.say(400, {"error": err})
+                    return self.say(400, {"error": err}, поля=data)
             eid, dup = mi.put_event(con, data)
             need = need_blob(con, self.server.root, eid,
                              (data.get("blob") or {}).get("sha256"))
