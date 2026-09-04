@@ -159,7 +159,10 @@ class ТестАдресовВРепозитории(unittest.TestCase):
         # живые литералы этих двух веток лежат в исключённых файлах, так что
         # поломка любой из них не уронила бы ни обход, ни что-либо ещё
         self.assertTrue(self.СЕТЬ.search("сервер 192.168.7.3"))
-        self.assertTrue(self.СЕТЬ.search("ssh 10.1.2.3 и 172.20.0.9"))
+        self.assertTrue(self.СЕТЬ.search("ssh 10.1.2.3"))
+        # отдельной строкой: search() встал бы на первом совпадении и
+        # ветка 172.16/12 осталась бы непроверенной (круг 5 ревью)
+        self.assertTrue(self.СЕТЬ.search("ssh 172.20.0.9"))
         self.assertTrue(self.СЕТЬ.search("scp sergey@203.0.113.9:/tmp"))
         self.assertIsNone(self.СЕТЬ.search("сервис на 203.0.113.9"))
         self.assertTrue(self.СЕТЬ.search("привязка 100.127.9.9"))
