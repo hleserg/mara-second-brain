@@ -571,10 +571,12 @@ def самопроверка():
         живая = os.path.join(root, "contextd.db")
 
         def на_диске():
+            # Хеш, а не размер с mtime: PASSIVE-чекпойнт переписывает базу
+            # тем же размером и WAL не трогает, так что от записи остаётся один
+            # только mtime — а он зависит от гранулярности ФС, не от бэкапа.
             # None за пропавший файл, а не исключение: снёсший WAL мутант обязан
-            # падать на assert ниже, а не чужим FileNotFoundError отсюда
-            return [(os.path.getsize(f), os.stat(f).st_mtime_ns)
-                    if os.path.exists(f) else None
+            # падать на assert ниже, а не чужим FileNotFoundError отсюда.
+            return [sha(f) if os.path.exists(f) else None
                     for f in (живая, живая + "-wal")]
 
         было_на_диске = на_диске()
