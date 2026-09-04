@@ -47,7 +47,7 @@ bind. Но из локалки он виден, и это осознанный �
 это не вид, а дозагрузка к уже принятому событию, и телефону в список пишется
 `call`.
 """
-import os, sys, io, json, time, hashlib, secrets, argparse, threading, subprocess
+import os, sys, io, re, json, time, hashlib, secrets, argparse, threading, subprocess
 from datetime import datetime, timedelta
 import tempfile
 import urllib.parse
@@ -193,18 +193,37 @@ def scopes_from_history(con, device_id, days=30):
         (device_id, since)) if r["kind"]})
 
 
+ВИД = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
+
+
 def плохой_вид(kind):
-    """Почему такой вид нельзя класть в allowlist, или None.
+    """Почему такой вид нельзя принимать и класть в allowlist, или None.
 
     Список хранится одной строкой через пробел, а читается `split()`. Вид с
     пробелом внутри развалился бы на два разрешения (`"call correction"`
     открыл бы настоящий `correction`), а пустой — снял бы ограничение целиком,
     молча и не тем способом, каким его снимают намеренно.
+
+    Остальное — форма, и она здесь не ради красоты: вид уходит в идентификатор
+    события (`mi.put_event`: `"%s_%s" % (kind, uuid4)`), а тот — в имена файлов
+    манифеста, расшифровки и извлечения (`mi.manifest_path` и соседи). Дотянуться
+    туда видом сегодня нельзя: эти файлы заводятся только у звонка, а всё, кроме
+    `call`, отсекается выше по обработчику проверкой блоба. Но держать форму
+    идентификатора на одном `if` в одной ручке — ровно то, на чём погорела
+    история `ext` (#27), поэтому проверка стоит там же, где принимается вид.
+
+    Вид приходит из json, поэтому строкой он быть не обязан: `{"kind": 7}`
+    доезжал до базы целым числом, а `kind.split()` на нём просто падал.
     """
+    if not isinstance(kind, str):
+        return "вид — не строка"
     if not kind:
         return "пустой вид"
     if kind.split() != [kind]:
-        return "в виде «%s» пробел" % kind
+        return "в виде «%s» пробел" % kind[:40]
+    if not ВИД.match(kind):
+        return ("вид «%s» не по форме: строчные латинские, цифры и `_`, "
+                "с буквы, не длиннее 32" % kind[:40])
     return None
 
 
@@ -507,6 +526,14 @@ class Handler(BaseHTTPRequestHandler):
         if p.path in ("/v1/ingest/event", "/v1/ingest/message", "/v1/ingest/email"):
             kind = {"/v1/ingest/message": "message",
                     "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
+            беда = плохой_вид(kind)
+            if беда:
+                # Без этой проверки вид ложился в `events.kind` как есть, и
+                # `--allow <id> @history` потом падал навсегда: он собирает
+                # список из истории, а `set_scopes` такой вид не принимает —
+                # не записывается ничего, включая настоящие виды (#29).
+                print(log_line("POST", p.path, 400, data), flush=True)
+                return self.say(400, {"error": беда})
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
             # Ключ дедупа считает сервер по полям самого события. Присланный
@@ -974,7 +1001,13 @@ def main(argv=None):
         try:
             found, val = set_scopes(con, dev, kinds)
         except ValueError as e:
-            print("не записал: %s" % e); return 1
+            # «@history» собирает список из того, что устройство реально слало,
+            # и один кривой вид в истории роняет запись целиком. Без подсказки
+            # владелец на этом месте идёт читать таблицу событий руками
+            print("не записал: %s" % e)
+            print("виды можно задать явно, минуя историю: "
+                  "--allow %s call message" % dev)
+            return 1
         if not found:
             print("нет такого устройства"); return 1
         print("%s: %s" % (dev, val if val is not None else "без ограничения (null)"))
