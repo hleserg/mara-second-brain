@@ -34,7 +34,9 @@ bind. Но из локалки он виден, и это осознанный �
 «всё можно», список — только перечисленное, остальное 403. Новое устройство
 приходит с `null` намеренно: телефон, у которого истории ещё нет, иначе был бы
 отбит на первом же событии. Список ставится руками, и `@history` берёт его из
-того, что устройство реально слало за месяц, а не из наших предположений.
+того, что устройство реально слало за месяц, а не из наших предположений. Если
+за месяц не слало ничего, `@history` уже заданный список **не снимает**:
+молчание — не разрешение.
 """
 import os, sys, io, json, time, hashlib, secrets, argparse, threading, subprocess
 from datetime import datetime, timedelta
@@ -804,7 +806,7 @@ def self_check():
     return 0
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="приём событий Mara Ambient Memory")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--port", type=int, default=int(os.environ.get("MARA_PORT", 8788)))
@@ -818,9 +820,10 @@ def main():
     ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
                     help="задать allowlist: `--allow ID вид вид`; "
                          "`--allow ID` снимает ограничение; "
-                         "`--allow ID @history` берёт виды из событий за 30 дней")
+                         "`--allow ID @history` берёт виды из событий за 30 "
+                         "дней, а при пустой истории ничего не меняет")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if a.self_check:
         return self_check()
     mi.ROOT = a.root
@@ -848,8 +851,16 @@ def main():
         if kinds == ["@history"]:
             kinds = scopes_from_history(con, dev)
             if not kinds:
-                print("событий нет — оставляю без ограничения, "
-                      "иначе устройство будет отбито на первом же")
+                # Тридцать дней тишины — не разрешение. Если список уже задан,
+                # `@history` его не снимает: молчавшее устройство иначе
+                # открылось бы обратно само, без чьего-либо решения.
+                row = con.execute("select scopes from devices where id=?",
+                                  (dev,)).fetchone()
+                if not row:
+                    print("нет такого устройства"); return 1
+                print("событий за 30 дней нет — список не трогаю (%s)" %
+                      ("null" if row["scopes"] is None else row["scopes"]))
+                return 0
         found, val = set_scopes(con, dev, kinds)
         if not found:
             print("нет такого устройства"); return 1

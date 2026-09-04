@@ -1025,6 +1025,21 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(contextd.scopes_from_history(self.con, dev2), [],
                          "устройству без событий список выдавать нечем")
 
+    def test_молчание_не_снимает_уже_заданный_список(self):
+        """`@history` у замолчавшего устройства — не команда «открыть всё»."""
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        буфер = io.StringIO()
+        было, sys.stdout = sys.stdout, буфер
+        try:
+            код = contextd.main(["--root", self.dir, "--allow", self.dev, "@history"])
+        finally:
+            sys.stdout = было
+        self.assertEqual(код, 0)
+        self.assertIn("не трогаю", буфер.getvalue())
+        row = self.con.execute("select scopes from devices where id=?",
+                               (self.dev,)).fetchone()
+        self.assertEqual(row["scopes"], "call", "список пережил пустую историю")
+
     def test_чужое_устройство_не_находится(self):
         found, _ = contextd.set_scopes(self.con, "dev_нет", ["call"])
         self.assertFalse(found)
