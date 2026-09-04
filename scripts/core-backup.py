@@ -269,8 +269,7 @@ def отметка(путь, записанные, когда=None):
     return было
 
 
-def прогон(root, targets, пароль, keep, work, аудио=True, drill=True,
-           отметка_пути=None):
+def прогон(root, targets, пароль, keep, work, аудио=True, drill=True):
     начало = time.time()
     if not os.path.exists(пароль) or os.path.getsize(пароль) == 0:
         raise RuntimeError("нет парольной фразы %s" % пароль)
@@ -333,7 +332,7 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
-    отметка(отметка_пути or mi.ОТМЕТКА_НОСИТЕЛЕЙ, записано)
+    отметка(mi.ОТМЕТКА_НОСИТЕЛЕЙ, записано)
 
     # По носителям, а не одним числом: с общим счётчиком статистика последнего
     # носителя затирала предыдущие, и отчёт врал тем сильнее, чем больше
@@ -405,6 +404,7 @@ def самопроверка():
         print("core-backup: нет gpg, самопроверка пропущена")
         return
     tmp = tempfile.mkdtemp(prefix="core-selfcheck.")
+    боевая_отметка = mi.ОТМЕТКА_НОСИТЕЛЕЙ
     os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"   # см. mi.смонтирован
     try:
         root = os.path.join(tmp, "blobs")
@@ -435,9 +435,13 @@ def самопроверка():
         # проверялся до сих пор только путь с одним. Затирание статистики
         # зеркала и отметку по каждому носителю на одном не увидеть.
         второй = os.path.join(tmp, "target2")
+        # Путь отметки подменяем в самой константе, а не параметром прогона:
+        # параметр означал бы, что боевое выражение с дефолтом не исполняет
+        # ни один вход, кроме крона, — а на этом уже спотыкались.
         отм = os.path.join(tmp, "state", "core-targets.json")
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = отм
         общее = dict(root=root, targets=[target, второй], пароль=пароль, keep=2,
-                     work=os.path.join(tmp, "work"), отметка_пути=отм)
+                     work=os.path.join(tmp, "work"))
 
         # Главная гарантия скрипта — согласованная копия под живым демоном —
         # до сих пор не проверялась ничем. Плоское копирование WAL-базы даёт
@@ -645,6 +649,7 @@ def самопроверка():
 
         print("core-backup: самопроверка ок")
     finally:
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = боевая_отметка
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
         shutil.rmtree(tmp, ignore_errors=True)
 

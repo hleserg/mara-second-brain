@@ -5,9 +5,17 @@
 `pipefail` роняет тест восстановления кодом `ls` — раньше, чем печатается
 заготовленный диагноз. В обоих случаях в логе не остаётся ничего, по чему
 видно, что копии нет."""
-import os, sys, shutil, subprocess, tempfile, unittest
+import io, os, sys, time, shutil, subprocess, tempfile, unittest
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+
+# Разбор носителей и порог читаются при импорте, поэтому сверку в этих
+# тестах запускаем подпроцессом: в этом процессе модуль уже загружен.
+СВЕРКА = ("import sys; sys.path.insert(0, %r);"
+          " import contextd_reconcile as rc;"
+          " print([(f['check'], f['detail']) for f in rc.бэкап_ядра()])"
+          % os.path.join(ROOT, "scripts"))
 
 
 def прогнать(скрипт, **env):
@@ -34,18 +42,73 @@ class Носители(unittest.TestCase):
         # Сверка разбирает тот же список: разойдись она с бэкапом, носитель,
         # на который бэкап не пишет, она считала бы живым. Но падать ей
         # нельзя — с ней замолчали бы DLQ, сердцебиения и ретеншен, поэтому
-        # ждём находку, а не ненулевой код. Подпроцессом, потому что разбор
-        # идёт при импорте: в этом же процессе модуль уже загружен.
-        код = ("import sys; sys.path.insert(0, %r);"
-               " import contextd_reconcile as rc;"
-               " print([f['check'] for f in rc.бэкап_ядра()])"
-               % os.path.join(ROOT, "scripts"))
-        r = subprocess.run([sys.executable, "-c", код],
+        # ждём находку, а не ненулевой код.
+        r = subprocess.run([sys.executable, "-c", СВЕРКА],
                            capture_output=True, text=True,
                            env=dict(os.environ,
                                     MARA_CORE_TARGETS="/mnt/a /mnt/мой диск"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("бэкап-ядра-конфиг", r.stdout)
+        # Именно текст: имя находки то же самое, что у пустого списка
+        # носителей, и без текста тест зеленел бы, даже когда жалоба
+        # разбора до находки не доезжает.
+        self.assertIn("не абсолютный", r.stdout)
+
+
+class Порог(unittest.TestCase):
+    """Порог живёт строкой в crontab, и единственный способ проверить, что
+    его оттуда читают, — прогнать сверку с ним в окружении. Вызов `_порог`
+    из теста доказывает лишь, что функция читает имя, которое ей дали:
+    имя приходит из теста, а не из кода, и опечатка в коде так не видна."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        цель = os.path.join(self.tmp, "backup")
+        os.makedirs(цель)
+        архив = os.path.join(цель, "core-2026-09-04.tar.gz.gpg")
+        open(архив, "wb").close()
+        час_назад = time.time() - 3600
+        os.utime(архив, (час_назад, час_назад))
+        self.цель = цель
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def сверка(self, суток):
+        r = subprocess.run(
+            [sys.executable, "-c", СВЕРКА], capture_output=True, text=True,
+            env=dict(os.environ, MARA_CORE_TARGETS=self.цель,
+                     MARA_STATE=self.tmp,
+                     MARA_BACKUP_ALLOW_SAME_DEV="1",
+                     MARA_CORE_BACKUP_MAX_DAYS=суток))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def test_порог_из_крона_меняет_поведение_сверки(self):
+        # Архиву час: при пороге в полторы минуты он обязан считаться
+        # протухшим, при пороге в сутки — свежим. Если строку в crontab не
+        # читают, оба прогона дадут одно и то же.
+        self.assertIn("бэкап-ядра-устарел", self.сверка("0.001"))
+        self.assertNotIn("бэкап-ядра-устарел", self.сверка("1"))
+
+    def test_значение_из_крона_совпадает_с_дефолтом_кода(self):
+        # Разъехавшись, эти двое молчат: в бою побеждает crontab, и слабина
+        # в 0.2 суток теряется ровно там, где заведена, — на боевой машине.
+        строки = [l for l in io.open(os.path.join(ROOT, "install",
+                                                  "mara.cron"),
+                                     encoding="utf-8")
+                  if l.startswith("MARA_CORE_BACKUP_MAX_DAYS=")]
+        self.assertEqual(len(строки), 1, строки)
+        код = ("import sys; sys.path.insert(0, %r);"
+               " import contextd_reconcile as rc; print(rc.БЭКАП_СУТКИ)"
+               % os.path.join(ROOT, "scripts"))
+        окр = {k: v for k, v in os.environ.items()
+               if k != "MARA_CORE_BACKUP_MAX_DAYS"}
+        r = subprocess.run([sys.executable, "-c", код], env=окр,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(float(строки[0].split("=", 1)[1]),
+                         float(r.stdout))
 
 
 class ПустойНоситель(unittest.TestCase):
