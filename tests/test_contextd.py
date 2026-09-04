@@ -942,5 +942,248 @@ class ТестКривойДлины(unittest.TestCase):
                          [])
 
 
+class ТестScopes(unittest.TestCase):
+    """Allowlist видов у устройства (ADR-0009, откат п. 2)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.srv = contextd.make_server(self.dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        self.con = mi.connect(self.dir)
+        self.dev, self.token = contextd.pair(self.con, "телефон")
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def послать(self, kind, source_id):
+        body = json.dumps({"kind": kind, "source": "phone",
+                           "source_id": source_id}).encode("utf-8")
+        req = urllib.request.Request(self.base + "/v1/ingest/event", data=body,
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            e.read()
+            return e.code
+
+    def test_колонка_добавляется_к_старой_базе(self):
+        """Существующая база без колонки доезжает сама, данные целы."""
+        каталог = tempfile.mkdtemp()
+        путь = os.path.join(каталог, "contextd.db")
+        import sqlite3
+        con = sqlite3.connect(путь)
+        con.execute("create table devices(id text primary key, name text, "
+                    "token_sha256 text not null, created text, last_seen text, "
+                    "revoked_at text)")
+        con.execute("insert into devices(id,name,token_sha256) values('d1','старое','x')")
+        con.commit(); con.close()
+        con = mi.connect(каталог)
+        колонки = {r["name"] for r in con.execute("pragma table_info(devices)")}
+        self.assertIn("scopes", колонки)
+        row = con.execute("select name, scopes from devices where id='d1'").fetchone()
+        self.assertEqual(row["name"], "старое")
+        self.assertIsNone(row["scopes"], "миграция не должна ничего разрешать сама")
+
+    def test_null_пускает_всё(self):
+        self.assertEqual(self.послать("call", "s1"), 200)
+        self.assertEqual(self.послать("message", "s2"), 200)
+
+    def test_список_пускает_своё_и_отбивает_чужое(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        self.assertEqual(self.послать("call", "s3"), 200)
+        self.assertEqual(self.послать("message", "s4"), 403)
+
+    def test_отбитое_событие_в_базу_не_попало(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        self.послать("message", "s5")
+        n = self.con.execute("select count(*) c from events "
+                             "where source_id='s5'").fetchone()["c"]
+        self.assertEqual(n, 0, "403 всё равно записал событие")
+
+    def test_пустой_список_снимает_ограничение(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        self.assertEqual(self.послать("message", "s6"), 403)
+        found, val = contextd.set_scopes(self.con, self.dev, [])
+        self.assertTrue(found)
+        self.assertIsNone(val)
+        self.assertEqual(self.послать("message", "s7"), 200)
+
+    def test_история_даёт_то_что_устройство_реально_слало(self):
+        self.assertEqual(self.послать("call", "s8"), 200)
+        self.assertEqual(self.послать("message", "s9"), 200)
+        self.assertEqual(contextd.scopes_from_history(self.con, self.dev),
+                         ["call", "message"])
+
+    def test_гонка_миграции_не_валит_открытие(self):
+        """Колонку добавил сосед между `pragma` и `alter` — это не ошибка.
+
+        Гонку тут не ждут случайно, а устраивают: подменённый `sqlite3.connect`
+        добавляет колонку ровно в тот момент, когда наш `pragma table_info` уже
+        отработал и сказал «колонки нет». Без `except OperationalError` в
+        `mi.connect` этот тест падает с `duplicate column name`.
+        """
+        import sqlite3
+        каталог = tempfile.mkdtemp()
+        путь = os.path.join(каталог, "contextd.db")
+        con = sqlite3.connect(путь)
+        con.execute("create table devices(id text primary key, name text, "
+                    "token_sha256 text not null, created text, last_seen text, "
+                    "revoked_at text)")
+        con.commit(); con.close()
+
+        настоящий = sqlite3.connect
+
+        class Соседский(sqlite3.Connection):
+            """Соединение, за спиной которого колонку добавляет кто-то другой."""
+            подставил = False
+
+            def execute(self, sql, *a):
+                r = super().execute(sql, *a)
+                if not Соседский.подставил and "table_info(devices)" in sql:
+                    Соседский.подставил = True
+                    сосед = настоящий(путь)
+                    сосед.execute("alter table devices add column scopes text")
+                    сосед.commit(); сосед.close()
+                return r
+
+        sqlite3.connect = lambda *a, **k: настоящий(*a, factory=Соседский,
+                                                    **{k_: v for k_, v in k.items()
+                                                       if k_ != "factory"})
+        try:
+            mi.connect(каталог).close()
+        finally:
+            sqlite3.connect = настоящий
+        self.assertTrue(Соседский.подставил,
+                        "гонка не состоялась, тест ничего не проверил")
+        con = sqlite3.connect(путь)
+        имена = {r[1] for r in con.execute("pragma table_info(devices)")}
+        con.close()
+        self.assertIn("scopes", имена)
+
+    def test_история_пуста_у_нового_устройства(self):
+        dev2, _ = contextd.pair(self.con, "ещё не звонил")
+        self.assertEqual(contextd.scopes_from_history(self.con, dev2), [],
+                         "устройству без событий список выдавать нечем")
+
+    def test_молчание_не_снимает_уже_заданный_список(self):
+        """`@history` у замолчавшего устройства — не команда «открыть всё»."""
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        буфер = io.StringIO()
+        было, sys.stdout = sys.stdout, буфер
+        try:
+            код = contextd.main(["--root", self.dir, "--allow", self.dev, "@history"])
+        finally:
+            sys.stdout = было
+        self.assertEqual(код, 0)
+        self.assertIn("не трогаю", буфер.getvalue())
+        row = self.con.execute("select scopes from devices where id=?",
+                               (self.dev,)).fetchone()
+        self.assertEqual(row["scopes"], "call", "список пережил пустую историю")
+
+    def test_чужое_устройство_не_находится(self):
+        found, _ = contextd.set_scopes(self.con, "dev_нет", ["call"])
+        self.assertFalse(found)
+
+    def запуск(self, *argv):
+        """`main()` целиком, с перехватом вывода: как из командной строки."""
+        буфер = io.StringIO()
+        было, sys.stdout = sys.stdout, буфер
+        try:
+            код = contextd.main(["--root", self.dir] + list(argv))
+        finally:
+            sys.stdout = было
+        return код, буфер.getvalue()
+
+    def scopes(self):
+        return self.con.execute("select scopes from devices where id=?",
+                                (self.dev,)).fetchone()["scopes"]
+
+    def test_allow_из_командной_строки_пишет_список(self):
+        код, вывод = self.запуск("--allow", self.dev, "message", "call")
+        self.assertEqual(код, 0)
+        self.assertEqual(self.scopes(), "call message", "список не отсортирован")
+        self.assertIn("call message", вывод)
+
+    def test_allow_history_заполняет_по_фактам(self):
+        """С непустой историей `@history` пишет ровно то, что устройство слало."""
+        for kind in ("call", "message", "call"):
+            mi.put_event(self.con, {"kind": kind, "source": "т", "device_id": self.dev,
+                                    "source_id": "%s-%d" % (kind, id(kind))})
+        код, _ = self.запуск("--allow", self.dev, "@history")
+        self.assertEqual(код, 0)
+        self.assertEqual(self.scopes(), "call message")
+
+    def test_пустой_вид_не_снимает_ограничение_молча(self):
+        """`--allow ID ""` — не способ открыть всё; для этого есть `--allow ID`."""
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        код, вывод = self.запуск("--allow", self.dev, "")
+        self.assertEqual(код, 1)
+        self.assertIn("пустой вид", вывод)
+        self.assertEqual(self.scopes(), "call", "список уцелел")
+
+    def test_вид_с_пробелом_не_разваливается_на_два(self):
+        код, вывод = self.запуск("--allow", self.dev, "call correction")
+        self.assertEqual(код, 1)
+        self.assertIn("пробел", вывод)
+        self.assertIsNone(self.scopes())
+
+    def test_пробел_это_не_только_пробел(self):
+        """`split()` считает пробелом и табуляцию, и NBSP — проверка тоже."""
+        for вид in ("call\tcorrection", "call\ncorrection", "call\xa0correction"):
+            with self.subTest(вид=repr(вид)):
+                код, _ = self.запуск("--allow", self.dev, вид)
+                self.assertEqual(код, 1, "вид %r принят" % вид)
+                self.assertIsNone(self.scopes())
+
+    def test_снять_ограничение_можно_только_явно(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        код, _ = self.запуск("--allow", self.dev)
+        self.assertEqual(код, 0)
+        self.assertIsNone(self.scopes(), "`--allow ID` без видов снимает список")
+
+    def test_дозагрузка_аудио_тоже_под_allowlist(self):
+        """ADR-0009 ждёт отлуп на первом `audio` у устройства без разрешения."""
+        тело = "как бы аудио".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        body = json.dumps({"kind": "call", "source": "phone", "source_id": "a1",
+                           "blob": {"sha256": sha, "bytes": len(тело),
+                                    "ext": "wav"}}).encode("utf-8")
+        req = urllib.request.Request(self.base + "/v1/ingest/event", data=body,
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            eid = json.loads(r.read())["event_id"]
+        contextd.set_scopes(self.con, self.dev, ["message"])
+        req = urllib.request.Request(
+            self.base + "/v1/ingest/audio?event=" + eid, data=тело, method="POST")
+        req.add_header("Content-Type", "application/octet-stream")
+        req.add_header("Authorization", "Bearer " + self.token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                self.fail("аудио принято при allowlist без `call`: %d" % r.status)
+        except urllib.error.HTTPError as e:
+            e.read()
+            self.assertEqual(e.code, 403)
+            # Именно `отлуп`, а не `say`: тело здесь ещё не читали, и сервер
+            # обязан его слить и закрыть соединение. С `say` клиент слал бы в
+            # закрытое, а маленькое тело успело бы уехать и скрыло бы разницу.
+            self.assertEqual(e.headers.get("Connection"), "close",
+                             "403 отдан не через `отлуп`")
+        self.assertFalse(os.path.exists(mi.blob_path(self.dir, sha, "wav")),
+                         "блоб лёг на диск в обход allowlist")
+
+    def test_неизвестное_устройство_не_пускается(self):
+        """Отзыв между `authed()` и проверкой не должен открывать дверь."""
+        self.assertFalse(contextd.scope_ok(self.con, "dev_нет", "call"))
+        self.assertFalse(contextd.scope_ok(self.con, None, "call"))
+
+
 if __name__ == "__main__":
     unittest.main()

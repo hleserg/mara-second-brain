@@ -25,9 +25,29 @@ bind. Но из локалки он виден, и это осознанный �
     python3 scripts/contextd.py --serve
     python3 scripts/contextd.py --pair "телефон Серёги"
     python3 scripts/contextd.py --revoke dev_ab12...
+    python3 scripts/contextd.py --scopes dev_ab12...
+    python3 scripts/contextd.py --allow dev_ab12... call message
+    python3 scripts/contextd.py --allow dev_ab12... @history
     python3 scripts/contextd.py --self-check
+
+У устройства есть allowlist видов событий (ADR-0009): `scopes is null` —
+«всё можно», список — только перечисленное, остальное 403. Новое устройство
+приходит с `null` намеренно: телефон, у которого истории ещё нет, иначе был бы
+отбит на первом же событии. Список ставится руками, и `@history` берёт его из
+того, что устройство реально слало за месяц, а не из наших предположений. Если
+за месяц не слало ничего, `@history` уже заданный список **не снимает**:
+молчание — не разрешение. Снять его можно только явно — `--allow ID` без
+видов; вид пустой или с пробелом внутри не принимается вовсе, потому что
+список хранится строкой через пробел и такой вид развалился бы на два
+разрешения. Дозагрузка аудио (`/v1/ingest/audio`) идёт под тем же allowlist,
+что и событие, к которому она прикладывается.
+
+Слова в списке — это виды из `events.kind`: `call`, `message`, `correction`,
+`email`, `git`. `audio` из ADR-0009 в их число не входит — это не вид, а
+дозагрузка к уже принятому событию, и телефону в список пишется `call`.
 """
 import os, sys, io, json, time, hashlib, secrets, argparse, threading, subprocess
+from datetime import datetime, timedelta
 import tempfile
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -140,6 +160,66 @@ def device_of(con, header):
         return None
     con.execute("update devices set last_seen=? where id=?", (mi.now_iso(), row["id"]))
     return row["id"]
+
+
+def scope_ok(con, device_id, kind):
+    """Разрешён ли устройству этот вид события (ADR-0009, откат п. 2).
+
+    `scopes is null` означает «как до этой колонки — всё можно», и это не
+    временная поблажка, а рабочее состояние: устройство, ещё ничего не
+    приславшее, списка не получает, иначе телефон с пустой историей был бы
+    отбит на первом же событии. Список заполняется отдельным шагом
+    (`--allow`), и только по тому, что устройство реально шлёт.
+    """
+    if not device_id:
+        return False
+    row = con.execute("select scopes from devices where id=?", (device_id,)).fetchone()
+    if not row:
+        # Токен опознан в `authed()`, а строки уже нет — устройство отозвали
+        # между двумя запросами к базе. Пропустить значит записать событие с
+        # `device_id is null` уже после отзыва; отбить — то, чего отзыв и хотел.
+        return False
+    if row["scopes"] is None:
+        return True
+    return kind in row["scopes"].split()
+
+
+def scopes_from_history(con, device_id, days=30):
+    """Виды, которые устройство слало за `days` дней. Пусто — истории нет."""
+    since = (datetime.now(mi.TZ) - timedelta(days=days)).isoformat(timespec="seconds")
+    return sorted({r["kind"] for r in con.execute(
+        "select distinct kind from events where device_id=? and received>=?",
+        (device_id, since)) if r["kind"]})
+
+
+def плохой_вид(kind):
+    """Почему такой вид нельзя класть в allowlist, или None.
+
+    Список хранится одной строкой через пробел, а читается `split()`. Вид с
+    пробелом внутри развалился бы на два разрешения (`"call correction"`
+    открыл бы настоящий `correction`), а пустой — снял бы ограничение целиком,
+    молча и не тем способом, каким его снимают намеренно.
+    """
+    if not kind:
+        return "пустой вид"
+    if kind.split() != [kind]:
+        return "в виде «%s» пробел" % kind
+    return None
+
+
+def set_scopes(con, device_id, kinds):
+    """Записать allowlist. Пустой список снимает ограничение (`null`).
+
+    Возвращает (нашлось ли устройство, что записано). Откат по ADR-0009 —
+    перестать проверять колонку; удалять её не нужно и не следует.
+    """
+    for k in kinds:
+        беда = плохой_вид(k)
+        if беда:
+            raise ValueError(беда)
+    val = " ".join(sorted(set(kinds))) or None
+    cur = con.execute("update devices set scopes=? where id=?", (val, device_id))
+    return bool(cur.rowcount), val
 
 
 # --- логи и метрики ---------------------------------------------------------
@@ -376,8 +456,20 @@ class Handler(BaseHTTPRequestHandler):
             if n > MAX_BODY:
                 return self.отлуп(413, "тело больше %d МиБ" % (MAX_BODY >> 20))
             q = urllib.parse.parse_qs(p.query)
+            eid = (q.get("event") or [""])[0]
+            # Дозагрузка — продолжение уже принятого события, и allowlist
+            # обязан её накрывать: ADR-0009 прямо ждёт, что телефон с пустым
+            # списком получит отлуп на первом же `audio`. Тело здесь ещё не
+            # вычитано, поэтому отказ идёт через `отлуп`, а не через `say`.
+            row = con.execute("select kind from events where id=?",
+                              (eid,)).fetchone()
+            if row and not scope_ok(con, device_of(
+                    con, self.headers.get("Authorization")), row["kind"]):
+                print(log_line("POST", p.path, 403), flush=True)
+                return self.отлуп(
+                    403, "устройству не разрешён вид «%s»" % row["kind"])
             code, out = ingest_audio(con, self.server.root,
-                                     (q.get("event") or [""])[0], self.rfile, n)
+                                     eid, self.rfile, n)
             print(log_line("POST", p.path, code), flush=True)
             return self.say(code, out)
         if n > MAX_JSON:
@@ -396,6 +488,11 @@ class Handler(BaseHTTPRequestHandler):
                     "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
+            if not scope_ok(con, data["device_id"], kind):
+                print(log_line("POST", p.path, 403, data), flush=True)
+                # не `отлуп`: тело уже вычитано целиком, а он слил бы ещё
+                # столько же и повис бы, ожидая байты, которых не будет
+                return self.say(403, {"error": "устройству не разрешён вид «%s»" % kind})
             if kind == "correction":
                 import call_project
                 err = call_project.check_correction(data.get("payload") or {})
@@ -729,6 +826,17 @@ def self_check():
     con = mi.connect(root)
     dev, token = pair(con, "self-check")
     assert device_of(con, "Bearer " + token) == dev, "токен не опознан"
+    assert scope_ok(con, dev, "call"), "null в scopes обязан пускать всё"
+    set_scopes(con, dev, ["call"])
+    assert scope_ok(con, dev, "call") and not scope_ok(con, dev, "message"), \
+        "allowlist не проверяется"
+    set_scopes(con, dev, [])
+    assert not scope_ok(con, "нет такого", "call"), "неизвестное устройство пущено"
+    try:
+        set_scopes(con, dev, ["call correction"])
+        raise AssertionError("вид с пробелом записан")
+    except ValueError:
+        pass
     revoke(con, dev)
     assert device_of(con, "Bearer " + token) is None, "отозванный токен пущен"
     with urllib.request.urlopen(base + "/healthz", timeout=5) as r:
@@ -748,7 +856,7 @@ def self_check():
     return 0
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="приём событий Mara Ambient Memory")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--port", type=int, default=int(os.environ.get("MARA_PORT", 8788)))
@@ -758,8 +866,14 @@ def main():
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--pair", metavar="ИМЯ")
     ap.add_argument("--revoke", metavar="ID")
+    ap.add_argument("--scopes", metavar="ID", help="показать allowlist устройства")
+    ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
+                    help="задать allowlist: `--allow ID вид вид`; "
+                         "`--allow ID` снимает ограничение (и только так); "
+                         "`--allow ID @history` берёт виды из событий за 30 "
+                         "дней, а при пустой истории ничего не меняет")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if a.self_check:
         return self_check()
     mi.ROOT = a.root
@@ -773,6 +887,38 @@ def main():
         row = revoke(con, a.revoke)
         print("отозвано %s" % a.revoke if row else "нет такого устройства")
         return 0 if row else 1
+    if a.scopes:
+        con = mi.connect(a.root)
+        row = con.execute("select scopes from devices where id=?",
+                          (a.scopes,)).fetchone()
+        if not row:
+            print("нет такого устройства"); return 1
+        print(row["scopes"] if row["scopes"] is not None else "без ограничения (null)")
+        return 0
+    if a.allow:
+        con = mi.connect(a.root)
+        dev, kinds = a.allow[0], a.allow[1:]
+        if kinds == ["@history"]:
+            kinds = scopes_from_history(con, dev)
+            if not kinds:
+                # Тридцать дней тишины — не разрешение. Если список уже задан,
+                # `@history` его не снимает: молчавшее устройство иначе
+                # открылось бы обратно само, без чьего-либо решения.
+                row = con.execute("select scopes from devices where id=?",
+                                  (dev,)).fetchone()
+                if not row:
+                    print("нет такого устройства"); return 1
+                print("событий за 30 дней нет — список не трогаю (%s)" %
+                      ("null" if row["scopes"] is None else row["scopes"]))
+                return 0
+        try:
+            found, val = set_scopes(con, dev, kinds)
+        except ValueError as e:
+            print("не записал: %s" % e); return 1
+        if not found:
+            print("нет такого устройства"); return 1
+        print("%s: %s" % (dev, val if val is not None else "без ограничения (null)"))
+        return 0
     if a.serve:
         return serve(a.root, a.port, a.bind)
     ap.print_help()

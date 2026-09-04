@@ -28,7 +28,7 @@ PIPELINE_VERSION = 1
 SCHEMA = """
 create table if not exists devices(
   id text primary key, name text, token_sha256 text not null,
-  created text, last_seen text, revoked_at text);
+  created text, last_seen text, revoked_at text, scopes text);
 create table if not exists events(
   id text primary key, kind text, source text, source_id text,
   dedupe_key text unique, device_id text, received text, occurred text,
@@ -121,6 +121,20 @@ def connect(root=None):
     con.row_factory = sqlite3.Row
     con.execute("pragma journal_mode=wal")
     con.executescript(SCHEMA)
+    # Аддитивные миграции. `create table if not exists` существующую таблицу не
+    # трогает, поэтому колонки, появившиеся позже, добавляются здесь и по одной.
+    # Дешевле отдельного миграционного скрипта: выполняется на каждом открытии,
+    # идемпотентно, и база на doctor доезжает сама при первом же рестарте.
+    have = {r["name"] for r in con.execute("pragma table_info(devices)")}
+    if "scopes" not in have:                       # ADR-0009, откат п. 2
+        try:
+            con.execute("alter table devices add column scopes text")
+        except sqlite3.OperationalError as e:
+            # Два процесса открылись разом и оба увидели, что колонки нет.
+            # Тот, кто пришёл вторым, получает `duplicate column name` —
+            # это не ошибка, а ровно тот результат, которого он и хотел.
+            if "duplicate column" not in str(e).lower():
+                raise
     return con
 
 
