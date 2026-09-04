@@ -107,6 +107,15 @@ ASR и извлечение нельзя гонять параллельно (VR
 сырыми байтами. Сервер считает sha256 полученного и при расхождении отвечает `409` и
 удаляет частичный файл. Расхождение хеша успехом не считается (ТЗ §20).
 
+Событие при `409` переводится из `new` в `stale` и больше никого не ждёт: телефон на этот код
+пересчитывает файл с начала, а дописанный за время чтения файл даёт другой хеш —
+другой `source_id`, другой ключ дедупа, новая строка. Долить старую уже некому, и
+`stale` нужен ровно чтобы она не поднимала «запись не долита» каждый час до конца
+времён. Обратный ход остался: если хеш не изменился (порча в канале при неизменном
+файле), телефон попадёт по дедупу в ту же строку и дольёт её — приём блоба принимает
+и `new`, и `stale`. Условие `where state='new'` у перевода намеренное: параллельно успевшую
+заливку (событие уже `stored`) поздний `409` не отменяет.
+
 ---
 
 ## 3. contextd: процесс и поверхность
@@ -139,6 +148,8 @@ devices  (id, name, token_sha256, created, last_seen, revoked_at)
 events   (id, kind, source, source_id, dedupe_key UNIQUE, device_id,
           received, occurred, ended, classification, payload_json,
           blob_sha256, state)
+-- events.state: new → stored → transcribed → extracted → projected → done,
+-- плюс тупик stale (телефон объявил один хеш, а прислал байты с другим)
 jobs     (id, event_id, kind, state, attempts, next_at, last_error,
           created, updated, lease_until)
 blobs    (sha256 PRIMARY KEY, path, bytes, mime, created, pin,
@@ -405,7 +416,11 @@ JSONL-транскрипты и сырые уведомления остаютс
 `mara_ingest_queue_depth`, `mara_ingest_lag_seconds`, `mara_dlq_count`,
 `mara_transcription_queue_depth`, `mara_transcription_realtime_factor`,
 `mara_task_extraction_failures_total`, `mara_mobile_last_seen_seconds`,
-`mara_mobile_pending_uploads`. Остальные появятся вместе со своими источниками.
+`mara_mobile_pending_uploads`. Сверх списка ТЗ заведён `mara_ingest_stale_events`:
+он считает брошенные события, и его рост при каждом звонке обычно означает, что
+диктофон дописывает файл после того, как телефон его посчитал (порча в канале
+даёт то же самое, но не на каждом звонке). Остальные появятся вместе со
+своими источниками.
 
 `GET /healthz` и `contextd.py --self-check` дают человекочитаемый отчёт: доступность
 bigpc, глубина очереди, возраст последнего события, свободное место под блобы.

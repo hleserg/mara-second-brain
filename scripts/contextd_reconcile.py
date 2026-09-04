@@ -81,7 +81,7 @@ def блоб_без_манифеста(con, root):
 
 
 def запись_без_расшифровки(con, root):
-    """Событие доведено до `stored`, а работы `asr` нет вовсе — поставить.
+    """Запись принята, а работы `asr` нет вовсе — поставить.
 
     Дыра §5.2 в чистом виде. `finish_stored` переводит состояние, потом пишет
     манифест, потом ставит работу — тремя отдельными коммитами, транзакции
@@ -92,20 +92,54 @@ def запись_без_расшифровки(con, root):
 
     Пропавший манифест чинится не здесь: собрать его заново — это дело демона,
     у которого лежит payload. Сверка о нём докладывает.
+
+    Признак принятой записи — невычищенная строка в `blobs`, а не состояние
+    события, поэтому берём `stored`, `new` и `stale` одинаково: `join blobs`
+    и `purged_at is null` для всех трёх. Пара «блоб есть, событие не
+    сдвинулось» получается, если демон умер между `insert into blobs` и
+    переводом состояния, а ещё — если после выката откатили один только
+    демон: старый `finish_stored` знает лишь `state='new'`, на `stale`
+    промолчит и всё равно ответит телефону 200. До этой правки такую строку
+    не видел никто: `запись_не_долита` ищет отсутствие блоба, а блоб-то как
+    раз есть. `call_asr` доведёт состояние до `transcribed` сам, поэтому
+    чинить достаточно постановкой работы.
+
+    Вычищенное ретеншеном сюда не попадает намеренно — раньше `stored` без
+    блоба получал работу и уходил в DLQ на пустом месте. По той же причине
+    работа не ставится, если строка есть, а файла по её пути нет. Пропажу
+    записи, которую не вычищали, ловит `манифест_без_блоба`.
+
+    Известное ограничение, не заведённое этой веткой: проверка манифеста
+    живёт в этом же цикле, поэтому после успешной расшифровки (состояние
+    ушло в `transcribed`) пропавший манифест больше не находится. Так было и
+    до правки, разбирается отдельно.
     """
     out = []
     # `fetchall` не для удобства: `add_job` ниже пишет, а запись под
     # недочитанным курсором в WAL упирается в снимок и валит весь часовой
     # прогон крона `database is locked` — ровно тогда, когда чинить и надо
-    for r in con.execute("select id from events where state='stored' "
-                         "and blob_sha256 is not null order by id").fetchall():
+    for r in con.execute(
+            "select e.id, b.path from events e "
+            "join blobs b on b.sha256=e.blob_sha256 "
+            "where b.purged_at is null and e.state in ('stored','new','stale') "
+            "order by e.id").fetchall():
         eid = r["id"]
         if not os.path.exists(mi.manifest_path(root, eid)):
-            out.append(находка("манифест-не-дописан", "warn",
-                               "событие %s доведено до stored без манифеста" % eid,
-                               event_id=eid))
+            out.append(находка(
+                "манифест-не-дописан", "warn",
+                "у события %s принята запись, манифеста нет" % eid,
+                event_id=eid))
         if con.execute("select 1 from jobs where event_id=? and kind='asr'",
                        (eid,)).fetchone():
+            continue
+        if not (r["path"] and os.path.exists(r["path"])):
+            # строка в `blobs` — ещё не файл: ретеншен удаляет запись и только
+            # потом ставит `purged_at` (`blob_retention.py:82-87`), и смерть
+            # между этими двумя шагами оставляет строку живой при пустом
+            # диске. Работа на таком событии не расшифруется никогда
+            # (`call_asr.py:121-122` требует существующий путь) — только займёт
+            # очередь и уйдёт в DLQ. Пропажу докладывает `манифест_без_блоба`,
+            # а событие без манифеста уже названо находкой выше
             continue
         mi.add_job(con, eid, "asr")
         out.append(находка("расшифровка-поставлена", "fixed",
@@ -234,10 +268,17 @@ def источник_замолчал(con, days=3, fresh_hours=24):
 def запись_не_долита(con, hours=24):
     """Телефон объявил звонок с записью, а сама запись за сутки не пришла —
     очередь загрузки на телефоне против серверной базы (ТЗ §17). Свежий
-    звонок ещё может долиться с плохой сети, поэтому порог в сутки."""
+    звонок ещё может долиться с плохой сети, поэтому порог в сутки.
+
+    Брошенные (`stale`) сюда не попадают: там телефон уже ушёл заводить новое
+    событие, доливать нечего, и такая находка не погасла бы никогда — а
+    вечное предупреждение заслоняет ровно то, ради чего эта проверка и
+    заведена. Их считает `mara_ingest_stale_events`."""
     rows = con.execute(
-        "select e.id, e.received from events e left join blobs b on b.sha256=e.blob_sha256 "
-        "where e.blob_sha256 is not null and b.sha256 is null order by e.received").fetchall()
+        "select e.id, e.received from events e "
+        "left join blobs b on b.sha256=e.blob_sha256 "
+        "where e.blob_sha256 is not null and b.sha256 is null "
+        "and e.state!='stale' order by e.received").fetchall()
     старые = [r["id"] for r in rows if (_возраст(r["received"]) or 0) > hours * 3600]
     if not старые:
         return []
@@ -441,6 +482,40 @@ def self_check():
     con.execute("update events set received=? where id=?", (давно, eid))
     z = запись_не_долита(con)
     assert z and z[0]["count"] == 1 and z[0]["sample"] == [eid], z
+    # брошенное событие не должно звенеть вечно
+    con.execute("update events set state='stale' where id=?", (eid,))
+    assert запись_не_долита(con) == [], "брошенную запись доливать некому"
+    # но если блоб всё-таки лёг, а состояние не сдвинулось (откат демона,
+    # смерть между insert и переводом) — расшифровку обязаны поставить
+    sid, _ = mi.put_event(con, {"kind": "call", "source": "sc",
+                                "source_id": "2",
+                                "blob": {"sha256": "e" * 64, "ext": "m4a"}})
+    есть_asr = lambda: con.execute(
+        "select 1 from jobs where event_id=? and kind='asr'", (sid,)).fetchone()
+    con.execute("update events set state='stale' where id=?", (sid,))
+    запись_без_расшифровки(con, root)
+    assert not есть_asr(), "блоба ещё нет — работе неоткуда взяться"
+    путь = os.path.join(root, "есть.m4a")
+    con.execute("insert into blobs(sha256,path,bytes,mime,created) "
+                "values(?,?,?,?,?)",
+                ("e" * 64, путь, 1, "audio", mi.now_iso()))
+    run(con, root, vault=None)
+    assert not есть_asr(), "строка в blobs — ещё не файл"
+    open(путь, "wb").write(b"a")
+    run(con, root, vault=None)
+    assert есть_asr(), "принятая запись осталась без расшифровки"
+    # вычищенное ретеншеном работу не получает: расшифровывать нечего, а
+    # раньше `stored` без блоба уходил в DLQ на пустом месте
+    con.execute("delete from jobs where event_id=?", (sid,))
+    con.execute("update events set state='stored' where id=?", (sid,))
+    con.execute("update blobs set purged_at=? where sha256=?",
+                (mi.now_iso(), "e" * 64))
+    run(con, root, vault=None)
+    assert not есть_asr(), "у вычищенной записи расшифровывать нечего"
+    con.execute("delete from jobs where event_id=?", (sid,))
+    con.execute("delete from events where id=?", (sid,))
+    con.execute("delete from blobs where sha256=?", ("e" * 64,))
+    con.execute("update events set state='new' where id=?", (eid,))
     assert текст([]) is None and текст([находка("x", "fixed", "починено")]) is None, \
         "без проблем в канал не пишем"
     assert "проблем 1" in текст([находка("x", "warn", "беда")])
