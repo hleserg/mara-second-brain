@@ -75,10 +75,15 @@ class Сверка(unittest.TestCase):
         open(os.path.join(self.цель, "core-2026-09-04.tar.gz.gpg"), "wb").write(b"gpg")
         self.старый_root = mi.ROOT
         mi.ROOT = self.tmp
+        # Отметку уводим во временный каталог: иначе сверка читает боевую
+        # отметку хозяина машины, и тест зависит от того, что там лежит.
+        self.боевая_отметка = mi.ОТМЕТКА_НОСИТЕЛЕЙ
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = os.path.join(self.tmp, "core-targets.json")
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
     def tearDown(self):
         mi.ROOT = self.старый_root
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.боевая_отметка
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
@@ -100,7 +105,8 @@ class Сверка(unittest.TestCase):
     def test_свежий_архив_на_корневой_фс_это_находка(self):
         f = rc.бэкап_ядра([self.цель])
         self.assertEqual([(x["check"], x["level"]) for x in f],
-                         [("бэкап-ядра-носители", "warn")],
+                         [("бэкап-ядра-носители", "warn"),
+                          ("бэкап-ядра-копий-ноль", "warn")],
                          "свежий архив на том же диске зачтён за бэкап")
 
 

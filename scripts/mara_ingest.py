@@ -24,6 +24,13 @@ from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
 ROOT = os.environ.get("MARA_BLOBS", "/srv/mara-blobs")
+STATE = os.environ.get("MARA_STATE",
+                       os.path.expanduser("~/.local/state/mara"))
+# Отметка носителей: пишет её `core-backup.py`, читает `contextd_reconcile.py`.
+# Имя здесь, а не по литералу с каждой стороны: разъехавшись, они не ломают
+# ни один тест — писатель пишет, читатель читает пустоту, и весь механизм
+# отвала молчит при зелёном гейте.
+ОТМЕТКА_НОСИТЕЛЕЙ = os.path.join(STATE, "core-targets.json")
 LEASE_SEC = 600                            # упавший воркер не держит работу вечно
 RETRY = [0, 60, 300, 1800, 7200, 43200]    # ТЗ §17, после последней — DLQ
 PIPELINE_VERSION = 1
@@ -321,6 +328,32 @@ def write_json(path, data):
     return path
 
 
+def носители(строка):
+    """Разбор списка носителей из env: пути через пробел.
+
+    Пробел внутри пути не поддерживается и поддержан быть не может — тем же
+    пробелом разделяется список. Молча такой путь распадается на два
+    несуществующих, запись на них пропускается по `continue`, и третьей копии
+    по §12 нет без единого внятного сообщения.
+
+    Относительный кусок — самый частый признак этой беды, но не единственно
+    возможный: `/mnt/Мой /диск` распадается на два абсолютных пути и проходит
+    заставу молча. Ловим то, что ловится; полностью закрыть дыру можно только
+    сменой разделителя, а он записан в env на живой машине.
+
+    ValueError, а не SystemExit: сверке падать нельзя — из-за опечатки в одной
+    переменной она унесла бы все остальные находки. Кто как реагирует, решает
+    вызывающий: бэкап отказывается писать, сверка докладывает находкой.
+    """
+    пути = [os.path.normpath(p) for p in строка.split()]
+    кривые = [p for p in пути if not p.startswith("/")]
+    if кривые:
+        raise ValueError("носители: %s — путь не абсолютный; список носителей "
+                         "разделяется пробелами, пробел внутри пути не "
+                         "поддерживается" % " ".join(кривые))
+    return пути
+
+
 def смонтирован(target, root):
     """Лежит ли `target` на устройстве, отличном от устройства `root`.
 
@@ -403,6 +436,13 @@ def self_check():
     assert con.execute("select state from jobs where id=?", (jid,)).fetchone()[0] == "done"
     assert blob_path(d, "c" * 64, "m4a").endswith("c" * 64 + ".m4a")
     assert next_delay(0) == 0 and 48 <= next_delay(1) <= 72, "расписание ретраев"
+    assert носители(" /mnt/a  /mnt/b ") == ["/mnt/a", "/mnt/b"]
+    assert носители("/mnt/a/") == ["/mnt/a"], "хвостовой слэш даёт второй ключ"
+    try:
+        носители("/mnt/мой диск")
+        raise AssertionError("пробел в пути прошёл молча")
+    except ValueError as e:
+        assert "не абсолютный" in str(e), str(e)
     print("mara_ingest self-check: ок")
     return 0
 
