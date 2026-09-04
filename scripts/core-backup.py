@@ -181,9 +181,19 @@ def проверка(target, пароль, root, имя=None):
             if утечка:
                 raise RuntimeError("проверка: в архиве секреты %s" % утечка[:3])
         db = os.path.join(tmp, "contextd.db")
+        if not os.path.exists(db):
+            # именно до connect: после него файл уже создан, и проверять нечего
+            raise RuntimeError("проверка: в архиве нет contextd.db")
         con = sqlite3.connect(db)
         try:
             ц = con.execute("pragma integrity_check").fetchone()[0]
+        except sqlite3.DatabaseError as e:
+            # На одной сборке sqlite порченая страница возвращается строкой, на
+            # другой — бросается. Проверено: 3.46.1 отдаёт «Tree N page N:
+            # btreeInitPage() returns error code 11», сборка на CI бросает
+            # «database disk image is malformed». Разница версии, не бэкапа, и
+            # сторож обязан сработать одинаково на обеих.
+            ц = str(e)
         finally:
             con.close()
         if ц != "ok":
@@ -323,6 +333,39 @@ def ротация(target, keep):
             os.unlink(старый)
 
 
+def подделка(root, work, пароль, dst, порча):
+    """Архив с намеренным дефектом: `порча(копия_бд, дерево, манифест)` правит
+    распакованное содержимое перед упаковкой. Нужен, чтобы сторожа внутри
+    `проверка` срабатывали на стенде, а не впервые на живом носителе."""
+    stage = tempfile.mkdtemp(prefix="core-bad.", dir=work)
+    try:
+        копия = os.path.join(stage, "contextd.db")
+        снимок(os.path.join(root, "contextd.db"), копия)
+        дерево = os.path.join(stage, "root")
+        файлы = {"contextd.db": sha(копия)}
+        for rel, p in мелочь(root):
+            куда = os.path.join(дерево, rel)
+            os.makedirs(os.path.dirname(куда), exist_ok=True)
+            shutil.copy2(p, куда)
+            файлы[rel] = sha(p)
+        м = {"counts": счётчики(копия), "files": файлы}
+        порча(копия, дерево, м)
+        путь_м = os.path.join(stage, "manifest.json")
+        with open(путь_м, "w", encoding="utf-8") as fh:
+            json.dump(м, fh, ensure_ascii=False)
+        tar = os.path.join(stage, "core.tar.gz")
+        with tarfile.open(tar, "w:gz") as tf:
+            tf.add(копия, arcname="contextd.db")
+            tf.add(путь_м, arcname="manifest.json")
+            for каталог, _, имена in os.walk(дерево):
+                for f in sorted(имена):
+                    полный = os.path.join(каталог, f)
+                    tf.add(полный, arcname=os.path.relpath(полный, дерево))
+        шифр(tar, dst, пароль)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def самопроверка():
     """Полный круг на игрушечном корне: бэкап, зеркало, разворачивание.
 
@@ -361,20 +404,73 @@ def самопроверка():
         общее = dict(root=root, targets=[target], пароль=пароль, keep=2,
                      work=os.path.join(tmp, "work"))
 
+        # Главная гарантия скрипта — согласованная копия под живым демоном —
+        # до сих пор не проверялась ничем. Плоское копирование WAL-базы даёт
+        # файл самосогласованный, но пустой, и ни один сторож этого не увидит:
+        # счётчики манифеста считаются с той же копии, то есть ноль сверяется с
+        # нулём. Пишем строку и не закрываем писателя — она остаётся в WAL,
+        # куда простое копирование не заглядывает.
+        писатель = mi.connect(root)
+        писатель.execute("insert into events(id,kind,dedupe_key,state)"
+                         " values('e2','call','k2','done')")   # mi автокоммит
+
         r = прогон(**общее)
+        писатель.close()
+        assert r["проверка"]["счётчики"]["events"] == 2, r
+        # Число жёсткое, а не `len(мелочь(root)) + 1`: `мелочь()` строит и
+        # содержимое архива, и манифест, так что сверка их друг с другом
+        # усечения списка каталогов не видит — манифест тут не оракул.
+        assert r["проверка"]["файлов"] == 4, r    # база, манифест, мелочь ×3
         assert r["носители"] == [target], r
         assert r["аудио"]["новых"] == 1, r
         assert r["проверка"]["счётчики"]["blobs"] == 1, r
         assert r["проверка"]["аудио_сверено"] == 1, r
 
+        # Сайдкар лежит на сетевой шаре открытым текстом. Имена файлов мелочи —
+        # это id событий, и полный манифест туда выкладывать нельзя (ТЗ §18).
+        рядом = json.load(open(os.path.join(target, r["архив"].replace(
+            ".tar.gz.gpg", ".manifest.json")), encoding="utf-8"))
+        assert set(рядом) == {"архив", "байт", "sha256", "created",
+                              "counts"}, sorted(рядом)
+        # сайдкар — единственный способ проверить архив на шаре, не расшифровав
+        # его; значит и хеш в нём должен быть от шифротекста, а не от
+        # плейнтекста
+        лежит = os.path.join(target, r["архив"])
+        assert рядом["sha256"] == sha(лежит), рядом["sha256"]
+        assert рядом["байт"] == os.path.getsize(лежит), рядом["байт"]
+
         r2 = прогон(**общее)
         assert r2["аудио"]["новых"] == 0, "уже зашифрованное аудио перешифровано"
+
+        # Два сторожа `проверить_аудио` доступны только пока зеркало живое, то
+        # есть до ретеншена ниже: после него сверять нечего и оба молчат.
+        зерк = os.path.join(target, os.path.relpath(p, root) + ".gpg")
+        assert oct(os.stat(зерк).st_mode & 0o777) == oct(0o600), зерк
+        os.unlink(зерк)
+        try:
+            проверка(target, пароль, root)
+            raise AssertionError("зеркало без файла прошло проверку")
+        except RuntimeError as e:
+            assert "нет в зеркале" in str(e), str(e)
+        не_то = os.path.join(root, "manifests", "e1.json")
+        шифр(не_то, зерк, пароль)       # файл на месте, но внутри не то аудио
+        try:
+            проверка(target, пароль, root)
+            raise AssertionError("чужое аудио в зеркале прошло проверку")
+        except RuntimeError as e:
+            assert "расшифровалось не тем" in str(e), str(e)
+        os.unlink(зерк)
+        вернули = зеркало_аудио(os.path.join(root, "contextd.db"), root,
+                                target, пароль)
+        assert вернули["новых"] == 1, вернули
 
         # ретеншен вычистил запись — из зеркала она обязана уйти
         con = mi.connect(root)
         con.execute("update blobs set purged_at=?", (mi.now_iso(),))
         con.close()
-        os.unlink(p)
+        # Файл намеренно оставляем на месте: если убрать и его, снятый фильтр
+        # `purged_at is null` в `проверить_аудио` станет неотличим от целого —
+        # сверять будет нечего в обоих случаях.
         r3 = прогон(**общее)
         assert r3["аудио"]["убрано_вычищенных"] == 1, r3
         assert r3["проверка"]["аудио_сверено"] == 0, r3
@@ -382,8 +478,73 @@ def самопроверка():
         for f in glob.glob(os.path.join(target, "core-*")):
             assert oct(os.stat(f).st_mode & 0o777) == oct(0o600), f
 
-        # ротация: на носителе не больше keep архивов
-        assert len(glob.glob(os.path.join(target, "core-*.tar.gz.gpg"))) <= 2
+        # Ротация: три прогона выше пишут один и тот же файл — дата в имени
+        # у них общая, — так что вытеснять ротации было нечего ни разу.
+        # Проверяем её отдельно, на подставных именах.
+        катр = os.path.join(tmp, "rot")
+        os.makedirs(катр)
+        for дата in ("2020-01-01", "2020-01-02", "2020-01-03"):
+            for хвост in (".tar.gz.gpg", ".manifest.json"):
+                open(os.path.join(катр, "core-" + дата + хвост), "w").close()
+        ротация(катр, 2)
+        осталось = sorted(os.path.basename(f)
+                          for f in glob.glob(os.path.join(катр, "core-*")))
+        assert осталось == ["core-2020-01-02.manifest.json",
+                            "core-2020-01-02.tar.gz.gpg",
+                            "core-2020-01-03.manifest.json",
+                            "core-2020-01-03.tar.gz.gpg"], осталось
+
+        # Сторожа внутри `проверка` — утечка секретов, целостность базы,
+        # счётчики, хеши файлов — до сих пор не срабатывали ни разу: порченый
+        # архив ниже валится ещё на gpg, и дальше расшифровки дело не идёт.
+        # Собираем архив с ровно одним дефектом на сторожа и ждём именно свой:
+        # вариант, упавший не на том стороже, иначе зачёлся бы как успех.
+        def утечка(копия, дерево, м):
+            os.makedirs(os.path.join(дерево, "tdlib"))
+            open(os.path.join(дерево, "tdlib", "token.json"), "w").write("сек")
+
+        def гниль(копия, дерево, м):
+            k = sqlite3.connect(копия)
+            страница = k.execute("pragma page_size").fetchone()[0]
+            k.close()
+            # Байт типа страницы в мусор — так порча попадает в живую страницу
+            # с blobs, а не в пустое место, где integrity_check её не заметит.
+            номер = open(копия, "rb").read().find(s.encode()) // страница
+            assert номер > 0, "sha не нашлась в базе"
+            with open(копия, "r+b") as fh:
+                fh.seek(номер * страница)
+                fh.write(b"\x7f")
+            # иначе порча ломает два сторожа сразу — и целостность, и хеш базы,
+            # а сверка хеша самой базы остаётся без отрицательного входа
+            м["files"]["contextd.db"] = sha(копия)
+
+        def разошлись(копия, дерево, м):
+            м["counts"]["blobs"] += 1
+
+        def подменён(копия, дерево, м):
+            open(os.path.join(дерево, "manifests", "e1.json"), "w").write("{ }")
+
+        def база_не_та(копия, дерево, м):
+            м["files"]["contextd.db"] = "0" * 64
+
+        плохие = os.path.join(tmp, "плохие")
+        os.makedirs(плохие)
+        имя_п = "core-1999-01-01.tar.gz.gpg"
+        # контроль: без порчи подделка обязана пройти, иначе падения ниже
+        # доказывают не порчу, а расхождение сборки архива с боевой
+        подделка(root, tmp, пароль, os.path.join(плохие, имя_п),
+                 lambda *a: None)
+        проверка(плохие, пароль, root, имя=имя_п)
+        for порча, слово in ((утечка, "секреты"), (гниль, "битая"),
+                             (разошлись, "счётчики"),
+                             (подменён, "manifests/e1.json не совпал"),
+                             (база_не_та, "contextd.db не совпал")):
+            подделка(root, tmp, пароль, os.path.join(плохие, имя_п), порча)
+            try:
+                проверка(плохие, пароль, root, имя=имя_п)
+                raise AssertionError("%s: проверка промолчала" % слово)
+            except RuntimeError as e:
+                assert слово in str(e), (слово, str(e))
 
         # порченый архив обязан валить проверку, а не молчать
         свежий = sorted(glob.glob(os.path.join(target, "core-*.tar.gz.gpg")))[-1]
@@ -396,6 +557,32 @@ def самопроверка():
         except (RuntimeError, subprocess.CalledProcessError, tarfile.TarError,
                 OSError):
             pass
+        # `mode=ro` в `снимок` держит бэкап подальше от боевого файла: rw-
+        # соединение на закрытии чекпойнтит WAL, то есть пишет в базу.
+        # Состояние, в котором это видно, ровно одно: соединений к базе нет,
+        # а WAL непустой — то есть демон упал не закрывшись. Как раз тот
+        # случай, ради которого в `снимок` написана ветка отката на запись.
+        дитя = ("import sys, os; sys.path.insert(0, %r);"
+                " import mara_ingest as mi; c = mi.connect(sys.argv[1]);"
+                " c.execute(\"insert into events(id,kind,dedupe_key,state)"
+                " values('e3','call','k3','done')\"); os._exit(0)"
+                % os.path.dirname(os.path.abspath(__file__)))
+        subprocess.run([sys.executable, "-c", дитя, root], check=True)
+        живая = os.path.join(root, "contextd.db")
+
+        def на_диске():
+            # Хеш, а не размер с mtime: PASSIVE-чекпойнт переписывает базу
+            # тем же размером и WAL не трогает, так что от записи остаётся один
+            # только mtime — а он зависит от гранулярности ФС, не от бэкапа.
+            # None за пропавший файл, а не исключение: снёсший WAL мутант обязан
+            # падать на assert ниже, а не чужим FileNotFoundError отсюда.
+            return [sha(f) if os.path.exists(f) else None
+                    for f in (живая, живая + "-wal")]
+
+        было_на_диске = на_диске()
+        снимок(живая, os.path.join(tmp, "ro.db"))
+        assert на_диске() == было_на_диске, "снимок написал в боевую базу"
+
         print("core-backup: самопроверка ок")
     finally:
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
