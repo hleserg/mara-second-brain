@@ -110,5 +110,80 @@ class Ingest(unittest.TestCase):
         self.assertEqual(self.con.execute("select id from events").fetchone()["id"], eid)
 
 
+class ГонкаЗаАренду:
+    """Соединение, пускающее второго воркера ровно между `select` и `update`.
+
+    Иначе гонку не поймать: она живёт в микросекундах между двумя запросами, и
+    тест на потоках зеленел бы через раз. Здесь окно открывается руками.
+    """
+
+    def __init__(self, con, второй=None, в_щели=None):
+        self.con, self.второй, self.влез = con, второй, False
+        self.в_щели = в_щели
+
+    def execute(self, sql, args=()):
+        if sql.startswith("update jobs set lease_until") and not self.влез:
+            self.влез = True
+            if self.в_щели:
+                self.в_щели(self.con)
+            else:
+                mi.claim_job(self.второй)
+        return self.con.execute(sql, args)
+
+
+class Работы(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.con = mi.connect(self.dir)
+        self.eid, _ = mi.put_event(self.con, dict(EV))
+
+    def test_аренду_не_получают_двое_в_одну_щель(self):
+        mi.add_job(self.con, self.eid, "asr")
+        второй = mi.connect(self.dir)
+        гонка = ГонкаЗаАренду(self.con, второй)
+        self.assertIsNone(mi.claim_job(гонка),
+                          "работа выдана обоим: аренда взята без проверки")
+        self.assertTrue(гонка.влез, "щель не открылась — тест ничего не проверил")
+
+    def test_доигравшему_не_выдают_уже_отработавшую(self):
+        # аренда истекла на середине транскрипта, второй воркер работу выбрал,
+        # а первый в этот момент доиграл: `finish_job` ставит `done` и сбрасывает
+        # `lease_until` в ноль, не глядя на аренду. По одному `lease_until<?`
+        # второй увидел бы `0 < now` и час GPU ушёл бы на уже сделанное
+        jid = mi.add_job(self.con, self.eid, "asr")
+        гонка = ГонкаЗаАренду(self.con, в_щели=lambda c: c.execute(
+            "update jobs set state='done', lease_until=0 where id=?", (jid,)))
+        self.assertIsNone(mi.claim_job(гонка),
+                          "выдана отработавшая работа: в аренде нет проверки state")
+        self.assertTrue(гонка.влез, "щель не открылась — тест ничего не проверил")
+
+    def test_вторая_работа_того_же_вида_не_заводится(self):
+        a = mi.add_job(self.con, self.eid, "asr")
+        b = mi.add_job(self.con, self.eid, "asr")
+        self.assertEqual(a, b, "повтор должен вернуть ту же работу")
+        self.assertEqual(1, self.con.execute(
+            "select count(*) from jobs where event_id=? and kind='asr'",
+            (self.eid,)).fetchone()[0], "вторая расшифровка — второй час GPU")
+
+    def test_работы_разных_видов_не_мешают_друг_другу(self):
+        mi.add_job(self.con, self.eid, "asr")
+        mi.add_job(self.con, self.eid, "extract")
+        self.assertEqual(2, self.con.execute(
+            "select count(*) from jobs where event_id=?", (self.eid,)).fetchone()[0])
+
+    def test_поверх_отработавшей_работа_ставится_заново(self):
+        jid = mi.add_job(self.con, self.eid, "asr")
+        self.con.execute("update jobs set state='done' where id=?", (jid,))
+        новая = mi.add_job(self.con, self.eid, "asr")
+        self.assertNotEqual(jid, новая,
+                            "починка руками поверх done не должна блокироваться")
+
+    def test_поверх_брошенной_в_dlq_тоже(self):
+        jid = mi.add_job(self.con, self.eid, "asr")
+        self.con.execute("update jobs set state='dlq' where id=?", (jid,))
+        self.assertNotEqual(jid, mi.add_job(self.con, self.eid, "asr"),
+                            "сверка чинит именно dlq — ей нельзя мешать")
+
+
 if __name__ == "__main__":
     unittest.main()
