@@ -250,6 +250,23 @@ def audio_until(days=None):
     return (datetime.now(mi.TZ) + timedelta(days=days)).date().isoformat()
 
 
+def job_view(row, loopback):
+    """Строка `jobs` наружу.
+
+    `last_error` — хвост stderr шага, последние 500 символов (`run_step`
+    режет уже декодированный текст). Шаги
+    зовут `call_asr.py` и `call_extract.py`, а там в текст исключения попадают
+    пути и вывод ffmpeg; расшифровки аудит там не нашёл
+    (`docs/current-state-audit.md:239-244`), но канал существует и держится на
+    аккуратности. Закрываем канал, а не роут: роутом телефон проверяет свой
+    токен (`Api.kt:83-88`). ADR-0009, «Откат и миграция» п. 3.
+    """
+    d = dict(row)
+    if not loopback:
+        d.pop("last_error", None)
+    return d
+
+
 # --- HTTP -------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
@@ -332,8 +349,13 @@ class Handler(BaseHTTPRequestHandler):
         if p.path.startswith("/v1/jobs/"):
             row = con.execute("select id,kind,state,attempts,next_at,last_error "
                               "from jobs where id=?", (p.path[9:],)).fetchone()
-            return self.say(200 if row else 404,
-                            dict(row) if row else {"error": "нет такой работы"})
+            if not row:
+                return self.say(404, {"error": "нет такой работы"})
+            # проверка на петлю — по адресу сокета, как у /metrics: заголовком
+            # петлёй не притвориться (см. `клиент`). Обманул бы прокси на самом
+            # doctor; такого нет — KeenDNS живёт на роутере, отдельной коробкой
+            петля = self.client_address[0] in LOOPBACK
+            return self.say(200, job_view(row, петля))
         if p.path == "/v1/context/bootstrap":
             return self.say(200, bootstrap(con, self.server.vault))
         return self.say(404, {"error": "нет такого пути"})

@@ -100,6 +100,22 @@ class Api(unittest.TestCase):
         code, d = self.get("/v1/jobs/" + jid)
         self.assertEqual(code, 200)
         self.assertEqual(d["state"], "ready")
+        self.assertIn("last_error", d, "с петли отдаётся целиком")
+
+    def test_last_error_только_с_петли(self):
+        """Хвост stderr шага наружу не отдаём (ADR-0009, «Откат» п. 3).
+
+        Здесь — прямо у `job_view`, чтобы проверка не скипалась там, где
+        нет 127.0.0.2. Тот же состав ответа через живой HTTP с не-петлевого
+        адреса — в `ТестLastErrorНеИзЛокалки` ниже.
+        """
+        row = {"id": "j1", "kind": "asr", "state": "dlq", "attempts": 3,
+               "next_at": 0, "last_error": "ffmpeg: /srv/mara-blobs/ab/cd.m4a"}
+        self.assertIn("last_error", contextd.job_view(row, True))
+        наружу = contextd.job_view(row, False)
+        self.assertNotIn("last_error", наружу)
+        self.assertEqual(наружу["state"], "dlq", "остальные поля пропали")
+        self.assertIn("last_error", row, "исходную строку испортили")
 
     def test_статус_работы_требует_токен(self):
         code, _ = self.get("/v1/jobs/no-such-job", token="wrong-token")
@@ -448,6 +464,61 @@ class ТестМетрикиНеИзЛокалки(unittest.TestCase):
             код, тело = запрос("/healthz", "127.0.0.1")
             self.assertEqual(код, 200)
             self.assertIn("free_gb", json.loads(тело))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+class ТестLastErrorНеИзЛокалки(unittest.TestCase):
+    """`last_error` наружу не отдаётся (ADR-0009, «Откат и миграция» п. 3).
+
+    Приём тот же, что у `ТестМетрикиНеИзЛокалки`: сервер на 127.0.0.2, клиент
+    с исходного адреса 127.0.0.3. Наружу ничего не открывается, но демон видит
+    адрес не из `LOOPBACK` — то есть ровно то, чем для него выглядит телефон
+    из домашней локалки. Токен при этом верный: проверяем состав ответа, а не
+    доступ. Заодно закрываем контракт `tokenOk()` (`Api.kt`): несуществующая
+    работа с верным токеном отвечает 404, а не 401.
+    """
+
+    def test_снаружи_поля_нет_но_404_на_месте(self):
+        import http.client
+        root = tempfile.mkdtemp()
+        mi.ROOT = root
+        try:
+            srv = contextd.make_server(root, 0, host="127.0.0.2")
+        except OSError:
+            self.skipTest("в этом окружении нет 127.0.0.2")
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            con = mi.connect(root)
+            _, токен = contextd.pair(con, "тестовый телефон")
+            eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                        "source_id": "c9"})
+            jid = mi.add_job(con, eid, "asr")
+            con.execute("update jobs set last_error=? where id=?",
+                        ("ffmpeg: /srv/mara-blobs/ab/cd.m4a", jid))
+            con.commit()
+
+            def запрос(path, откуда="127.0.0.3"):
+                c = http.client.HTTPConnection("127.0.0.2", srv.server_address[1],
+                                               timeout=5, source_address=(откуда, 0))
+                c.request("GET", path,
+                          headers={"Authorization": "Bearer " + токен})
+                r = c.getresponse()
+                тело = r.read()
+                c.close()
+                return r.status, json.loads(тело or b"{}")
+
+            код, d = запрос("/v1/jobs/" + jid)
+            self.assertEqual(код, 200)
+            self.assertNotIn("last_error", d, "хвост stderr ушёл в локалку")
+            self.assertEqual(sorted(d), ["attempts", "id", "kind", "next_at",
+                                         "state"], "выпало не только last_error")
+            self.assertEqual(запрос("/v1/jobs/no-such-job")[0], 404,
+                             "телефон отличает свой токен по 404 против 401")
+            код, d = запрос("/v1/jobs/" + jid, "127.0.0.1")
+            self.assertEqual(код, 200)
+            self.assertIn("last_error", d, "с петли отдаётся целиком")
         finally:
             srv.shutdown()
             srv.server_close()
