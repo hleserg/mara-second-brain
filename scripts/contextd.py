@@ -244,12 +244,28 @@ def set_scopes(con, device_id, kinds):
 
 # --- логи и метрики ---------------------------------------------------------
 
+def безопасный_ключ(k):
+    """Имя поля из чужого json — в лог, но не как попало.
+
+    Ключ придумывает устройство, а не мы. Перевод строки в нём подделал бы
+    отдельную строку лога («-> 200» ниже настоящего отказа), а длинный текст,
+    положенный в *имя* поля, уехал бы в лог целиком — обход §18 через дверь,
+    которую никто не сторожил.
+    """
+    чисто = "".join(c if c.isprintable() and c != "," else "?" for c in k)
+    return чисто[:32]
+
+
 def log_line(method, path, code, payload=None, adr=None):
     """Строка лога без единого байта содержимого (ТЗ §18)."""
     extra = ""
     if isinstance(payload, dict):
-        keys = ",".join(sorted(k for k in payload if k != "payload"))
-        extra = " keys=%s" % keys if keys else ""
+        имена = sorted(безопасный_ключ(k) for k in payload if k != "payload")
+        if len(имена) > 20:
+            # мегабайт json — это десятки тысяч ключей, и строка лога стала бы
+            # больше самого запроса
+            имена = имена[:20] + ["+%d" % (len(имена) - 20)]
+        extra = " keys=%s" % ",".join(имена) if имена else ""
     if adr:
         extra += " from=%s" % adr
     return "%s %s %s -> %s%s" % (mi.now_iso(), method, path, code, extra)
@@ -427,7 +443,14 @@ class Handler(BaseHTTPRequestHandler):
         broken pipe вместо кода. Поэтому вычитываем в никуда, но не больше
         СЛИВ: отказ читать полгигабайта — половина смысла лимита.
         """
-        слить(self.rfile, min(длина(self) or 0, СЛИВ), Никуда())
+        try:
+            слить(self.rfile, min(длина(self) or 0, СЛИВ), Никуда())
+        except Exception:
+            # Клиент объявил длину и замолчал: `слить` упирается в `timeout` и
+            # бросает — а печатает у нас `say`, до которого тогда не доходило.
+            # Отказ уходил без единой строки, ровно та тишина, от которой
+            # чинили (#30). Сокет при этом жив, ответ уйдёт.
+            pass
         self.close_connection = True
         return self.say(code, {"error": текст}, closing=True, ещё=ещё)
 
@@ -562,7 +585,8 @@ class Handler(BaseHTTPRequestHandler):
                 sha = blob.get("sha256")
                 if kind != "call":
                     return self.say(
-                        400, {"error": "блоб бывает только у звонка"})
+                        400, {"error": "блоб бывает только у звонка"},
+                        поля=data)
                 if not (isinstance(sha, str) and len(sha) == 64
                         and all(c in "0123456789abcdef" for c in sha)):
                     # хеш идёт в имя файла и в сверку содержимого

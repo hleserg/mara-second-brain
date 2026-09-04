@@ -1544,10 +1544,19 @@ class ТестЛогОтказов(unittest.TestCase):
         self.assertEqual(len(строки), 1, строки)
 
     def test_keep_alive_не_переносит_поля_в_следующий_запрос(self):
-        """Обработчик живёт дольше запроса: имена полей не должны переезжать."""
+        """Обработчик живёт дольше запроса: имена полей не должны переезжать.
+
+        Первый запрос обязан быть отказом: на успехе `say` не печатает и
+        `поля` в нём не участвуют вовсе — тест ловил бы только одну из двух
+        мыслимых утечек (находка ревью).
+        """
         import http.client
         import contextlib
-        _, срв, токен = self.поднять()
+        каталог, срв, токен = self.поднять()
+        con = mi.connect(каталог)
+        dev = con.execute("select id from devices").fetchone()["id"]
+        contextd.set_scopes(con, dev, ["message"])
+        con.commit()
         лог = io.StringIO()
         c = http.client.HTTPConnection("127.0.0.1", срв.server_address[1], timeout=10)
         with contextlib.redirect_stdout(лог):
@@ -1555,7 +1564,9 @@ class ТестЛогОтказов(unittest.TestCase):
             c.request("POST", "/v1/ingest/event", тело,
                       {"Authorization": "Bearer " + токен,
                        "Content-Type": "application/json"})
-            c.getresponse().read()
+            первый = c.getresponse()
+            self.assertEqual(первый.status, 403)
+            первый.read()
             c.request("GET", "/v1/no-such", None,
                       {"Authorization": "Bearer " + токен})
             r = c.getresponse()
@@ -1565,6 +1576,64 @@ class ТестЛогОтказов(unittest.TestCase):
         строки = [s for s in лог.getvalue().splitlines() if "/v1/no-such" in s]
         self.assertEqual(len(строки), 1, лог.getvalue())
         self.assertNotIn("keys=", строки[0])
+
+    def test_замолчавший_клиент_всё_равно_оставляет_строку(self):
+        """Находка ревью: `отлуп` сначала сливает тело, и только потом отвечает.
+
+        Клиент объявил длину и замолчал — `слить` упирается в `timeout` и
+        бросает, а печатает `say`, до которого дело не доходило. Отказ снова
+        уходил без строки: ровно та тишина, ради которой всё и делалось.
+        """
+        import contextlib
+        import socket
+        _, срв, _ = self.поднять()
+        было = contextd.Handler.timeout
+        contextd.Handler.timeout = 1
+        лог = io.StringIO()
+        try:
+            s = socket.create_connection(("127.0.0.1", срв.server_address[1]), 10)
+            with contextlib.redirect_stdout(лог):
+                s.sendall(b"POST /v1/ingest/event HTTP/1.1\r\n"
+                          b"Host: x\r\nContent-Length: 1000\r\n\r\n")
+                s.settimeout(10)
+                ответ = s.recv(200)          # тела не шлём вовсе
+            s.close()
+        finally:
+            contextd.Handler.timeout = было
+        self.assertIn(b"401", ответ, ответ)
+        строки = [x for x in лог.getvalue().splitlines()
+                  if "/v1/ingest/event" in x]
+        self.assertEqual(len(строки), 1, лог.getvalue())
+
+    def test_блоб_не_у_звонка_пишет_имена_полей(self):
+        """Единственный отказ с разобранным json и без `keys=` (находка ревью)."""
+        _, срв, токен = self.поднять()
+        sha = hashlib.sha256(b"x").hexdigest()
+        код, строки = self.под_логом(
+            срв, "/v1/ingest/message",
+            json.dumps({"blob": {"sha256": sha}}).encode(), токен, "POST")
+        self.assertEqual(код, 400)
+        self.assertEqual(len(строки), 1, строки)
+        self.assertIn("keys=blob", строки[0])
+
+    def test_имя_поля_не_подделывает_строку_лога(self):
+        """Ключ придумывает устройство. Перевод строки в нём — вторая строка
+        лога с любым текстом; длинное имя — обход §18 через дверь без сторожа."""
+        длинный = "тайна" * 40
+        строка = contextd.log_line("POST", "/v1/ingest/event", 403, {
+            "device_id": "dev", "kind": "call",
+            "поле\nPOST /v1/ingest/event -> 200": 1,
+            длинный: 1})
+        self.assertEqual(len(строка.splitlines()), 1, строка)
+        self.assertNotIn(длинный, строка)
+        self.assertLess(len(строка), 250, строка)
+
+    def test_тысяча_полей_не_раздувает_строку(self):
+        """Мегабайт json — это десятки тысяч ключей."""
+        строка = contextd.log_line("POST", "/v1/ingest/event", 400,
+                                   {"k%04d" % i: 1 for i in range(1000)})
+        self.assertIn("+980", строка)
+        self.assertLess(len(строка), 300, строка)
 
 
 if __name__ == "__main__":
