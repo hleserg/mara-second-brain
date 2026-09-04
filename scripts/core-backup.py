@@ -412,12 +412,15 @@ def самопроверка():
         # куда простое копирование не заглядывает.
         писатель = mi.connect(root)
         писатель.execute("insert into events(id,kind,dedupe_key,state)"
-                         " values('e2','call','k2','done')")
-        писатель.commit()
+                         " values('e2','call','k2','done')")   # mi автокоммит
 
         r = прогон(**общее)
-        assert r["проверка"]["счётчики"]["events"] == 2, r
         писатель.close()
+        assert r["проверка"]["счётчики"]["events"] == 2, r
+        # Число жёсткое, а не `len(мелочь(root)) + 1`: `мелочь()` строит и
+        # содержимое архива, и манифест, так что сверка их друг с другом
+        # усечения списка каталогов не видит — манифест тут не оракул.
+        assert r["проверка"]["файлов"] == 4, r    # база, манифест, мелочь ×3
         assert r["носители"] == [target], r
         assert r["аудио"]["новых"] == 1, r
         assert r["проверка"]["счётчики"]["blobs"] == 1, r
@@ -429,6 +432,12 @@ def самопроверка():
             ".tar.gz.gpg", ".manifest.json")), encoding="utf-8"))
         assert set(рядом) == {"архив", "байт", "sha256", "created",
                               "counts"}, sorted(рядом)
+        # сайдкар — единственный способ проверить архив на шаре, не расшифровав
+        # его; значит и хеш в нём должен быть от шифротекста, а не от
+        # плейнтекста
+        лежит = os.path.join(target, r["архив"])
+        assert рядом["sha256"] == sha(лежит), рядом["sha256"]
+        assert рядом["байт"] == os.path.getsize(лежит), рядом["байт"]
 
         r2 = прогон(**общее)
         assert r2["аудио"]["новых"] == 0, "уже зашифрованное аудио перешифровано"
@@ -548,6 +557,30 @@ def самопроверка():
         except (RuntimeError, subprocess.CalledProcessError, tarfile.TarError,
                 OSError):
             pass
+        # `mode=ro` в `снимок` держит бэкап подальше от боевого файла: rw-
+        # соединение на закрытии чекпойнтит WAL, то есть пишет в базу.
+        # Состояние, в котором это видно, ровно одно: соединений к базе нет,
+        # а WAL непустой — то есть демон упал не закрывшись. Как раз тот
+        # случай, ради которого в `снимок` написана ветка отката на запись.
+        дитя = ("import sys, os; sys.path.insert(0, %r);"
+                " import mara_ingest as mi; c = mi.connect(sys.argv[1]);"
+                " c.execute(\"insert into events(id,kind,dedupe_key,state)"
+                " values('e3','call','k3','done')\"); os._exit(0)"
+                % os.path.dirname(os.path.abspath(__file__)))
+        subprocess.run([sys.executable, "-c", дитя, root], check=True)
+        живая = os.path.join(root, "contextd.db")
+
+        def на_диске():
+            # None за пропавший файл, а не исключение: снёсший WAL мутант обязан
+            # падать на assert ниже, а не чужим FileNotFoundError отсюда
+            return [(os.path.getsize(f), os.stat(f).st_mtime_ns)
+                    if os.path.exists(f) else None
+                    for f in (живая, живая + "-wal")]
+
+        было_на_диске = на_диске()
+        снимок(живая, os.path.join(tmp, "ro.db"))
+        assert на_диске() == было_на_диске, "снимок написал в боевую базу"
+
         print("core-backup: самопроверка ок")
     finally:
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
