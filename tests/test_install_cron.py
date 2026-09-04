@@ -147,7 +147,10 @@ class Установщик(unittest.TestCase):
                      "fi\n"
                      # приняли не то, что отправили: ровно тот случай, ради
                      # которого откат и написан
-                     'grep -v core-backup "$1" > "$f"\n' % self.таблица)
+                     # `|| true`: на откате копия пуста, grep вернул бы 1,
+                     # и `set -e` убил бы скрипт раньше настоящей ветки —
+                     # тест зеленел бы не по той причине
+                     'grep -v core-backup "$1" > "$f" || true\n' % self.таблица)
         r = self.запуск("--apply")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("возврат из", r.stderr,
@@ -156,6 +159,27 @@ class Установщик(unittest.TestCase):
                          "текст отказа crontab -l принят за живое расписание")
         self.assertEqual(self.прочесть().strip(), "",
                          "после отката на чистой машине должно быть пусто")
+
+    def test_сорванный_откат_не_молчит(self):
+        """Последний шаг, который ещё мог спасти расписание, — это `crontab`
+        с копией. Если и он откажет, при `set -e` скрипт умрёт прямо на нём:
+        ни строки в лог, ни понятного кода. Владелец увидит «сорвалось» и не
+        узнает, что расписание осталось сорванным."""
+        with open(os.path.join(self.tmp, "bin", "crontab"), "w") as fh:
+            fh.write("#!/usr/bin/env bash\n"
+                     'f="%s"; n="%s"\n'
+                     'if [ "${1:-}" = "-l" ]; then cat "$f" 2>/dev/null; exit $?; fi\n'
+                     # первая запись проходит и портит блок, вторая (откат)
+                     # отказывает — ровно та ветка, ради которой guard и стоит
+                     'echo x >> "$n"\n'
+                     'if [ "$(wc -l < "$n")" -gt 1 ]; then exit 1; fi\n'
+                     'grep -v core-backup "$1" > "$f" || true\n'
+                     % (self.таблица, os.path.join(self.tmp, "счёт")))
+        self.таблицу(ЧУЖОЕ + "\n")
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("откат не удался", r.stderr,
+                      "отказ отката проглочен молча")
 
 
 if __name__ == "__main__":
