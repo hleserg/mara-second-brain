@@ -67,22 +67,15 @@ class Api(unittest.TestCase):
         self.assertEqual(code, 409)
         self.assertFalse(os.path.exists(mi.blob_path(self.dir, sha, "wav")),
                          "частичный файл должен быть удалён")
-
-    def test_несошедшийся_хеш_бросает_событие(self):
-        """409 — конец для этой строки: телефон пересчитает файл с начала
-        (`Core.kt:145-147`), дописанный за время чтения даст другой sha и
-        новую строку. Оставшаяся в `new` звенела бы в реконсиляторе вечно."""
-        sha = hashlib.sha256("полный файл".encode("utf-8")).hexdigest()
-        _, r = self.post("/v1/ingest/event", {
-            "kind": "call", "source": "phone", "source_id": "брошено-1",
-            "blob": {"sha256": sha, "bytes": 11, "ext": "wav"}})
-        code, _ = self.post("/v1/ingest/audio?event=" + r["event_id"],
-                            "недочитанный".encode("utf-8"), raw=True,
-                            ctype="application/octet-stream")
-        self.assertEqual(code, 409)
+        # событие брошено: телефон пересчитает файл с начала (`Core.kt:145-147`)
+        # и заведёт новую строку, а эта иначе звенела бы в сверке вечно
         self.assertEqual(self.con.execute(
             "select state from events where id=?",
             (r["event_id"],)).fetchone()[0], "stale")
+        метрики = contextd.metrics(self.con, self.dir, self.vault).splitlines()
+        имя = "mara_ingest_stale_events "
+        брошено = [s for s in метрики if s.startswith(имя)]
+        self.assertTrue(брошено and int(брошено[0].split()[1]) >= 1, метрики)
 
     def test_брошенное_событие_ещё_можно_долить(self):
         """409 бывает и от порчи в канале при неизменном файле: тогда телефон

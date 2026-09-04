@@ -81,7 +81,7 @@ def блоб_без_манифеста(con, root):
 
 
 def запись_без_расшифровки(con, root):
-    """Событие доведено до `stored`, а работы `asr` нет вовсе — поставить.
+    """Запись принята, а работы `asr` нет вовсе — поставить.
 
     Дыра §5.2 в чистом виде. `finish_stored` переводит состояние, потом пишет
     манифест, потом ставит работу — тремя отдельными коммитами, транзакции
@@ -92,13 +92,28 @@ def запись_без_расшифровки(con, root):
 
     Пропавший манифест чинится не здесь: собрать его заново — это дело демона,
     у которого лежит payload. Сверка о нём докладывает.
+
+    Ловим не только `stored`, но и `new`/`stale` с реально лежащим блобом:
+    признак принятой записи — строка в `blobs`, а не состояние события. Такая
+    пара («блоб есть, событие не сдвинулось») получается, если демон умер
+    между `insert into blobs` и переводом состояния, а ещё — если после
+    выката откатили один только демон: старый `finish_stored` знает лишь
+    `state='new'` и на `stale` промолчит, ответив телефону 200. Ни одна другая
+    проверка такую строку не видит: `запись_не_долита` ищет отсутствие блоба,
+    а блоб-то как раз есть. `call_asr` доведёт состояние до `transcribed` сам,
+    поэтому чинить достаточно постановкой работы.
     """
     out = []
     # `fetchall` не для удобства: `add_job` ниже пишет, а запись под
     # недочитанным курсором в WAL упирается в снимок и валит весь часовой
     # прогон крона `database is locked` — ровно тогда, когда чинить и надо
-    for r in con.execute("select id from events where state='stored' "
-                         "and blob_sha256 is not null order by id").fetchall():
+    for r in con.execute(
+            "select e.id from events e "
+            "left join blobs b on b.sha256=e.blob_sha256 "
+            "where e.blob_sha256 is not null and (e.state='stored' or ("
+            "  e.state in ('new','stale') "
+            "  and b.sha256 is not null and b.purged_at is null)) "
+            "order by e.id").fetchall():
         eid = r["id"]
         if not os.path.exists(mi.manifest_path(root, eid)):
             out.append(находка("манифест-не-дописан", "warn",
@@ -451,6 +466,25 @@ def self_check():
     # брошенное событие не должно звенеть вечно
     con.execute("update events set state='stale' where id=?", (eid,))
     assert запись_не_долита(con) == [], "брошенную запись доливать некому"
+    # но если блоб всё-таки лёг, а состояние не сдвинулось (откат демона,
+    # смерть между insert и переводом) — расшифровку обязаны поставить
+    sid, _ = mi.put_event(con, {"kind": "call", "source": "sc",
+                                "source_id": "2",
+                                "blob": {"sha256": "e" * 64, "ext": "m4a"}})
+    есть_asr = lambda: con.execute(
+        "select 1 from jobs where event_id=? and kind='asr'", (sid,)).fetchone()
+    con.execute("update events set state='stale' where id=?", (sid,))
+    запись_без_расшифровки(con, root)
+    assert not есть_asr(), "блоба ещё нет — работе неоткуда взяться"
+    con.execute("insert into blobs(sha256,path,bytes,mime,created) "
+                "values(?,?,?,?,?)",
+                ("e" * 64, os.path.join(root, "нет.m4a"), 1, "audio",
+                 mi.now_iso()))
+    run(con, root, vault=None)
+    assert есть_asr(), "принятая запись осталась без расшифровки"
+    con.execute("delete from jobs where event_id=?", (sid,))
+    con.execute("delete from events where id=?", (sid,))
+    con.execute("delete from blobs where sha256=?", ("e" * 64,))
     con.execute("update events set state='new' where id=?", (eid,))
     assert текст([]) is None and текст([находка("x", "fixed", "починено")]) is None, \
         "без проблем в канал не пишем"
