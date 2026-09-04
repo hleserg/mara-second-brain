@@ -26,6 +26,11 @@ TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
 ROOT = os.environ.get("MARA_BLOBS", "/srv/mara-blobs")
 STATE = os.environ.get("MARA_STATE",
                        os.path.expanduser("~/.local/state/mara"))
+# Отметка носителей: пишет её `core-backup.py`, читает `contextd_reconcile.py`.
+# Имя здесь, а не по литералу с каждой стороны: разъехавшись, они не ломают
+# ни один тест — писатель пишет, читатель читает пустоту, и весь механизм
+# отвала молчит при зелёном гейте.
+ОТМЕТКА_НОСИТЕЛЕЙ = os.path.join(STATE, "core-targets.json")
 LEASE_SEC = 600                            # упавший воркер не держит работу вечно
 RETRY = [0, 60, 300, 1800, 7200, 43200]    # ТЗ §17, после последней — DLQ
 PIPELINE_VERSION = 1
