@@ -81,6 +81,8 @@ class Сквозной(unittest.TestCase):
             "MARA_BLOBS": cls.blobs, "VAULT": cls.vault,
             "MARA_ASR_URL": base, "MARA_LLM_URL": base,
             "MARA_ENV_FILE": os.path.join(cls.blobs, "нет-такого.env"),
+            # два разных файла — два разных имени, см. call_digest.py
+            "MARA_CONTEXTD_ENV": os.path.join(cls.blobs, "нет-такого.env"),
             # шаги идут отдельными процессами, подменять функцию бесполезно:
             # телеграм заменяем адресом, а не заглушкой в памяти
             "MARA_TELEGRAM_API": base + "/bot%s/sendMessage",

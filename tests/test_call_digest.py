@@ -1,8 +1,10 @@
 """Формат дайджеста (ТЗ §16). Рендер без модели и без сети."""
-import os, sys, json, tempfile, unittest
+import os, sys, json, tempfile, subprocess, unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "scripts")
+sys.path.insert(0, СКРИПТЫ)
 import call_digest as cd
 import mara_ingest as mi
 
@@ -92,6 +94,39 @@ class Транспорт(unittest.TestCase):
         state = cd.deliver("текст", token=None, chat_id=None)
         self.assertEqual(state, "no-transport",
                          "нет токена — дайджест остаётся в базе, а не пропадает")
+
+
+class ИмяEnvФайла(unittest.TestCase):
+    """MARA_ENV_FILE сюда не относится, и это надо держать проверенным.
+
+    Раньше имя было одно на два разных файла: `~/.config/mara/env` (адреса и
+    ключ OpenRouter, владелец — sergey) и `/etc/mara/contextd.env` (токен
+    телеграма, читается ещё и systemd через EnvironmentFile=). Увести в сторону
+    один значило увести оба, а увести только нужный было нельзя вовсе.
+
+    Читаем в подпроцессе, потому что константа берётся на импорте модуля: в уже
+    импортированном подмена переменной ничего не изменит.
+    """
+
+    def имя(self, **env):
+        # run-tests.sh выставляет MARA_CONTEXTD_ENV на весь прогон; убираем её,
+        # иначе «переменная не задана» проверить нечем.
+        e = dict(os.environ)
+        e.pop("MARA_CONTEXTD_ENV", None)
+        e.pop("MARA_ENV_FILE", None)
+        e.update(env)
+        код = "import call_digest; print(call_digest.ENV_FILE)"
+        r = subprocess.run([sys.executable, "-c", код], env=e, text=True,
+                           capture_output=True, cwd=СКРИПТЫ)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_своя_переменная_уводит(self):
+        self.assertEqual(self.имя(MARA_CONTEXTD_ENV="/нет/свой"), "/нет/свой")
+
+    def test_чужая_переменная_не_уводит(self):
+        self.assertEqual(self.имя(MARA_ENV_FILE="/нет/чужой"),
+                         "/etc/mara/contextd.env")
 
 
 class Доставка(unittest.TestCase):

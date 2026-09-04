@@ -23,7 +23,12 @@ sys.path.insert(0, HERE)
 import mara_ingest as mi
 import call_project as cp
 
-ENV_FILE = os.environ.get("MARA_ENV_FILE", "/etc/mara/contextd.env")
+# Имя своё, не MARA_ENV_FILE: та уводит чтение `~/.config/mara/env` —
+# пользовательского файла с адресами. Здесь другой файл, другой владелец и
+# другой читатель (systemd, EnvironmentFile= в юните contextd). Пока имя было
+# одно на двоих, увести в сторону один файл значило увести и второй, а увести
+# только нужный было нельзя вовсе.
+ENV_FILE = os.environ.get("MARA_CONTEXTD_ENV", "/etc/mara/contextd.env")
 # адрес переопределяем: шаг дайджеста запускается отдельным процессом, и
 # сквозной тест иначе либо лезет в настоящий телеграм, либо не проверяет
 # доставку вовсе
