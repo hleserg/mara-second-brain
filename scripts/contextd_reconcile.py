@@ -314,7 +314,7 @@ def dlq(con):
                     % (n, row["kind"], (row["last_error"] or "")[:120]), count=n)]
 
 
-def бэкап_ядра(targets=None, days=БЭКАП_СУТКИ):
+def бэкап_ядра(targets=None, days=БЭКАП_СУТКИ, root=None):
     """Бэкап ядра встал. Сам прогон бэкапа проверяет, что архив
     разворачивается; здесь мы проверяем, что архив вообще появляется —
     молчащий крон выглядит точно так же, как отсутствующий (P0-2, P0-5).
@@ -322,9 +322,17 @@ def бэкап_ядра(targets=None, days=БЭКАП_СУТКИ):
     Архивов нет вовсе — это ещё не поломка, а несделанная настройка: warn.
     Были и перестали — это отказ, о котором надо знать: error."""
     targets = НОСИТЕЛИ if targets is None else targets
+    # root — тот же, что у остальных проверок: `mi.ROOT` здесь был бы вторым
+    # источником правды, и на вызове с другим корнем (тест, self_check)
+    # `смонтирован` спотыкался бы об отсутствующий /srv/mara-blobs — а с ним
+    # падала бы вся сверка, не только эта находка.
+    root = root or mi.ROOT
     свежий, доступных = None, 0
     for t in targets:
-        if not os.path.isdir(t):
+        # isdir мало: отвалившийся носитель бэкап сам себе воссоздаёт на
+        # корневой ФС (mkdir -p), и тогда «смонтирован» ложно истинно —
+        # мониторинг зелёный, а копия одна.
+        if not os.path.isdir(t) or not mi.смонтирован(t, root):
             continue
         доступных += 1
         for f in glob.glob(os.path.join(t, "core-*.tar.gz.gpg")):
@@ -360,7 +368,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += запись_не_долита(con)
     out += дайджест_не_доставлен(con)
     out += dlq(con)
-    out += бэкап_ядра(targets)
+    out += бэкап_ядра(targets, root=root)
     return out
 
 
@@ -425,6 +433,7 @@ def main():
 
 def self_check():
     import tempfile
+    os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"   # см. mi.смонтирован
     root = tempfile.mkdtemp()
     mi.ROOT = root
     con = mi.connect(root)
@@ -519,6 +528,10 @@ def self_check():
     assert текст([]) is None and текст([находка("x", "fixed", "починено")]) is None, \
         "без проблем в канал не пишем"
     assert "проблем 1" in текст([находка("x", "warn", "беда")])
+    # Снимаем за собой: иначе после самопроверки в этом же процессе проверка
+    # носителя мертва. Не в `finally` — упавшая самопроверка убивает процесс
+    # трейсбеком, восстанавливать окружение там некому и незачем.
+    os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
     print("contextd_reconcile self-check: ок")
     return 0
 

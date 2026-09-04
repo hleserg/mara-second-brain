@@ -269,6 +269,11 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
 
         записано = []
         for t in targets:
+            if not mi.смонтирован(t, root):
+                # Не «недоступен»: каталог как раз доступен, в том и беда.
+                print("core-backup: %s на одном устройстве с %s — носитель не "
+                      "смонтирован, пропускаю" % (t, root), file=sys.stderr)
+                continue
             try:
                 os.makedirs(t, mode=0o700, exist_ok=True)
                 # временный файл на том же носителе: переименование между
@@ -327,6 +332,7 @@ def самопроверка():
         print("core-backup: нет gpg, самопроверка пропущена")
         return
     tmp = tempfile.mkdtemp(prefix="core-selfcheck.")
+    os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"   # см. mi.смонтирован
     try:
         root = os.path.join(tmp, "blobs")
         con = mi.connect(root)
@@ -392,6 +398,7 @@ def самопроверка():
             pass
         print("core-backup: самопроверка ок")
     finally:
+        os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -415,6 +422,11 @@ def main():
         return самопроверка()
     targets = a.targets.split()
     if a.drill_only:
+        # Развернуть архив с каталога-обманки значит доложить «восстановление
+        # проверено» ровно про ту копию, которой на самом деле нет.
+        if not mi.смонтирован(targets[0], a.root):
+            raise SystemExit("core-backup: %s на одном устройстве с %s — "
+                             "носитель не смонтирован" % (targets[0], a.root))
         r = проверка(targets[0], a.pass_file, a.root)
     else:
         r = прогон(a.root, targets, a.pass_file, a.keep, a.work,

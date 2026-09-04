@@ -26,6 +26,19 @@ TARGETS="${TARGETS:-/mnt/backup/mara /mnt/win-backups/mara}"
 [ "$(stat -c %a "$PASS")" = 600 ] || { echo "vault-backup: $PASS должен быть 600" >&2; exit 1; }
 [ -d "$MIRROR" ] || { echo "vault-backup: нет зеркала $MIRROR" >&2; exit 1; }
 
+# Носитель обязан быть отдельным устройством. Причина и подробности — в
+# `смонтирован()` в scripts/mara_ingest.py: у python-бэкапа ядра ровно та же
+# дыра и то же лекарство. Коротко: mkdir -p ниже воссоздаст каталог на
+# корневой ФС, если диск или шара отвалились, — и бандл ляжет на тот же диск,
+# что и волт с зеркалом, а скрипт отрапортует успехом.
+# MARA_BACKUP_ALLOW_SAME_DEV=1 снимает требование.
+dev_of() {                            # устройство ближайшего существующего предка
+  local p="$1"
+  while [ ! -e "$p" ]; do p=$(dirname "$p"); done
+  stat -c %d "$p"
+}
+mirror_dev=$(dev_of "$MIRROR")
+
 name="vault-$(date +%F).bundle.gpg"
 mkdir -p "$WORK"
 bundle="$WORK/vault.bundle"
@@ -42,6 +55,10 @@ gpg --batch --yes --quiet --pinentry-mode loopback --passphrase-file "$PASS" \
 
 ok=0
 for t in $TARGETS; do
+  if [ -z "${MARA_BACKUP_ALLOW_SAME_DEV:-}" ] && [ "$(dev_of "$t")" = "$mirror_dev" ]; then
+    echo "vault-backup: $t на одном устройстве с $MIRROR — носитель не смонтирован, пропускаю" >&2
+    continue
+  fi
   if ! mkdir -p "$t" 2>/dev/null; then
     echo "vault-backup: $t недоступен, пропускаю" >&2; continue
   fi

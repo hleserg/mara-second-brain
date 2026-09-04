@@ -13,9 +13,14 @@ class БэкапЯдра(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.цель = os.path.join(self.tmp, "backup")
         os.makedirs(self.цель)
+        # Здесь проверяется свежесть архива, а не носитель: временный каталог
+        # лежит на той же ФС, что и корень, и без этого всё упиралось бы в
+        # проверку монтирования. Она — предмет tests/test_backup_mount.py.
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+        os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
     def архив(self, дней_назад):
         p = os.path.join(self.цель, "core-2026-09-0%d.tar.gz.gpg" % (дней_назад + 1))
