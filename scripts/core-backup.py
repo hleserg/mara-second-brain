@@ -323,6 +323,39 @@ def ротация(target, keep):
             os.unlink(старый)
 
 
+def подделка(root, work, пароль, dst, порча):
+    """Архив с намеренным дефектом: `порча(копия_бд, дерево, манифест)` правит
+    распакованное содержимое перед упаковкой. Нужен, чтобы сторожа внутри
+    `проверка` срабатывали на стенде, а не впервые на живом носителе."""
+    stage = tempfile.mkdtemp(prefix="core-bad.", dir=work)
+    try:
+        копия = os.path.join(stage, "contextd.db")
+        снимок(os.path.join(root, "contextd.db"), копия)
+        дерево = os.path.join(stage, "root")
+        файлы = {"contextd.db": sha(копия)}
+        for rel, p in мелочь(root):
+            куда = os.path.join(дерево, rel)
+            os.makedirs(os.path.dirname(куда), exist_ok=True)
+            shutil.copy2(p, куда)
+            файлы[rel] = sha(p)
+        м = {"counts": счётчики(копия), "files": файлы}
+        порча(копия, дерево, м)
+        путь_м = os.path.join(stage, "manifest.json")
+        with open(путь_м, "w", encoding="utf-8") as fh:
+            json.dump(м, fh, ensure_ascii=False)
+        tar = os.path.join(stage, "core.tar.gz")
+        with tarfile.open(tar, "w:gz") as tf:
+            tf.add(копия, arcname="contextd.db")
+            tf.add(путь_м, arcname="manifest.json")
+            for каталог, _, имена in os.walk(дерево):
+                for f in sorted(имена):
+                    полный = os.path.join(каталог, f)
+                    tf.add(полный, arcname=os.path.relpath(полный, дерево))
+        шифр(tar, dst, пароль)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def самопроверка():
     """Полный круг на игрушечном корне: бэкап, зеркало, разворачивание.
 
@@ -382,8 +415,60 @@ def самопроверка():
         for f in glob.glob(os.path.join(target, "core-*")):
             assert oct(os.stat(f).st_mode & 0o777) == oct(0o600), f
 
-        # ротация: на носителе не больше keep архивов
-        assert len(glob.glob(os.path.join(target, "core-*.tar.gz.gpg"))) <= 2
+        # Ротация: три прогона выше пишут один и тот же файл — дата в имени
+        # у них общая, — так что вытеснять ротации было нечего ни разу.
+        # Проверяем её отдельно, на подставных именах.
+        катр = os.path.join(tmp, "rot")
+        os.makedirs(катр)
+        for дата in ("2020-01-01", "2020-01-02", "2020-01-03"):
+            for хвост in (".tar.gz.gpg", ".manifest.json"):
+                open(os.path.join(катр, "core-" + дата + хвост), "w").close()
+        ротация(катр, 2)
+        осталось = sorted(os.path.basename(f)
+                          for f in glob.glob(os.path.join(катр, "core-*")))
+        assert осталось == ["core-2020-01-02.manifest.json",
+                            "core-2020-01-02.tar.gz.gpg",
+                            "core-2020-01-03.manifest.json",
+                            "core-2020-01-03.tar.gz.gpg"], осталось
+
+        # Сторожа внутри `проверка` — утечка секретов, целостность базы,
+        # счётчики, хеши файлов — до сих пор не срабатывали ни разу: порченый
+        # архив ниже валится ещё на gpg, и дальше расшифровки дело не идёт.
+        # Собираем архив с ровно одним дефектом на сторожа и ждём именно свой:
+        # вариант, упавший не на том стороже, иначе зачёлся бы как успех.
+        def утечка(копия, дерево, м):
+            os.makedirs(os.path.join(дерево, "tdlib"))
+            open(os.path.join(дерево, "tdlib", "token.json"), "w").write("сек")
+
+        def гниль(копия, дерево, м):
+            k = sqlite3.connect(копия)
+            страница = k.execute("pragma page_size").fetchone()[0]
+            k.close()
+            # Байт типа страницы в мусор — так порча попадает в живую страницу
+            # с blobs, а не в пустое место, где integrity_check её не заметит.
+            номер = open(копия, "rb").read().find(s.encode()) // страница
+            assert номер > 0, "sha не нашлась в базе"
+            with open(копия, "r+b") as fh:
+                fh.seek(номер * страница)
+                fh.write(b"\x7f")
+
+        def разошлись(копия, дерево, м):
+            м["counts"]["blobs"] += 1
+
+        def подменён(копия, дерево, м):
+            open(os.path.join(дерево, "manifests", "e1.json"), "w").write("{ }")
+
+        плохие = os.path.join(tmp, "плохие")
+        os.makedirs(плохие)
+        имя_п = "core-1999-01-01.tar.gz.gpg"
+        for порча, слово in ((утечка, "секреты"), (гниль, "битая"),
+                             (разошлись, "счётчики"), (подменён, "манифестом")):
+            подделка(root, tmp, пароль, os.path.join(плохие, имя_п), порча)
+            try:
+                проверка(плохие, пароль, root, имя=имя_п)
+                raise AssertionError("%s: проверка промолчала" % слово)
+            except RuntimeError as e:
+                assert слово in str(e), (слово, str(e))
 
         # порченый архив обязан валить проверку, а не молчать
         свежий = sorted(glob.glob(os.path.join(target, "core-*.tar.gz.gpg")))[-1]
