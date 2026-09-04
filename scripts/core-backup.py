@@ -398,6 +398,7 @@ def самопроверка():
             pass
         print("core-backup: самопроверка ок")
     finally:
+        os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -421,6 +422,11 @@ def main():
         return самопроверка()
     targets = a.targets.split()
     if a.drill_only:
+        # Развернуть архив с каталога-обманки значит доложить «восстановление
+        # проверено» ровно про ту копию, которой на самом деле нет.
+        if not mi.смонтирован(targets[0], a.root):
+            raise SystemExit("core-backup: %s на одном устройстве с %s — "
+                             "носитель не смонтирован" % (targets[0], a.root))
         r = проверка(targets[0], a.pass_file, a.root)
     else:
         r = прогон(a.root, targets, a.pass_file, a.keep, a.work,

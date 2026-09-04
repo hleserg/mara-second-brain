@@ -17,6 +17,19 @@ FROM="${FROM:-/mnt/backup/mara}"
 MIN_NOTES="${MIN_NOTES:-100}"     # столько .md в волте есть всегда
 CHECK="${CHECK:-raw/README.md}"   # файл, который обязан быть непустым
 
+# Тот же вопрос, что у vault-backup.sh: каталог на корневой ФС бэкап себе
+# создаёт сам, и развернуть бандл из него значит доложить «копия жива» ровно
+# про ту копию, которой нет. Разбор — в `смонтирован()` в scripts/mara_ingest.py.
+dev_of() {                            # устройство ближайшего существующего предка
+  local p="$1"
+  while [ ! -e "$p" ]; do p=$(dirname "$p"); done
+  stat -c %d "$p"
+}
+if [ -z "${MARA_BACKUP_ALLOW_SAME_DEV:-}" ] && [ "$(dev_of "$FROM")" = "$(dev_of "$MIRROR")" ]; then
+  echo "restore-test: $FROM на одном устройстве с $MIRROR — носитель не смонтирован" >&2
+  exit 1
+fi
+
 src=$(ls -1 "$FROM"/vault-*.bundle.gpg 2>/dev/null | tail -1)
 [ -n "$src" ] || { echo "restore-test: в $FROM нет бандлов" >&2; exit 1; }
 

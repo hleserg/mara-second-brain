@@ -6,7 +6,7 @@
 и выглядит это ровно как норма: каталог на месте, архив свежий, сверка молчит.
 Проверяем, что теперь не молчит — во всех трёх местах, где вопрос задавался.
 """
-import os, sys, shutil, tempfile, unittest
+import os, sys, shutil, subprocess, tempfile, unittest
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -74,6 +74,19 @@ class Сверка(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
+    def test_корень_берётся_из_аргумента_а_не_из_глобала(self):
+        """`run(con, root)` раздаёт свой корень всем проверкам. Если бэкапная
+        лезет за ним в `mi.ROOT`, то на машине, где `/srv/mara-blobs` нет, а
+        каталог носителя есть, `os.stat` роняет всю сверку — вместе со всеми
+        остальными находками, а не только с этой."""
+        mi.ROOT = os.path.join(self.tmp, "нет-такого-корня")
+        con = mi.connect(self.tmp)
+        try:
+            f = rc.run(con, self.tmp, vault=None, targets=[self.цель])
+        finally:
+            con.close()
+        self.assertEqual([x["check"] for x in f], ["бэкап-ядра-носители"])
+
     def test_свежий_архив_на_корневой_фс_это_находка(self):
         f = rc.бэкап_ядра([self.цель])
         self.assertEqual([(x["check"], x["level"]) for x in f],
@@ -102,6 +115,19 @@ class Прогон(unittest.TestCase):
             self.cb.прогон(root, [os.path.join(self.tmp, "target")], пароль,
                            keep=2, work=os.path.join(self.tmp, "work"))
         self.assertIn("ни один носитель не записан", str(e.exception))
+
+    def test_drill_only_не_разворачивает_с_обманки(self):
+        """Развернуть архив с каталога на корневой ФС и доложить «восстановление
+        проверено» — ровно та ложная уверенность, ради которой всё затевалось."""
+        цель = os.path.join(self.tmp, "target")
+        os.makedirs(цель)
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "core-backup.py"),
+             "--drill-only", "--root", self.tmp, "--targets", цель],
+            capture_output=True, text=True,
+            env={**os.environ, "MARA_BACKUP_ALLOW_SAME_DEV": ""})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("носитель не смонтирован", r.stderr)
 
 
 if __name__ == "__main__":
