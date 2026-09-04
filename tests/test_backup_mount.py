@@ -170,6 +170,56 @@ class Прогон(unittest.TestCase):
         # на который не легло ничего, обязан в ней отсутствовать.
         self.assertEqual(list(json.load(open(self.отметка, encoding="utf-8"))),
                          [цель])
+        # Права ставятся временному файлу, до переименования: если сверка
+        # переедет, легко потерять и chmod.
+        лежит = os.path.join(цель, r["архив"])
+        self.assertEqual(os.stat(лежит).st_mode & 0o777, 0o600)
+
+    def test_отказ_уборки_не_валит_прогон(self):
+        """Носитель ушёл в read-only той же бедой, что испортила копию.
+
+        Тогда `unlink` огрызка бросает EACCES — и, не будь он прикрыт, унёс бы
+        с собой запись на здоровый носитель, отметку, учение и ротацию: отказ
+        одного носителя стоил бы всей ночной работы."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        второй = os.path.join(self.tmp, "target2")
+        настоящий = shutil.copy2
+
+        def подмена(src, dst, **kw):
+            r = настоящий(src, dst, **kw)
+            if os.path.dirname(dst) == второй:
+                with open(dst, "ab") as fh:
+                    fh.write(b"\0")
+                os.chmod(второй, 0o500)     # писать сюда больше нельзя вовсе
+            return r
+
+        try:
+            # Больной носитель первым: с ним падение в обработчике не даёт
+            # здоровому получить архив вообще, и ночь пропадает целиком.
+            with unittest.mock.patch.object(self.cb.shutil, "copy2", подмена):
+                r = self.cb.прогон(root, [второй, цель], пароль, keep=2,
+                                   work=os.path.join(self.tmp, "work"))
+        finally:
+            os.chmod(второй, 0o700)         # иначе tearDown не уберёт каталог
+        self.assertEqual(r["носители"], [цель])
+        self.assertIn("проверка", r, "учение не дошло из-за уборки огрызка")
+
+    def test_носитель_без_каталога_не_роняет_прогон(self):
+        """`makedirs` падает до того, как появился временный файл.
+
+        Имя `врем` связано до `try` именно поэтому: уборка в обработчике иначе
+        даёт `UnboundLocalError` и превращает отвал одного носителя в падение
+        всего прогона."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        не_каталог = os.path.join(self.tmp, "файл")
+        open(не_каталог, "w").close()
+        r = self.cb.прогон(root, [os.path.join(не_каталог, "target2"), цель],
+                           пароль, keep=2, work=os.path.join(self.tmp, "work"))
+        self.assertEqual(r["носители"], [цель])
 
     def test_единственный_носитель_на_корневой_фс_валит_прогон(self):
         root, пароль = self.стенд()
