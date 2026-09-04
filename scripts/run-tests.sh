@@ -9,6 +9,22 @@ cd "$(dirname "$0")/.."
 # вовсе, и одни и те же тесты давали бы разный результат. Уводим чтение в
 # несуществующий файл — заодно живой ключ не попадает в тестовый процесс.
 export MARA_ENV_FILE=/nonexistent/mara-env
+# Каждый tempfile.mkdtemp() в тестах и в --self-check живёт до перезагрузки:
+# кто создал, тот и убирает, а не убирает почти никто. На BetaPi /tmp — tmpfs
+# на 4 ГБ, и двадцать тысяч таких каталогов забили её на 93% (#33). Чинить в
+# каждом тесте по отдельности значит чинить вечно: любой следующий mkdtemp
+# снова потечёт. Поэтому границей ставим процесс — свою песочницу на прогон,
+# и её целиком сносим на выходе. Отдельная переменная, а не $TMPDIR: если
+# mktemp не сработает, rm -rf не должен получить чужой каталог.
+# MARA_KEEP_TMP=1 — оставить песочницу: у красного гейта волт и база упавшего
+# теста нужны именно после прогона, а не до.
+sand="$(mktemp -d "${TMPDIR:-/tmp}/mara-tests.XXXXXX")" || exit 1
+# Явный `if`, а не `&& … ||`: у второго ветка `rm` достижима, когда падает
+# `echo` — например при выводе на забитую ФС. То есть люк молча не срабатывал
+# бы ровно в той ситуации, из которой вырос #33.
+trap 'if [ -n "${MARA_KEEP_TMP:-}" ]; then echo "песочница оставлена: $sand"; else rm -rf "$sand"; fi' EXIT
+TMPDIR_ORIG="${TMPDIR:-/tmp}"
+export TMPDIR="$sand"
 fail=0
 echo "== unittest =="
 python3 -m unittest discover -s tests -v || fail=1
@@ -47,7 +63,10 @@ echo "== android =="
 if [ "${SKIP_ANDROID:-0}" = 1 ]; then
   echo "skip android — SKIP_ANDROID=1 (пропущен по запросу)"
 elif [ -x android/gradlew ] && command -v java >/dev/null 2>&1; then
-  if out=$(cd android && ./gradlew test --console=plain -q 2>&1); then
+  # JVM берёт java.io.tmpdir из /tmp и на TMPDIR не смотрит — песочница ей всё
+  # равно не помогает. Зато демон gradle переживает прогон, и TMPDIR, указующий
+  # на снесённый каталог, ломал бы уже следующую сборку. Отдаём ему исходный.
+  if out=$(cd android && TMPDIR="$TMPDIR_ORIG" ./gradlew test --console=plain -q 2>&1); then
     echo "ok   android/app (JVM-тесты ядра)"
   else
     echo "FAIL android/app"; echo "$out" | tail -15 | sed 's/^/     /'; fail=1
