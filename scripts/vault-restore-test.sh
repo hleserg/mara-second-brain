@@ -30,7 +30,10 @@ if [ -z "${MARA_BACKUP_ALLOW_SAME_DEV:-}" ] && [ "$(dev_of "$FROM")" = "$(dev_of
   exit 1
 fi
 
-src=$(ls -1 "$FROM"/vault-*.bundle.gpg 2>/dev/null | tail -1)
+# `|| true` обязателен: под `pipefail` пустой носитель роняет весь скрипт
+# кодом ls прямо здесь, и заготовленный диагноз ниже не печатается никогда —
+# в лог попадает голый rc=2, по которому непонятно вообще ничего.
+src=$(ls -1 "$FROM"/vault-*.bundle.gpg 2>/dev/null | tail -1) || true
 [ -n "$src" ] || { echo "restore-test: в $FROM нет бандлов" >&2; exit 1; }
 
 tmp=$(mktemp -d /var/tmp/mara-restore.XXXXXX)
