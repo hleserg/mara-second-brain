@@ -127,7 +127,14 @@ def connect(root=None):
     # идемпотентно, и база на doctor доезжает сама при первом же рестарте.
     have = {r["name"] for r in con.execute("pragma table_info(devices)")}
     if "scopes" not in have:                       # ADR-0009, откат п. 2
-        con.execute("alter table devices add column scopes text")
+        try:
+            con.execute("alter table devices add column scopes text")
+        except sqlite3.OperationalError as e:
+            # Два процесса открылись разом и оба увидели, что колонки нет.
+            # Тот, кто пришёл вторым, получает `duplicate column name` —
+            # это не ошибка, а ровно тот результат, которого он и хотел.
+            if "duplicate column" not in str(e).lower():
+                raise
     return con
 
 

@@ -1044,6 +1044,87 @@ class ТестScopes(unittest.TestCase):
         found, _ = contextd.set_scopes(self.con, "dev_нет", ["call"])
         self.assertFalse(found)
 
+    def запуск(self, *argv):
+        """`main()` целиком, с перехватом вывода: как из командной строки."""
+        буфер = io.StringIO()
+        было, sys.stdout = sys.stdout, буфер
+        try:
+            код = contextd.main(["--root", self.dir] + list(argv))
+        finally:
+            sys.stdout = было
+        return код, буфер.getvalue()
+
+    def scopes(self):
+        return self.con.execute("select scopes from devices where id=?",
+                                (self.dev,)).fetchone()["scopes"]
+
+    def test_allow_из_командной_строки_пишет_список(self):
+        код, вывод = self.запуск("--allow", self.dev, "message", "call")
+        self.assertEqual(код, 0)
+        self.assertEqual(self.scopes(), "call message", "список не отсортирован")
+        self.assertIn("call message", вывод)
+
+    def test_allow_history_заполняет_по_фактам(self):
+        """С непустой историей `@history` пишет ровно то, что устройство слало."""
+        for kind in ("call", "message", "call"):
+            mi.put_event(self.con, {"kind": kind, "source": "т", "device_id": self.dev,
+                                    "source_id": "%s-%d" % (kind, id(kind))})
+        код, _ = self.запуск("--allow", self.dev, "@history")
+        self.assertEqual(код, 0)
+        self.assertEqual(self.scopes(), "call message")
+
+    def test_пустой_вид_не_снимает_ограничение_молча(self):
+        """`--allow ID ""` — не способ открыть всё; для этого есть `--allow ID`."""
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        код, вывод = self.запуск("--allow", self.dev, "")
+        self.assertEqual(код, 1)
+        self.assertIn("пустой вид", вывод)
+        self.assertEqual(self.scopes(), "call", "список уцелел")
+
+    def test_вид_с_пробелом_не_разваливается_на_два(self):
+        код, вывод = self.запуск("--allow", self.dev, "call correction")
+        self.assertEqual(код, 1)
+        self.assertIn("пробел", вывод)
+        self.assertIsNone(self.scopes())
+
+    def test_снять_ограничение_можно_только_явно(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        код, _ = self.запуск("--allow", self.dev)
+        self.assertEqual(код, 0)
+        self.assertIsNone(self.scopes(), "`--allow ID` без видов снимает список")
+
+    def test_дозагрузка_аудио_тоже_под_allowlist(self):
+        """ADR-0009 ждёт отлуп на первом `audio` у устройства без разрешения."""
+        тело = "как бы аудио".encode("utf-8")
+        sha = hashlib.sha256(тело).hexdigest()
+        body = json.dumps({"kind": "call", "source": "phone", "source_id": "a1",
+                           "blob": {"sha256": sha, "bytes": len(тело),
+                                    "ext": "wav"}}).encode("utf-8")
+        req = urllib.request.Request(self.base + "/v1/ingest/event", data=body,
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            eid = json.loads(r.read())["event_id"]
+        contextd.set_scopes(self.con, self.dev, ["message"])
+        req = urllib.request.Request(
+            self.base + "/v1/ingest/audio?event=" + eid, data=тело, method="POST")
+        req.add_header("Content-Type", "application/octet-stream")
+        req.add_header("Authorization", "Bearer " + self.token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                self.fail("аудио принято при allowlist без `call`: %d" % r.status)
+        except urllib.error.HTTPError as e:
+            e.read()
+            self.assertEqual(e.code, 403)
+        self.assertFalse(os.path.exists(mi.blob_path(self.dir, sha, "wav")),
+                         "блоб лёг на диск в обход allowlist")
+
+    def test_неизвестное_устройство_не_пускается(self):
+        """Отзыв между `authed()` и проверкой не должен открывать дверь."""
+        self.assertFalse(contextd.scope_ok(self.con, "dev_нет", "call"))
+        self.assertFalse(contextd.scope_ok(self.con, None, "call"))
+
 
 if __name__ == "__main__":
     unittest.main()

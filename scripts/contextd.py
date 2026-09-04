@@ -36,7 +36,11 @@ bind. Но из локалки он виден, и это осознанный �
 отбит на первом же событии. Список ставится руками, и `@history` берёт его из
 того, что устройство реально слало за месяц, а не из наших предположений. Если
 за месяц не слало ничего, `@history` уже заданный список **не снимает**:
-молчание — не разрешение.
+молчание — не разрешение. Снять его можно только явно — `--allow ID` без
+видов; вид пустой или с пробелом внутри не принимается вовсе, потому что
+список хранится строкой через пробел и такой вид развалился бы на два
+разрешения. Дозагрузка аудио (`/v1/ingest/audio`) идёт под тем же allowlist,
+что и событие, к которому она прикладывается.
 """
 import os, sys, io, json, time, hashlib, secrets, argparse, threading, subprocess
 from datetime import datetime, timedelta
@@ -164,9 +168,14 @@ def scope_ok(con, device_id, kind):
     (`--allow`), и только по тому, что устройство реально шлёт.
     """
     if not device_id:
-        return True
+        return False
     row = con.execute("select scopes from devices where id=?", (device_id,)).fetchone()
-    if not row or row["scopes"] is None:
+    if not row:
+        # Токен опознан в `authed()`, а строки уже нет — устройство отозвали
+        # между двумя запросами к базе. Пропустить значит записать событие с
+        # `device_id is null` уже после отзыва; отбить — то, чего отзыв и хотел.
+        return False
+    if row["scopes"] is None:
         return True
     return kind in row["scopes"].split()
 
@@ -179,12 +188,31 @@ def scopes_from_history(con, device_id, days=30):
         (device_id, since)) if r["kind"]})
 
 
+def плохой_вид(kind):
+    """Почему такой вид нельзя класть в allowlist, или None.
+
+    Список хранится одной строкой через пробел, а читается `split()`. Вид с
+    пробелом внутри развалился бы на два разрешения (`"call correction"`
+    открыл бы настоящий `correction`), а пустой — снял бы ограничение целиком,
+    молча и не тем способом, каким его снимают намеренно.
+    """
+    if not kind:
+        return "пустой вид"
+    if kind.split() != [kind]:
+        return "в виде «%s» пробел" % kind
+    return None
+
+
 def set_scopes(con, device_id, kinds):
     """Записать allowlist. Пустой список снимает ограничение (`null`).
 
     Возвращает (нашлось ли устройство, что записано). Откат по ADR-0009 —
     перестать проверять колонку; удалять её не нужно и не следует.
     """
+    for k in kinds:
+        беда = плохой_вид(k)
+        if беда:
+            raise ValueError(беда)
     val = " ".join(sorted(set(kinds))) or None
     cur = con.execute("update devices set scopes=? where id=?", (val, device_id))
     return bool(cur.rowcount), val
@@ -424,8 +452,20 @@ class Handler(BaseHTTPRequestHandler):
             if n > MAX_BODY:
                 return self.отлуп(413, "тело больше %d МиБ" % (MAX_BODY >> 20))
             q = urllib.parse.parse_qs(p.query)
+            eid = (q.get("event") or [""])[0]
+            # Дозагрузка — продолжение уже принятого события, и allowlist
+            # обязан её накрывать: ADR-0009 прямо ждёт, что телефон с пустым
+            # списком получит отлуп на первом же `audio`. Тело здесь ещё не
+            # вычитано, поэтому отказ идёт через `отлуп`, а не через `say`.
+            row = con.execute("select kind from events where id=?",
+                              (eid,)).fetchone()
+            if row and not scope_ok(con, device_of(
+                    con, self.headers.get("Authorization")), row["kind"]):
+                print(log_line("POST", p.path, 403), flush=True)
+                return self.отлуп(
+                    403, "устройству не разрешён вид «%s»" % row["kind"])
             code, out = ingest_audio(con, self.server.root,
-                                     (q.get("event") or [""])[0], self.rfile, n)
+                                     eid, self.rfile, n)
             print(log_line("POST", p.path, code), flush=True)
             return self.say(code, out)
         if n > MAX_JSON:
@@ -787,6 +827,12 @@ def self_check():
     assert scope_ok(con, dev, "call") and not scope_ok(con, dev, "message"), \
         "allowlist не проверяется"
     set_scopes(con, dev, [])
+    assert not scope_ok(con, "нет такого", "call"), "неизвестное устройство пущено"
+    try:
+        set_scopes(con, dev, ["call correction"])
+        raise AssertionError("вид с пробелом записан")
+    except ValueError:
+        pass
     revoke(con, dev)
     assert device_of(con, "Bearer " + token) is None, "отозванный токен пущен"
     with urllib.request.urlopen(base + "/healthz", timeout=5) as r:
@@ -819,7 +865,7 @@ def main(argv=None):
     ap.add_argument("--scopes", metavar="ID", help="показать allowlist устройства")
     ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
                     help="задать allowlist: `--allow ID вид вид`; "
-                         "`--allow ID` снимает ограничение; "
+                         "`--allow ID` снимает ограничение (и только так); "
                          "`--allow ID @history` берёт виды из событий за 30 "
                          "дней, а при пустой истории ничего не меняет")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
@@ -861,7 +907,10 @@ def main(argv=None):
                 print("событий за 30 дней нет — список не трогаю (%s)" %
                       ("null" if row["scopes"] is None else row["scopes"]))
                 return 0
-        found, val = set_scopes(con, dev, kinds)
+        try:
+            found, val = set_scopes(con, dev, kinds)
+        except ValueError as e:
+            print("не записал: %s" % e); return 1
         if not found:
             print("нет такого устройства"); return 1
         print("%s: %s" % (dev, val if val is not None else "без ограничения (null)"))
