@@ -1447,5 +1447,194 @@ class ТестScopes(unittest.TestCase):
         self.assertFalse(contextd.scope_ok(self.con, None, "call"))
 
 
+class ТестЛогОтказов(unittest.TestCase):
+    """#30: отказ, не оставивший строки в логе, для владельца не случился.
+
+    На телефоне 400/403/404 терминальны (`Core.kt:137`, `:146`): событие
+    исчезает молча, и в логе доктора его тоже нет — искать нечего.
+    """
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        srv = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        _, токен = contextd.pair(mi.connect(каталог), "телефон")
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return каталог, srv, токен
+
+    def под_логом(self, срв, путь, тело=None, токен=None, метод="GET"):
+        """Сделать запрос и вернуть (код, строки лога сервера)."""
+        import contextlib
+        лог = io.StringIO()
+        адрес = "http://127.0.0.1:%d" % срв.server_address[1]
+        req = urllib.request.Request(адрес + путь, data=тело, method=метод)
+        if токен:
+            req.add_header("Authorization", "Bearer " + токен)
+        req.add_header("Content-Type", "application/json")
+        with contextlib.redirect_stdout(лог):
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    код = r.status
+                    r.read()
+            except urllib.error.HTTPError as e:
+                код = e.code
+                e.read()
+        return код, [s for s in лог.getvalue().splitlines() if путь.split("?")[0] in s]
+
+    def test_404_оставляет_строку(self):
+        """Молчал совсем: `say(404)` печатать было некому."""
+        _, срв, токен = self.поднять()
+        код, строки = self.под_логом(срв, "/v1/no-such", токен=токен)
+        self.assertEqual(код, 404)
+        self.assertEqual(len(строки), 1, строки)
+        self.assertIn("-> 404", строки[0])
+
+    def test_400_не_json_оставляет_строку_без_содержимого(self):
+        """Строка нужна с именами полей, но без единого байта тела (ТЗ §18)."""
+        _, срв, токен = self.поднять()
+        код, строки = self.под_логом(
+            срв, "/v1/ingest/event", b'{"kind": "call" ' + "секретная фраза".encode("utf-8"),
+            токен, "POST")
+        self.assertEqual(код, 400)
+        self.assertEqual(len(строки), 1, строки)
+        self.assertNotIn("секретная фраза", строки[0])
+
+    def test_403_пишет_имена_полей(self):
+        """`keys=` — единственная подсказка, что именно прислало устройство."""
+        каталог, срв, токен = self.поднять()
+        con = mi.connect(каталог)
+        dev = con.execute("select id from devices").fetchone()["id"]
+        contextd.set_scopes(con, dev, ["message"])
+        con.commit()
+        код, строки = self.под_логом(
+            срв, "/v1/ingest/event",
+            json.dumps({"kind": "call", "payload": {"text": "секретная фраза"}}).encode(),
+            токен, "POST")
+        self.assertEqual(код, 403)
+        self.assertEqual(len(строки), 1, строки)
+        self.assertIn("keys=device_id,kind", строки[0])
+        self.assertNotIn("секретная фраза", строки[0])
+
+    def test_401_называет_адрес(self):
+        """Раньше адрес печатал сам `authed`; теперь он в общей строке."""
+        _, срв, _ = self.поднять()
+        код, строки = self.под_логом(срв, "/v1/ingest/event", b"{}", None, "POST")
+        self.assertEqual(код, 401)
+        self.assertEqual(len(строки), 1, строки)
+        self.assertIn("from=127.0.0.1", строки[0])
+
+    def test_отказ_приёма_аудио_не_двоится_в_логе(self):
+        """`ingest_audio` возвращает код сам, и его строку пишет вызывающий.
+
+        На отказе (409 — хеш не сошёлся) строку пишет уже `say`, поэтому у
+        вызывающего стоит `if code < 400`: без него отказ шёл бы дважды.
+        """
+        каталог, срв, токен = self.поднять()
+        con = mi.connect(каталог)
+        сырьё = "это не тот звонок".encode("utf-8")
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "device_id": "pura",
+                                    "blob": {"sha256": sha}})
+        con.commit()
+        код, строки = self.под_логом(срв, "/v1/ingest/audio?event=" + eid,
+                                     b"other", токен, "POST")
+        self.assertEqual(код, 409)
+        self.assertEqual(len(строки), 1, строки)
+
+    def test_keep_alive_не_переносит_поля_в_следующий_запрос(self):
+        """Обработчик живёт дольше запроса: имена полей не должны переезжать.
+
+        Первый запрос обязан быть отказом: на успехе `say` не печатает и
+        `поля` в нём не участвуют вовсе — тест ловил бы только одну из двух
+        мыслимых утечек (находка ревью).
+        """
+        import http.client
+        import contextlib
+        каталог, срв, токен = self.поднять()
+        con = mi.connect(каталог)
+        dev = con.execute("select id from devices").fetchone()["id"]
+        contextd.set_scopes(con, dev, ["message"])
+        con.commit()
+        лог = io.StringIO()
+        c = http.client.HTTPConnection("127.0.0.1", срв.server_address[1], timeout=10)
+        with contextlib.redirect_stdout(лог):
+            тело = json.dumps({"kind": "call", "payload": {"text": "x"}}).encode()
+            c.request("POST", "/v1/ingest/event", тело,
+                      {"Authorization": "Bearer " + токен,
+                       "Content-Type": "application/json"})
+            первый = c.getresponse()
+            self.assertEqual(первый.status, 403)
+            первый.read()
+            c.request("GET", "/v1/no-such", None,
+                      {"Authorization": "Bearer " + токен})
+            r = c.getresponse()
+            self.assertEqual(r.status, 404)
+            r.read()
+        c.close()
+        строки = [s for s in лог.getvalue().splitlines() if "/v1/no-such" in s]
+        self.assertEqual(len(строки), 1, лог.getvalue())
+        self.assertNotIn("keys=", строки[0])
+
+    def test_замолчавший_клиент_всё_равно_оставляет_строку(self):
+        """Находка ревью: `отлуп` сначала сливает тело, и только потом отвечает.
+
+        Клиент объявил длину и замолчал — `слить` упирается в `timeout` и
+        бросает, а печатает `say`, до которого дело не доходило. Отказ снова
+        уходил без строки: ровно та тишина, ради которой всё и делалось.
+        """
+        import contextlib
+        import socket
+        _, срв, _ = self.поднять()
+        было = contextd.Handler.timeout
+        contextd.Handler.timeout = 1
+        лог = io.StringIO()
+        try:
+            s = socket.create_connection(("127.0.0.1", срв.server_address[1]), 10)
+            with contextlib.redirect_stdout(лог):
+                s.sendall(b"POST /v1/ingest/event HTTP/1.1\r\n"
+                          b"Host: x\r\nContent-Length: 1000\r\n\r\n")
+                s.settimeout(10)
+                ответ = s.recv(200)          # тела не шлём вовсе
+            s.close()
+        finally:
+            contextd.Handler.timeout = было
+        self.assertIn(b"401", ответ, ответ)
+        строки = [x for x in лог.getvalue().splitlines()
+                  if "/v1/ingest/event" in x]
+        self.assertEqual(len(строки), 1, лог.getvalue())
+
+    def test_блоб_не_у_звонка_пишет_имена_полей(self):
+        """Единственный отказ с разобранным json и без `keys=` (находка ревью)."""
+        _, срв, токен = self.поднять()
+        sha = hashlib.sha256(b"x").hexdigest()
+        код, строки = self.под_логом(
+            срв, "/v1/ingest/message",
+            json.dumps({"blob": {"sha256": sha}}).encode(), токен, "POST")
+        self.assertEqual(код, 400)
+        self.assertEqual(len(строки), 1, строки)
+        self.assertIn("keys=blob", строки[0])
+
+    def test_имя_поля_не_подделывает_строку_лога(self):
+        """Ключ придумывает устройство. Перевод строки в нём — вторая строка
+        лога с любым текстом; длинное имя — обход §18 через дверь без сторожа."""
+        длинный = "тайна" * 40
+        строка = contextd.log_line("POST", "/v1/ingest/event", 403, {
+            "device_id": "dev", "kind": "call",
+            "поле\nPOST /v1/ingest/event -> 200": 1,
+            длинный: 1})
+        self.assertEqual(len(строка.splitlines()), 1, строка)
+        self.assertNotIn(длинный, строка)
+        self.assertLess(len(строка), 250, строка)
+
+    def test_тысяча_полей_не_раздувает_строку(self):
+        """Мегабайт json — это десятки тысяч ключей."""
+        строка = contextd.log_line("POST", "/v1/ingest/event", 400,
+                                   {"k%04d" % i: 1 for i in range(1000)})
+        self.assertIn("+980", строка)
+        self.assertLess(len(строка), 300, строка)
+
+
 if __name__ == "__main__":
     unittest.main()
