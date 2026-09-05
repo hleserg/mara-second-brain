@@ -4,7 +4,7 @@
 нему потом видно, что запись была и куда делась. Сверка чинит то, что чинится
 однозначно, и только докладывает про то, где нужен человек.
 """
-import os, sys, io, json, glob, math, time, subprocess, tempfile, unittest
+import os, sys, io, json, glob, time, subprocess, tempfile, unittest
 from datetime import datetime, timedelta
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -204,11 +204,26 @@ class Сырьё(unittest.TestCase):
         проходит обе заставы насквозь: он не меньше нуля и не больше
         потолка, а `ceil(nan)` бросает уже на импорте — крон в 4:40 снова
         отдаёт `EXIT=1` и не убирает ничего.
+
+        `-0.0` — пятый класс, найденный ревьюером в круге 1, и он опаснее
+        всех: `-0.0 < 0` ложно, `ceil(-0.0)` даёт ноль, жалобы нет, и в
+        ближайшие 4:40 уходит всё сырьё, кроме сегодняшнего. Застава теперь
+        смотрит на знак, а не на сравнение; без этого значения мутант
+        `elif СРОК < -0.4` проходил полный гейт зелёным.
+
+        Пустая строка — самая частая правка crontab: владелец стирает
+        значение, оставляя присвоение. Молча взять тридцать здесь нельзя по
+        той же причине, что и на «тридцать»: если стояло девяносто, потеря
+        шестидесяти суток пройдёт без единой строки. Мутант, берущий дефолт
+        молча, до этого значения полный гейт проходил зелёным. Нашёл
+        ревьюер, круг 1.
         """
         for значение, кусок in (("тридцать", "не число"),
                                 ("nan", "не число"),
+                                ("", "не число"),
                                 ("-1", "отрицательный срок"),
-                                ("-0.5", "отрицательный срок")):
+                                ("-0.5", "отрицательный срок"),
+                                ("-0.0", "отрицательный срок")):
             with self.subTest(значение=значение):
                 root = tempfile.mkdtemp(prefix="mara-raw-")
                 # −31/−30, а не −40/−3: закрепляет, что откат идёт именно
@@ -366,31 +381,43 @@ class Сырьё(unittest.TestCase):
         подмены, и обратимая ошибка дешевле. Оракул −46/−45 это и проверяет:
         при усечении порог встаёт на сутки ближе и сорокапятидневный файл
         умирает.
+
+        Значений два, и второе — весь смысл первого. `44.5` стоит ровно в
+        точке, где округление вверх и округление до ближайшего совпадают
+        (`int(44.5 + 0.5)` — те же сорок пять), поэтому на нём решение PR не
+        проверяется вовсе: мутант `int(СРОК + 0.5)` проходил полный гейт
+        зелёным, хотя `44.2` у него уезжает в сорок четыре. `44.2` — точка,
+        где вверх, вниз и к ближайшему расходятся все трое. Нашёл ревьюер,
+        круг 1.
         """
-        root = tempfile.mkdtemp(prefix="mara-raw-")
-        старый, свежий = [
-            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
-            for d in (46, 45)]
-        for p in (старый, свежий):
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            open(p, "w").write("x")
-        r = subprocess.run(
-            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
-             "--root", root],
-            env=dict(os.environ, MARA_RAW_DAYS="44.5",
-                     PYTHONIOENCODING="utf-8"),
-            capture_output=True, text=True, timeout=120)
-        self.assertEqual(0, r.returncode, r.stderr)
-        self.assertIn("MARA_RAW_DAYS=%r" % "44.5", r.stdout)
-        self.assertIn("дробный срок", r.stdout)
-        # Перевод строки, как у потолка: голое «беру 45» есть внутри
-        # «беру 450», и оракул на усечение до сорока пяти сотен был бы
-        # зелёным.
-        self.assertIn("беру 45\n", r.stdout)
-        self.assertFalse(os.path.exists(старый),
-                         "сырьё не убрано: " + r.stdout)
-        self.assertTrue(os.path.exists(свежий),
-                        "срок урезали и снесли сохраняемое: " + r.stdout)
+        for значение in ("44.5", "44.2"):
+            with self.subTest(значение=значение):
+                root = tempfile.mkdtemp(prefix="mara-raw-")
+                старый, свежий = [
+                    os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+                    for d in (46, 45)]
+                for p in (старый, свежий):
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                    open(p, "w").write("x")
+                r = subprocess.run(
+                    [sys.executable,
+                     os.path.join(ROOT, "scripts", "blob_retention.py"),
+                     "--root", root],
+                    env=dict(os.environ, MARA_RAW_DAYS=значение,
+                             PYTHONIOENCODING="utf-8"),
+                    capture_output=True, text=True, timeout=120)
+                self.assertEqual(0, r.returncode, r.stderr)
+                self.assertIn("MARA_RAW_DAYS=%r" % значение, r.stdout)
+                self.assertIn("дробный срок", r.stdout)
+                # Перевод строки, как у потолка: голое «беру 45» есть внутри
+                # «беру 450», и оракул на усечение до сорока пяти сотен был бы
+                # зелёным.
+                self.assertIn("беру 45\n", r.stdout)
+                self.assertFalse(os.path.exists(старый),
+                                 "сырьё не убрано: " + r.stdout)
+                self.assertTrue(os.path.exists(свежий),
+                                "срок урезали и снесли сохраняемое: "
+                                + r.stdout)
 
     def test_целое_с_точкой_срок_не_меняет_и_молчит(self):
         """`45.0` — те же сорок пять суток, и жаловаться тут не на что.
@@ -491,14 +518,19 @@ class Сырьё(unittest.TestCase):
         r = subprocess.run([sys.executable, "-c", код], env=окр,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        # Разбор тот же, что у модуля, а не `int`: с тех пор как модуль берёт
-        # дробную запись, `MARA_RAW_DAYS=30.0` в crontab — валидный конфиг, а
-        # `int("30.0")` бросил бы `ValueError`, и зеркало упало бы трейсбеком
-        # вместо внятного расхождения. Второй разбор той же переменной обязан
-        # округлять так же, иначе зеркало врёт ровно там, где нужно.
-        self.assertEqual(
-            math.ceil(float(строки[присвоения[0]].split("=", 1)[1])),
-            int(r.stdout))
+        # Значение из crontab отдаём тому же модулю, а не разбираем здесь
+        # сами. Свой разбор был бы вторым экземпляром правила округления —
+        # его пришлось бы чинить каждый раз вместе с первым, а `int("30.0")`
+        # уронил бы зеркало трейсбеком на конфиге, который модуль принимает.
+        # Так правило живёт в одном месте по построению, а не по
+        # договорённости. Предложил ревьюер, круг 1.
+        значение = строки[присвоения[0]].split("=", 1)[1].strip()
+        rк = subprocess.run([sys.executable, "-c", код],
+                            env=dict(окр, MARA_RAW_DAYS=значение),
+                            capture_output=True, text=True)
+        self.assertEqual(rк.returncode, 0, rк.stderr)
+        self.assertEqual(rк.stdout, r.stdout,
+                         "crontab и дефолт модуля разъехались: " + значение)
 
 
 class Сверка(unittest.TestCase):
