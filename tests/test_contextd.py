@@ -171,6 +171,25 @@ class Api(unittest.TestCase):
             body = r.read().decode("utf-8")
         self.assertIn('mara_device_last_seen_seconds{name="тел\\"ефон"} -1', body)
 
+    def test_два_живых_устройства_с_одним_именем_дают_одну_строку(self):
+        """Дубль имени не выдумка: перевыпуск токена делает вторую запись, и
+        `pair` этого не запрещает. Две строки с одинаковым набором меток —
+        сломанная экспозиция, а не шум: скрейп её либо отвергает, либо молча
+        берёт одну из строк, и какую — не обещано."""
+        contextd.pair(self.con, "дубль")
+        свежий, _ = contextd.pair(self.con, "дубль")
+        self.con.execute("update devices set last_seen=? where id=?",
+                         (mi.now_iso(), свежий))
+        with urllib.request.urlopen(self.base + "/metrics", timeout=5) as r:
+            body = r.read().decode("utf-8")
+        метка = 'mara_device_last_seen_seconds{name="дубль"}'
+        строки = [l for l in body.splitlines() if l.startswith(метка)]
+        self.assertEqual(len(строки), 1, строки)
+        # Значение — от того устройства, что на связи, а не от того, что ни
+        # разу не выходило: иначе метрика показывала бы −1 при работающем.
+        self.assertGreaterEqual(float(строки[0].split()[-1]), 0, строки[0])
+        self.assertLess(float(строки[0].split()[-1]), 300, строки[0])
+
     def test_отозванное_устройство_401(self):
         dev, token = contextd.pair(self.con, "потерянный")
         self.con.execute("update devices set revoked_at=? where id=?",
