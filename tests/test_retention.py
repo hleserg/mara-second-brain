@@ -4,7 +4,7 @@
 нему потом видно, что запись была и куда делась. Сверка чинит то, что чинится
 однозначно, и только докладывает про то, где нужен человек.
 """
-import os, sys, io, json, glob, time, subprocess, tempfile, unittest
+import os, sys, io, json, glob, math, time, subprocess, tempfile, unittest
 from datetime import datetime, timedelta
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -191,14 +191,24 @@ class Сырьё(unittest.TestCase):
         `main`, отдавал `EXIT=1` и не убирал ничего; сырьё копилось, и
         единственным сигналом была ежечасная жалоба соседа.
 
-        Значения два, и второе опаснее первого: минус проходит через `int`
-        молча и уносит порог в будущее, то есть удаляет всё сырьё разом.
-        Берём `-1`, а не `-30`: застава стоит на `< 0`, и сужение до `< -1`
-        на тридцатке было бы зелёным, а `-1` тогда прошёл бы молча и снёс всё
-        сырьё, включая сегодняшнее. Нашёл ревьюер, круг 1.
+        Минус опаснее нечислового: он проходит разбор молча и уносит порог
+        в будущее, то есть удаляет всё сырьё разом. Берём `-1`, а не `-30`:
+        застава стоит на `< 0`, и сужение до `< -1` на тридцатке было бы
+        зелёным, а `-1` тогда прошёл бы молча и снёс всё сырьё, включая
+        сегодняшнее. Нашёл ревьюер, круг 1.
+
+        Две дробные записи здесь не про дробь, а про порядок застав. `-0.5`
+        обязан считаться минусом до округления: округляем вверх — и `-0.5`
+        даёт ноль, «держать только сегодняшний день», то есть ровно ту
+        потерю, против которой застава стоит, только молча. `nan` же
+        проходит обе заставы насквозь: он не меньше нуля и не больше
+        потолка, а `ceil(nan)` бросает уже на импорте — крон в 4:40 снова
+        отдаёт `EXIT=1` и не убирает ничего.
         """
         for значение, кусок in (("тридцать", "не число"),
-                                ("-1", "отрицательный срок")):
+                                ("nan", "не число"),
+                                ("-1", "отрицательный срок"),
+                                ("-0.5", "отрицательный срок")):
             with self.subTest(значение=значение):
                 root = tempfile.mkdtemp(prefix="mara-raw-")
                 # −31/−30, а не −40/−3: закрепляет, что откат идёт именно
@@ -339,6 +349,118 @@ class Сырьё(unittest.TestCase):
         self.assertFalse(os.path.exists(старый), "за потолком не убрано")
         self.assertTrue(os.path.exists(свежий), "убрано на самом потолке")
 
+    def test_дробный_срок_округляется_вверх_и_жалуется(self):
+        """Четвёртый класс, и до правки он уезжал в «не число, беру 30».
+
+        `int("44.5")` бросает `ValueError`, то есть дробная запись попадала
+        не в свою ветку, а в первую: владелец, поставивший полтора месяца,
+        получал месяц, и ближайший прогон в 4:40 сносил пятнадцать суток
+        сырья, которые он просил сохранить. Вероятность не умозрительная —
+        двумя строками выше в `install/mara.cron` стоит
+        `MARA_CORE_BACKUP_MAX_DAYS=2.2`, дробное значение в соседней
+        переменной того же блока.
+
+        Округление вверх, а не усечение: у двух подмен разная цена. `44.5 →
+        44` удаляет сутки сырья, которые владелец просил держать, `44.5 →
+        45` держит лишние сутки диска. Модуль различает ветки именно ценой
+        подмены, и обратимая ошибка дешевле. Оракул −46/−45 это и проверяет:
+        при усечении порог встаёт на сутки ближе и сорокапятидневный файл
+        умирает.
+        """
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        старый, свежий = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (46, 45)]
+        for p in (старый, свежий):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("x")
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
+             "--root", root],
+            env=dict(os.environ, MARA_RAW_DAYS="44.5",
+                     PYTHONIOENCODING="utf-8"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("MARA_RAW_DAYS=%r" % "44.5", r.stdout)
+        self.assertIn("дробный срок", r.stdout)
+        # Перевод строки, как у потолка: голое «беру 45» есть внутри
+        # «беру 450», и оракул на усечение до сорока пяти сотен был бы
+        # зелёным.
+        self.assertIn("беру 45\n", r.stdout)
+        self.assertFalse(os.path.exists(старый),
+                         "сырьё не убрано: " + r.stdout)
+        self.assertTrue(os.path.exists(свежий),
+                        "срок урезали и снесли сохраняемое: " + r.stdout)
+
+    def test_целое_с_точкой_срок_не_меняет_и_молчит(self):
+        """`45.0` — те же сорок пять суток, и жаловаться тут не на что.
+
+        Жалоба уходит владельцу в сводку 8:00 каждое утро, пока конфиг не
+        поправят, а поправлять нечего: `45.0` и `45` дают один порог.
+        Прецедент — `test_ровно_потолок_валиден_и_жалобы_не_родит`, где
+        владелец, послушавшийся совета из жалобы, получал на здоровом
+        конфиге ежечасный `error` навсегда. Здесь это ещё вероятнее:
+        дробную запись владельцу подсказывает соседняя строка крона.
+        """
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        старый, свежий = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (46, 45)]
+        for p in (старый, свежий):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("x")
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
+             "--root", root],
+            env=dict(os.environ, MARA_RAW_DAYS="45.0",
+                     PYTHONIOENCODING="utf-8"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, r.returncode, r.stderr)
+        # Имя переменной целиком, а не «беру»: любая из четырёх жалоб печатает
+        # `MARA_RAW_DAYS=`, а штатный прогон — никогда.
+        self.assertNotIn("MARA_RAW_DAYS", r.stdout)
+        self.assertFalse(os.path.exists(старый),
+                         "сырьё не убрано: " + r.stdout)
+        self.assertTrue(os.path.exists(свежий),
+                        "точка в записи урезала срок: " + r.stdout)
+
+    def test_бесконечность_читается_как_потолок_а_не_как_мусор(self):
+        """`inf` значит «не убирать», и место ему в ветке потолка.
+
+        До правки разбор начинался с `int`, а `int("inf")` бросает
+        `ValueError`: бесконечность уезжала в «не число, беру 30» — ровно в
+        ту потерю, против которой ветка потолка и построена. Владелец,
+        написавший `inf` вместо шести знаков, получал месяц и лишался всего
+        остального в ближайшие 4:40.
+
+        Оракул перевёрнут так же, как у шести знаков: старый файл обязан
+        выжить. `float` бесконечность берёт молча, бросает на ней уже
+        округление — значит застава на потолок обязана стоять **до** него.
+        """
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        старый, свежий = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (36501, 36500)]
+        for p in (старый, свежий):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("x")
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
+             "--root", root],
+            env=dict(os.environ, MARA_RAW_DAYS="inf",
+                     PYTHONIOENCODING="utf-8"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("MARA_RAW_DAYS=%r" % "inf", r.stdout)
+        self.assertIn("больше ста лет", r.stdout)
+        self.assertIn("беру 36500\n", r.stdout)
+        self.assertFalse(os.path.exists(старый),
+                         "потолок не убирает даже за своей границей: "
+                         + r.stdout)
+        self.assertTrue(os.path.exists(свежий),
+                        "бесконечность прочли как мусор и урезали до "
+                        "дефолта: " + r.stdout)
+
     def test_значение_MARA_RAW_DAYS_из_крона_совпадает_с_дефолтом_кода(self):
         """Зеркало `test_значение_из_крона_совпадает_с_дефолтом_кода`.
 
@@ -369,8 +491,14 @@ class Сырьё(unittest.TestCase):
         r = subprocess.run([sys.executable, "-c", код], env=окр,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(int(строки[присвоения[0]].split("=", 1)[1]),
-                         int(r.stdout))
+        # Разбор тот же, что у модуля, а не `int`: с тех пор как модуль берёт
+        # дробную запись, `MARA_RAW_DAYS=30.0` в crontab — валидный конфиг, а
+        # `int("30.0")` бросил бы `ValueError`, и зеркало упало бы трейсбеком
+        # вместо внятного расхождения. Второй разбор той же переменной обязан
+        # округлять так же, иначе зеркало врёт ровно там, где нужно.
+        self.assertEqual(
+            math.ceil(float(строки[присвоения[0]].split("=", 1)[1])),
+            int(r.stdout))
 
 
 class Сверка(unittest.TestCase):
