@@ -165,16 +165,58 @@ class ВозрастПакета(unittest.TestCase):
         # исключение улетело наверх.
         self.assertIn("бэкап-ядра-конфиг", находки)
 
-    def test_опечатка_в_MARA_RAW_DAYS_не_роняет_сверку(self):
+    def test_сломанный_blob_retention_не_роняет_сверку(self):
         """Тот же отказ у второго ленивого импорта — `blob_retention`.
 
         Застава стояла у пакета и не стояла у соседа тридцатью строками ниже:
-        ровно та половинчатая правка, за которую этот PR и ругает ADR-0008.
-        Ломаем живым отказом, а не подменой модуля: `blob_retention` на
-        модульном уровне делает `int(os.environ.get("MARA_RAW_DAYS", 30))`, и
-        опечатка в задокументированной переменной давала `EXIT=1` на всю
-        сверку. Заодно это закрепляет ширину `except`: `ValueError` мимо
-        `except ImportError` пролетел бы."""
+        ровно та половинчатая правка, за которую PR #48 и ругал ADR-0008.
+        Раньше здесь ломала живая опечатка в `MARA_RAW_DAYS`; теперь её ловит
+        сам `blob_retention`, и заставе нужен отказ, который не лечится в
+        источнике. Подменный модуль его и даёт: файл читается с диска, и
+        `RuntimeError` из тела — такой же честный отказ, как `SyntaxError` в
+        `mara-brief.py` у соседа выше. Ширину `except` это держит по-прежнему:
+        мимо `except ImportError` `RuntimeError` пролетел бы."""
+        root = tempfile.mkdtemp(prefix="mara-root-")
+        self.addCleanup(shutil.rmtree, root, True)
+        con = mi.connect(root)
+        self.addCleanup(con.close)
+        подмена = tempfile.mkdtemp(prefix="mara-подмена-")
+        self.addCleanup(shutil.rmtree, подмена, True)
+        io.open(os.path.join(подмена, "blob_retention.py"), "w",
+                encoding="utf-8").write(
+                    'raise RuntimeError("blob_retention битый")\n')
+        import blob_retention
+        self.addCleanup(sys.modules.__setitem__, "blob_retention",
+                        blob_retention)
+        del sys.modules["blob_retention"]
+        sys.path.insert(0, подмена)
+        self.addCleanup(sys.path.remove, подмена)
+        importlib.invalidate_caches()
+        f = rc.run(con, root, vault=self.vault, targets=[])
+        находки = {x["check"]: x for x in f}
+        self.assertIn("ретеншен-не-проверен", находки)
+        self.assertEqual("warn", находки["ретеншен-не-проверен"]["level"])
+        # Токен причины живёт только в теле исключения. Прежний оракул брал
+        # `"тридцать"`, а тот лежал ещё и в `os.environ`, и подстановка
+        # `% os.environ[...]` вместо `% e` оставила бы тест зелёным при
+        # потерянной причине. Нашёл ревьюер, круг 5 ревью #48.
+        self.assertIn("битый", находки["ретеншен-не-проверен"]["detail"])
+        # Префикс — см. соседа выше: в сводку уходит только `detail`.
+        self.assertIn("не запустилась",
+                      находки["ретеншен-не-проверен"]["detail"])
+        # Свидетель — последняя проверка в `run`: до неё не добрались бы, если
+        # бы исключение улетело наверх.
+        self.assertIn("бэкап-ядра-конфиг", находки)
+
+    def test_опечатка_в_MARA_RAW_DAYS_докладывается_отдельной_находкой(self):
+        """Опечатка теперь не отказ, а находка: уборка идёт на дефолте.
+
+        До этой правки цепочка была короткой и неверной: `int("тридцать")` на
+        импорте — `EXIT=1` у крона в 4:40, ноль убранного сырья, а сверке
+        только «проверка не запустилась», из которой не прочесть, что сломан
+        конфиг, а не код. Теперь модуль берёт тридцать, кладёт причину на себя
+        и отдаёт её сверке — единственному читателю, который доносит до
+        владельца."""
         root = tempfile.mkdtemp(prefix="mara-root-")
         self.addCleanup(shutil.rmtree, root, True)
         con = mi.connect(root)
@@ -190,19 +232,18 @@ class ВозрастПакета(unittest.TestCase):
         importlib.invalidate_caches()
         f = rc.run(con, root, vault=self.vault, targets=[])
         находки = {x["check"]: x for x in f}
-        self.assertIn("ретеншен-не-проверен", находки)
-        self.assertEqual("warn", находки["ретеншен-не-проверен"]["level"])
-        # То же и здесь, но токен взят из тела исключения, а не из окружения:
-        # `"тридцать"` лежит ещё и в `os.environ`, и подстановка
-        # `% os.environ[...]` вместо `% e` оставила бы тест зелёным при
-        # потерянной причине. Нашёл ревьюер, круг 5.
-        self.assertIn("invalid literal",
-                      находки["ретеншен-не-проверен"]["detail"])
-        # Префикс — см. соседа выше: в сводку уходит только `detail`.
-        self.assertIn("не запустилась",
-                      находки["ретеншен-не-проверен"]["detail"])
-        # Свидетель — последняя проверка в `run`: до неё не добрались бы, если
-        # бы исключение улетело наверх.
+        # Отказа больше нет: заставу это не отменяет, но по этому пути она
+        # молчит.
+        self.assertNotIn("ретеншен-не-проверен", находки)
+        self.assertIn("ретеншен-конфиг", находки)
+        # `error`, а не `warn`: `код()` даёт 1, крон ругается ежечасно, пока
+        # владелец не поправит. Прецедент — `бэкап-ядра-конфиг` (`5d8bc67`).
+        self.assertEqual("error", находки["ретеншен-конфиг"]["level"])
+        # Само значение — иначе владельцу нечего искать в crontab. Оно лежит
+        # и в `os.environ`, но добраться до `detail` может только через
+        # сообщение: находку собирает `blob_retention`, а не тест.
+        self.assertIn("тридцать", находки["ретеншен-конфиг"]["detail"])
+        self.assertIn("MARA_RAW_DAYS", находки["ретеншен-конфиг"]["detail"])
         self.assertIn("бэкап-ядра-конфиг", находки)
 
     def test_проверка_проведена_в_сверку(self):

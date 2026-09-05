@@ -4,7 +4,7 @@
 нему потом видно, что запись была и куда делась. Сверка чинит то, что чинится
 однозначно, и только докладывает про то, где нужен человек.
 """
-import os, sys, json, glob, time, tempfile, unittest
+import os, sys, json, glob, time, subprocess, tempfile, unittest
 from datetime import datetime, timedelta
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -176,6 +176,40 @@ class Сырьё(unittest.TestCase):
         self.assertEqual(br.raw_sweep(root), {"files": 2, "bytes": 2})
         self.assertEqual(все(), [день(-3) + ".jsonl"])
         self.assertEqual(br.raw_sweep(root)["files"], 0, "повтор нашёл что убирать")
+
+    def test_опечатка_в_MARA_RAW_DAYS_не_роняет_уборку_в_4_40(self):
+        """Крон в 4:40 — отдельная единица со своим отказом.
+
+        Сверка про опечатку доложит, но уборку не сделает: у неё свой процесс.
+        Поэтому спрашиваем именно процесс, а не импорт, — так, как его зовёт
+        `install/mara.cron`. Раньше он падал на `int("тридцать")` ещё до
+        `main`, отдавал `EXIT=1` и не убирал ничего; сырьё копилось, и
+        единственным сигналом была ежечасная жалоба соседа.
+        """
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        старый, свежий = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (40, 3)]
+        for p in (старый, свежий):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("x")
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
+             "--root", root],
+            env=dict(os.environ, MARA_RAW_DAYS="тридцать",
+                     PYTHONIOENCODING="utf-8"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, r.returncode, r.stderr)
+        # Причина в своём логе: сверка её тоже увидит, но раз в час, а этот
+        # файл читают с вопросом «почему тридцать».
+        self.assertIn("MARA_RAW_DAYS", r.stdout)
+        self.assertIn("тридцать", r.stdout)
+        self.assertIn("беру 30", r.stdout)
+        # И главное: прогон состоялся именно на дефолте, а не только не упал.
+        # Свежий файл — половина оракула: откат на ноль вместо тридцати тоже
+        # даёт `EXIT=0` и тоже «убирает», только заодно вчерашние логи.
+        self.assertFalse(os.path.exists(старый), "сырьё не убрано: " + r.stdout)
+        self.assertTrue(os.path.exists(свежий), "убрано свежее: " + r.stdout)
 
 
 class Сверка(unittest.TestCase):
