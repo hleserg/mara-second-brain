@@ -6,7 +6,8 @@
 и выглядит это ровно как норма: каталог на месте, архив свежий, сверка молчит.
 Проверяем, что теперь не молчит — во всех трёх местах, где вопрос задавался.
 """
-import os, sys, shutil, subprocess, tempfile, unittest
+import glob, json, os, sys, shutil, subprocess, tempfile, unittest
+import unittest.mock
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -116,17 +117,154 @@ class Прогон(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.cb = load("core-backup.py")
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
+        # Удавшийся прогон пишет отметку носителей, и без подмены она уляжется
+        # в боевой `~/.local/state/mara` хозяина машины. До сих пор тут все
+        # прогоны падали раньше отметки, потому и не мешало.
+        self.боевая_отметка = mi.ОТМЕТКА_НОСИТЕЛЕЙ
+        self.отметка = os.path.join(self.tmp, "state", "core-targets.json")
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.отметка
 
     def tearDown(self):
+        mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.боевая_отметка
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
-    def test_единственный_носитель_на_корневой_фс_валит_прогон(self):
+    def стенд(self):
+        """Корень с базой и парольная фраза — общее начало любого прогона."""
         root = os.path.join(self.tmp, "blobs")
         mi.connect(root).close()
         пароль = os.path.join(self.tmp, "pass")
         open(пароль, "w").write("проверочная фраза\n")
         os.chmod(пароль, 0o600)
+        return root, пароль
+
+    def test_битая_копия_не_идёт_в_зачёт(self):
+        """Носитель принял запись и отдал не то, что писали.
+
+        Учение восстановления разворачивает только первый носитель, так что
+        второй мог лечь битым и молчать до дня, когда он единственный уцелел.
+        Порчу вносим на уровне записи в файл, а не подменой сверки: оракул
+        тут — сам испорченный байт, а не мнение проверяемого кода."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        второй = os.path.join(self.tmp, "target2")
+        # Старые архивы на носителе, который сегодня отказал, оставшись при
+        # этом писабельным (сверка не сошлась, каталог жив — обычный случай).
+        # Ротация не имеет права их трогать: такой носитель живёт последней
+        # удачной копией, и вычистить её по `keep` значило бы оставить его ни
+        # с чем. Это же единственный вход, отличающий ротацию по `записано`
+        # от ротации по `targets`.
+        os.makedirs(второй)
+        for дата in ("2000-01-01", "2000-01-02", "2000-01-03"):
+            open(os.path.join(второй, "core-%s.tar.gz.gpg" % дата), "w").close()
+        настоящий = shutil.copy2
+
+        def подмена(src, dst, **kw):
+            r = настоящий(src, dst, **kw)
+            if os.path.dirname(dst) == второй:
+                with open(dst, "ab") as fh:
+                    fh.write(b"\0")
+            return r
+
+        with unittest.mock.patch.object(self.cb.shutil, "copy2", подмена):
+            r = self.cb.прогон(root, [цель, второй], пароль, keep=2,
+                               work=os.path.join(self.tmp, "work"))
+        self.assertEqual(r["носители"], [цель], "битая копия зачтена")
+        # Ровно три — те самые старые: сегодняшний архив сюда не лёг, а
+        # ротация по `keep=2` сюда не ходила.
+        self.assertEqual(len(glob.glob(os.path.join(второй, "core-*"))), 3,
+                         "битый архив лёг под боевым именем либо ротация "
+                         "выкосила архивы отказавшего носителя")
+        self.assertEqual(glob.glob(os.path.join(второй, ".*")), [],
+                         "временный огрызок остался на носителе")
+        # Отметка — то, по чему сверка §12 отличает отвал от пропажи; носитель,
+        # на который не легло ничего, обязан в ней отсутствовать.
+        self.assertEqual(list(json.load(open(self.отметка, encoding="utf-8"))),
+                         [цель])
+        # Права ставятся временному файлу, до переименования: если сверка
+        # переедет, легко потерять и chmod.
+        лежит = os.path.join(цель, r["архив"])
+        self.assertEqual(os.stat(лежит).st_mode & 0o777, 0o600)
+
+    def test_отказ_уборки_не_валит_прогон(self):
+        """Носитель ушёл в read-only той же бедой, что испортила копию.
+
+        Тогда `unlink` огрызка бросает EACCES — и, не будь он прикрыт, унёс бы
+        с собой запись на здоровый носитель, отметку, учение и ротацию: отказ
+        одного носителя стоил бы всей ночной работы."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        второй = os.path.join(self.tmp, "target2")
+        настоящий = shutil.copy2
+
+        def подмена(src, dst, **kw):
+            r = настоящий(src, dst, **kw)
+            if os.path.dirname(dst) == второй:
+                with open(dst, "ab") as fh:
+                    fh.write(b"\0")
+                os.chmod(второй, 0o500)     # писать сюда больше нельзя вовсе
+            return r
+
+        try:
+            # Больной носитель первым: с ним падение в обработчике не даёт
+            # здоровому получить архив вообще, и ночь пропадает целиком.
+            with unittest.mock.patch.object(self.cb.shutil, "copy2", подмена):
+                r = self.cb.прогон(root, [второй, цель], пароль, keep=2,
+                                   work=os.path.join(self.tmp, "work"))
+        finally:
+            # Иначе tearDown не уберёт каталог; `isdir` — чтобы падение до
+            # `makedirs` не пряталось за `FileNotFoundError` отсюда.
+            if os.path.isdir(второй):
+                os.chmod(второй, 0o700)
+        self.assertEqual(r["носители"], [цель])
+        self.assertIn("проверка", r, "учение не дошло из-за уборки огрызка")
+
+    def test_огрызок_прошлой_ночи_убирается(self):
+        """Носитель, ушедший в read-only, оставил временный файл: убрать его
+        тогда было нечем. Имя с датой — следующая ночь его не перезапишет, а
+        ротация ходит по `core-*` и точечных имён не видит, так что без
+        отдельной уборки он остался бы на носителе навсегда."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        os.makedirs(цель)
+        огрызок = os.path.join(цель, ".core-2000-01-01.tar.gz.gpg.tmp")
+        open(огрызок, "w").close()
+        # На тех же носителях лежит сосед — `vault-backup.sh` пишет туда свой
+        # бандл и в понедельник расходится с нами всего на десять минут.
+        # Шаблон уборки обязан различать их по префиксу, а не по хвосту.
+        сосед = os.path.join(цель, ".vault-2000-01-01.bundle.gpg.tmp")
+        open(сосед, "w").close()
+        # Огрызок, который не снять: на шаре его держит открытым чужой
+        # процесс, а на стенде проще всего каталогом. Уборка не обязана
+        # удаться — но и уронить удачную ночь задним числом не имеет права.
+        неснимаемый = os.path.join(цель, ".core-беда.tmp")
+        os.makedirs(неснимаемый)
+        r = self.cb.прогон(root, [цель], пароль, keep=2,
+                           work=os.path.join(self.tmp, "work"))
+        self.assertEqual(r["носители"], [цель])
+        self.assertFalse(os.path.exists(огрызок), "огрызок остался навсегда")
+        self.assertTrue(os.path.exists(сосед), "убрали временный файл соседа")
+
+    def test_носитель_без_каталога_не_роняет_прогон(self):
+        """`makedirs` падает до того, как появился временный файл.
+
+        Имя `врем` связано до `try` именно поэтому: уборка в обработчике иначе
+        даёт `UnboundLocalError` и превращает отвал одного носителя в падение
+        всего прогона."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        не_каталог = os.path.join(self.tmp, "файл")
+        open(не_каталог, "w").close()
+        r = self.cb.прогон(root, [os.path.join(не_каталог, "target2"), цель],
+                           пароль, keep=2, work=os.path.join(self.tmp, "work"))
+        self.assertEqual(r["носители"], [цель])
+
+    def test_единственный_носитель_на_корневой_фс_валит_прогон(self):
+        root, пароль = self.стенд()
         with self.assertRaises(RuntimeError) as e:
             self.cb.прогон(root, [os.path.join(self.tmp, "target")], пароль,
                            keep=2, work=os.path.join(self.tmp, "work"))
