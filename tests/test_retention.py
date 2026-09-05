@@ -269,15 +269,25 @@ class Сырьё(unittest.TestCase):
         `код()` даёт ноль, и сводка в 8:00 говорит «всё сходится», пока сырьё
         копится. Хуже, чем было до правки, где сверка хотя бы ругалась.
 
-        Оракул перевёрнут относительно соседей: сорокадневный файл обязан
+        Оракул перевёрнут относительно соседей: старый файл обязан
         **выжить**. Откат на тридцать тоже дал бы `EXIT=0` и тоже «убрал бы»,
         только заодно снёс бы всё, что владелец этим числом просил сохранить.
         Нашёл ревьюер, круг 1.
+
+        Пара стоит ровно на потолке, а не «где-то за месяцем»: сорокадневный
+        файл переживал любой потолок от сорока и выше, и три мутанта проходили
+        полный гейт зелёным — `ПОТОЛОК = 365000`, откат на `730000` и текст
+        «беру 30» при клампе на потолок. Обе даты представимы: 1926 год, до
+        `date.min` ещё шестьсот лет, `OverflowError` неоткуда. Нашёл ревьюер,
+        круг 2.
         """
         root = tempfile.mkdtemp(prefix="mara-raw-")
-        старый = os.path.join(root, "tdlib", "raw", день(-40) + ".jsonl")
-        os.makedirs(os.path.dirname(старый), exist_ok=True)
-        open(старый, "w").write("x")
+        старый, свежий = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (36501, 36500)]
+        for f in (старый, свежий):
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            open(f, "w").write("x")
         r = subprocess.run(
             [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
              "--root", root],
@@ -287,7 +297,15 @@ class Сырьё(unittest.TestCase):
         self.assertEqual(0, r.returncode, r.stderr)
         self.assertIn("MARA_RAW_DAYS=%r" % "1000000", r.stdout)
         self.assertIn("больше ста лет", r.stdout)
-        self.assertTrue(os.path.exists(старый),
+        # Перевод строки в конце — не украшение: голое «беру 36500» есть
+        # внутри «беру 365000», и текстовый оракул на потолок в 365 тысяч
+        # был бы зелёным. Число здесь литерал из ТЗ, а не `br.ПОТОЛОК`:
+        # константа, взятая у самого модуля, совпадёт с любой мутацией.
+        self.assertIn("беру 36500\n", r.stdout)
+        self.assertFalse(os.path.exists(старый),
+                         "потолок не убирает даже за своей границей: "
+                         + r.stdout)
+        self.assertTrue(os.path.exists(свежий),
                         "срок урезали до дефолта и снесли сохраняемое: "
                         + r.stdout)
 
@@ -298,10 +316,21 @@ class Сырьё(unittest.TestCase):
         единственное место, где закреплён сам дефолт «тридцать» из ТЗ §17 на
         штатном пути — без переменной вовсе.
         """
-        строки = [l for l in io.open(os.path.join(ROOT, "install", "mara.cron"),
-                                     encoding="utf-8")
-                  if l.startswith("MARA_RAW_DAYS=")]
-        self.assertEqual(len(строки), 1, строки)
+        with io.open(os.path.join(ROOT, "install", "mara.cron"),
+                     encoding="utf-8") as ф:
+            строки = ф.readlines()
+        присвоения = [i for i, l in enumerate(строки)
+                      if l.startswith("MARA_RAW_DAYS=")]
+        работы = [i for i, l in enumerate(строки) if "blob_retention.py" in l]
+        self.assertEqual(len(присвоения), 1, присвоения)
+        self.assertEqual(len(работы), 1, работы)
+        # Половина смысла — порядок: `VAR=` в crontab действует только на
+        # работы ниже себя, и сказано это в самом файле. Присвоение, уехавшее
+        # под работу, по-прежнему совпадает с дефолтом кода и по-прежнему
+        # мертво: сверять значение, не сверяя место, — сверять половину.
+        # Нашёл ревьюер, круг 2.
+        self.assertLess(присвоения[0], работы[0],
+                        "присвоение ниже работы — работа его не увидит")
         код = ("import sys; sys.path.insert(0, %r);"
                " import blob_retention as br; print(br.RAW_DAYS)"
                % os.path.join(ROOT, "scripts"))
@@ -309,7 +338,8 @@ class Сырьё(unittest.TestCase):
         r = subprocess.run([sys.executable, "-c", код], env=окр,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(int(строки[0].split("=", 1)[1]), int(r.stdout))
+        self.assertEqual(int(строки[присвоения[0]].split("=", 1)[1]),
+                         int(r.stdout))
 
 
 class Сверка(unittest.TestCase):
