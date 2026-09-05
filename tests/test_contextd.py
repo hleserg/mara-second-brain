@@ -176,8 +176,15 @@ class Api(unittest.TestCase):
         `pair` этого не запрещает. Две строки с одинаковым набором меток —
         сломанная экспозиция, а не шум: скрейп её либо отвергает, либо молча
         берёт одну из строк, и какую — не обещано."""
-        contextd.pair(self.con, "дубль")
+        старый, _ = contextd.pair(self.con, "дубль")
         свежий, _ = contextd.pair(self.con, "дубль")
+        # Обоим ставим связь, разной давности. Если у одного её нет вовсе,
+        # `max` и `min` неотличимы: NULL пропускают оба, и «берём самую
+        # новую» — то, ради чего всё и затевалось, — не проверяется ничем.
+        час_назад = (datetime.now(mi.TZ) - timedelta(hours=1)).isoformat(
+            timespec="seconds")
+        self.con.execute("update devices set last_seen=? where id=?",
+                         (час_назад, старый))
         self.con.execute("update devices set last_seen=? where id=?",
                          (mi.now_iso(), свежий))
         with urllib.request.urlopen(self.base + "/metrics", timeout=5) as r:
