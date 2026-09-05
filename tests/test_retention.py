@@ -4,7 +4,7 @@
 нему потом видно, что запись была и куда делась. Сверка чинит то, что чинится
 однозначно, и только докладывает про то, где нужен человек.
 """
-import os, sys, json, glob, time, tempfile, unittest
+import os, sys, io, json, glob, time, subprocess, tempfile, unittest
 from datetime import datetime, timedelta
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -166,7 +166,12 @@ class СверкаИсточников(unittest.TestCase):
 class Сырьё(unittest.TestCase):
     def test_raw_старше_срока_убирается_свежее_остаётся(self):
         root = tempfile.mkdtemp(prefix="mara-raw-")
-        for name, d in (("tdlib", 40), ("gmail", 40), ("gmail", 3)):
+        # Сутки выбраны по границе, а не «одно старое, одно свежее»: условие
+        # отбора — `имя >= порог`, значит при тридцати днях `-31` уходит, а
+        # `-30` остаётся, и мимо проходит ровно тридцать. На паре −40/−3
+        # зелёным был любой срок от трёх до тридцати девяти, то есть
+        # дефолт «тридцать» не был закреплён ничем. Нашёл ревьюер, круг 1.
+        for name, d in (("tdlib", 31), ("gmail", 31), ("gmail", 30)):
             p = os.path.join(root, name, "raw", день(-d) + ".jsonl")
             os.makedirs(os.path.dirname(p), exist_ok=True)
             open(p, "w").write("x")
@@ -174,8 +179,198 @@ class Сырьё(unittest.TestCase):
         self.assertEqual(br.raw_sweep(root, dry=True)["files"], 2)
         self.assertEqual(len(все()), 3, "холостой прогон удалил")
         self.assertEqual(br.raw_sweep(root), {"files": 2, "bytes": 2})
-        self.assertEqual(все(), [день(-3) + ".jsonl"])
+        self.assertEqual(все(), [день(-30) + ".jsonl"])
         self.assertEqual(br.raw_sweep(root)["files"], 0, "повтор нашёл что убирать")
+
+    def test_плохой_MARA_RAW_DAYS_не_роняет_уборку_в_4_40(self):
+        """Крон в 4:40 — отдельная единица со своим отказом.
+
+        Сверка про опечатку доложит, но уборку не сделает: у неё свой процесс.
+        Поэтому спрашиваем именно процесс, а не импорт, — так, как его зовёт
+        `install/mara.cron`. Раньше он падал на `int("тридцать")` ещё до
+        `main`, отдавал `EXIT=1` и не убирал ничего; сырьё копилось, и
+        единственным сигналом была ежечасная жалоба соседа.
+
+        Значения два, и второе опаснее первого: минус проходит через `int`
+        молча и уносит порог в будущее, то есть удаляет всё сырьё разом.
+        Берём `-1`, а не `-30`: застава стоит на `< 0`, и сужение до `< -1`
+        на тридцатке было бы зелёным, а `-1` тогда прошёл бы молча и снёс всё
+        сырьё, включая сегодняшнее. Нашёл ревьюер, круг 1.
+        """
+        for значение, кусок in (("тридцать", "не число"),
+                                ("-1", "отрицательный срок")):
+            with self.subTest(значение=значение):
+                root = tempfile.mkdtemp(prefix="mara-raw-")
+                # −31/−30, а не −40/−3: закрепляет, что откат идёт именно
+                # на тридцать. С парой пошире мутант «беру 29» (в тексте
+                # по-прежнему «30») проходил гейт зелёным.
+                старый, свежий = [
+                    os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+                    for d in (31, 30)]
+                for p in (старый, свежий):
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                    open(p, "w").write("x")
+                r = subprocess.run(
+                    [sys.executable,
+                     os.path.join(ROOT, "scripts", "blob_retention.py"),
+                     "--root", root],
+                    env=dict(os.environ, MARA_RAW_DAYS=значение,
+                             PYTHONIOENCODING="utf-8"),
+                    capture_output=True, text=True, timeout=120)
+                self.assertEqual(0, r.returncode, r.stderr)
+                # Причина в своём логе: сверка её тоже увидит, но раз в час, а
+                # этот файл читают с вопросом «почему тридцать».
+                # Целиком «MARA_RAW_DAYS='-1'», а не два вхождения по
+                # отдельности: голое `-1` есть в любом таймстампе через
+                # `2026-11-05`, и тест был бы зелёным от одной даты. Кавычки
+                # из `%r` в дате не встречаются никогда.
+                self.assertIn("MARA_RAW_DAYS=%r" % значение, r.stdout)
+                self.assertIn(кусок, r.stdout)
+                self.assertIn("беру 30", r.stdout)
+                # И главное: прогон состоялся именно на дефолте, а не только
+                # не упал. Свежий файл — половина оракула: откат на ноль
+                # вместо тридцати тоже даёт `EXIT=0` и тоже «убирает», только
+                # заодно вчерашние логи.
+                self.assertFalse(os.path.exists(старый),
+                                 "сырьё не убрано: " + r.stdout)
+                self.assertTrue(os.path.exists(свежий),
+                                "убрано свежее: " + r.stdout)
+
+    def test_ноль_суток_валиден_и_жалобы_не_родит(self):
+        """Граница заставы: `< 0`, а не `< 1`.
+
+        Ноль осмыслен — «держать только сегодняшний день», — и жаловаться на
+        него не на что. Без этого теста застава тихо съезжает на `<= 0` и
+        отбирает у владельца настройку, о которой он не узнает: в логе будет
+        «беру 30», а держаться будет месяц.
+        """
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        вчера, сегодня = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (1, 0)]
+        for p in (вчера, сегодня):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("x")
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
+             "--root", root],
+            env=dict(os.environ, MARA_RAW_DAYS="0", PYTHONIOENCODING="utf-8"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertNotIn("беру 30", r.stdout)
+        self.assertFalse(os.path.exists(вчера), "вчерашнее не убрано")
+        self.assertTrue(os.path.exists(сегодня), "убрано сегодняшнее")
+
+    def test_огромный_MARA_RAW_DAYS_не_роняет_уборку(self):
+        """Третий класс плохого значения, и он ронял крон ровно так же.
+
+        `timedelta(days=1000000)` бросает `OverflowError` внутри `raw_sweep`,
+        то есть уже после чистого импорта: сверка про это не узнаёт вовсе,
+        `код()` даёт ноль, и сводка в 8:00 говорит «всё сходится», пока сырьё
+        копится. Хуже, чем было до правки, где сверка хотя бы ругалась.
+
+        Оракул перевёрнут относительно соседей: старый файл обязан
+        **выжить**. Откат на тридцать тоже дал бы `EXIT=0` и тоже «убрал бы»,
+        только заодно снёс бы всё, что владелец этим числом просил сохранить.
+        Нашёл ревьюер, круг 1.
+
+        Пара стоит ровно на потолке, а не «где-то за месяцем»: сорокадневный
+        файл переживал любой потолок от сорока и выше, и три мутанта проходили
+        полный гейт зелёным — `ПОТОЛОК = 365000`, откат на `730000` и текст
+        «беру 30» при клампе на потолок. Обе даты представимы: 1926 год, а
+        `date.min` — примерно 740 тысяч суток назад, запас двадцатикратный.
+        Нашёл ревьюер, круг 2.
+        """
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        старый, свежий = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (36501, 36500)]
+        for f in (старый, свежий):
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            open(f, "w").write("x")
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
+             "--root", root],
+            env=dict(os.environ, MARA_RAW_DAYS="1000000",
+                     PYTHONIOENCODING="utf-8"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("MARA_RAW_DAYS=%r" % "1000000", r.stdout)
+        self.assertIn("больше ста лет", r.stdout)
+        # Перевод строки в конце — не украшение: голое «беру 36500» есть
+        # внутри «беру 365000», и текстовый оракул на потолок в 365 тысяч
+        # был бы зелёным. Число здесь литерал, а не `br.ПОТОЛОК`:
+        # константа, взятая у самого модуля, совпадёт с любой мутацией.
+        self.assertIn("беру 36500\n", r.stdout)
+        self.assertFalse(os.path.exists(старый),
+                         "потолок не убирает даже за своей границей: "
+                         + r.stdout)
+        self.assertTrue(os.path.exists(свежий),
+                        "срок урезали до дефолта и снесли сохраняемое: "
+                        + r.stdout)
+
+    def test_ровно_потолок_валиден_и_жалобы_не_родит(self):
+        """Вторая граница той же заставы: `> ПОТОЛОК`, а не `>=`.
+
+        Число в жалобе — совет владельцу: «беру 36500» читается как «столько
+        можно, ставь». Мутант `elif RAW_DAYS >= ПОТОЛОК:` полный гейт проходил
+        зелёным, и владелец, послушавшийся совета, получал на здоровом
+        конфиге ежечасный `error` — навсегда, потому что чинить нечего.
+        Прогон при этом не меняется вовсе: кламп даёт то же самое число, и
+        отличить ветку можно только по жалобе. Нашёл ревьюер, круг 3.
+        """
+        root = tempfile.mkdtemp(prefix="mara-raw-")
+        старый, свежий = [
+            os.path.join(root, "tdlib", "raw", день(-d) + ".jsonl")
+            for d in (36501, 36500)]
+        for p in (старый, свежий):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("x")
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "blob_retention.py"),
+             "--root", root],
+            env=dict(os.environ, MARA_RAW_DAYS="36500",
+                     PYTHONIOENCODING="utf-8"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, r.returncode, r.stderr)
+        # Имя переменной целиком, а не «беру»: любая из трёх жалоб печатает
+        # `MARA_RAW_DAYS=`, а штатный прогон — никогда.
+        self.assertNotIn("MARA_RAW_DAYS", r.stdout)
+        self.assertFalse(os.path.exists(старый), "за потолком не убрано")
+        self.assertTrue(os.path.exists(свежий), "убрано на самом потолке")
+
+    def test_значение_MARA_RAW_DAYS_из_крона_совпадает_с_дефолтом_кода(self):
+        """Зеркало `test_значение_из_крона_совпадает_с_дефолтом_кода`.
+
+        Разъехавшись, эти двое молчат: в бою побеждает crontab. Заодно это
+        единственное место, где закреплён сам дефолт «тридцать» на штатном
+        пути — без переменной вовсе. В ТЗ этого числа нет: месяц выбран
+        докстрингом модуля, и crontab обязан повторять именно его.
+        """
+        with io.open(os.path.join(ROOT, "install", "mara.cron"),
+                     encoding="utf-8") as ф:
+            строки = ф.readlines()
+        присвоения = [i for i, l in enumerate(строки)
+                      if l.startswith("MARA_RAW_DAYS=")]
+        работы = [i for i, l in enumerate(строки) if "blob_retention.py" in l]
+        self.assertEqual(len(присвоения), 1, присвоения)
+        self.assertEqual(len(работы), 1, работы)
+        # Половина смысла — порядок: `VAR=` в crontab действует только на
+        # работы ниже себя, и сказано это в самом файле. Присвоение, уехавшее
+        # под работу, по-прежнему совпадает с дефолтом кода и по-прежнему
+        # мертво: сверять значение, не сверяя место, — сверять половину.
+        # Нашёл ревьюер, круг 2.
+        self.assertLess(присвоения[0], работы[0],
+                        "присвоение ниже работы — работа его не увидит")
+        код = ("import sys; sys.path.insert(0, %r);"
+               " import blob_retention as br; print(br.RAW_DAYS)"
+               % os.path.join(ROOT, "scripts"))
+        окр = {k: v for k, v in os.environ.items() if k != "MARA_RAW_DAYS"}
+        r = subprocess.run([sys.executable, "-c", код], env=окр,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(int(строки[присвоения[0]].split("=", 1)[1]),
+                         int(r.stdout))
 
 
 class Сверка(unittest.TestCase):
@@ -226,6 +421,23 @@ class Сверка(unittest.TestCase):
         root, con, eid, sha, path = стенд()
         находки = rc.run(con, root, vault=None)
         self.assertTrue([f for f in находки if f["check"] == "ретеншен-просрочен"])
+
+    def test_жалоба_конфига_и_просроченные_доезжают_вместе(self):
+        """Две находки из одной проверки, и вход у них разный.
+
+        Порознь каждая покрыта, вместе — не была: мутант, где сбор жалобы
+        конфига затирается списком просроченных (`ф.append(...)` →
+        `ф = [...]`), полный гейт проходил зелёным. А в бою это самое частое
+        сочетание: опечатка в сроке ровно и означает, что уборка не идёт и
+        просроченное копится. Нашёл ревьюер, круг 1.
+        """
+        root, con, eid, sha, path = стенд()
+        было = br.ОШИБКА_КОНФИГА
+        br.ОШИБКА_КОНФИГА = "MARA_RAW_DAYS='пять' — не число, беру 30"
+        self.addCleanup(setattr, br, "ОШИБКА_КОНФИГА", было)
+        виды = [f["check"] for f in rc.run(con, root, vault=None)]
+        self.assertIn("ретеншен-конфиг", виды)
+        self.assertIn("ретеншен-просрочен", виды)
 
     def test_лаг_индекса_считается_по_базе_basic_memory(self):
         root, con, eid, sha, path = стенд(audio_until=день(30))

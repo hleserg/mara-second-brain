@@ -94,11 +94,21 @@ class Порог(unittest.TestCase):
     def test_значение_из_крона_совпадает_с_дефолтом_кода(self):
         # Разъехавшись, эти двое молчат: в бою побеждает crontab, и слабина
         # в 0.2 суток теряется ровно там, где заведена, — на боевой машине.
-        строки = [l for l in io.open(os.path.join(ROOT, "install",
-                                                  "mara.cron"),
-                                     encoding="utf-8")
-                  if l.startswith("MARA_CORE_BACKUP_MAX_DAYS=")]
-        self.assertEqual(len(строки), 1, строки)
+        with io.open(os.path.join(ROOT, "install", "mara.cron"),
+                     encoding="utf-8") as ф:
+            строки = ф.readlines()
+        присвоения = [i for i, l in enumerate(строки)
+                      if l.startswith("MARA_CORE_BACKUP_MAX_DAYS=")]
+        работы = [i for i, l in enumerate(строки) if "core-backup.py" in l]
+        self.assertEqual(len(присвоения), 1, присвоения)
+        self.assertEqual(len(работы), 1, работы)
+        # `VAR=` в crontab действует только на работы ниже себя — сказано в
+        # самом файле, рядом с этим присвоением. Значение сверялось, место
+        # нет: присвоение, уехавшее под работу, оставляет этот тест зелёным
+        # и порог мёртвым. Дыра не из этого PR, чинится тем же движением,
+        # что и у соседа; нашёл ревьюер, круг 2.
+        self.assertLess(присвоения[0], работы[0],
+                        "присвоение ниже работы — работа его не увидит")
         код = ("import sys; sys.path.insert(0, %r);"
                " import contextd_reconcile as rc; print(rc.БЭКАП_СУТКИ)"
                % os.path.join(ROOT, "scripts"))
@@ -107,7 +117,7 @@ class Порог(unittest.TestCase):
         r = subprocess.run([sys.executable, "-c", код], env=окр,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(float(строки[0].split("=", 1)[1]),
+        self.assertEqual(float(строки[присвоения[0]].split("=", 1)[1]),
                          float(r.stdout))
 
 
