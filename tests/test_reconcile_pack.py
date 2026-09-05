@@ -7,6 +7,7 @@
 подавала вчерашний список обязательств как текущий.
 """
 import importlib, io, os, sys, shutil, tempfile, time, unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -150,6 +151,37 @@ class ВозрастПакета(unittest.TestCase):
         self.assertEqual("warn", находки["пакет-не-проверен"]["level"])
         # Свидетель — последняя проверка в `run`: не дошли бы до неё, если бы
         # исключение улетело наверх.
+        self.assertIn("бэкап-ядра-конфиг", находки)
+
+    def test_опечатка_в_MARA_RAW_DAYS_не_роняет_сверку(self):
+        """Тот же отказ у второго ленивого импорта — `blob_retention`.
+
+        Застава стояла у пакета и не стояла у соседа тридцатью строками ниже:
+        ровно та половинчатая правка, за которую этот PR и ругает ADR-0008.
+        Ломаем живым отказом, а не подменой модуля: `blob_retention` на
+        модульном уровне делает `int(os.environ.get("MARA_RAW_DAYS", 30))`, и
+        опечатка в задокументированной переменной давала `EXIT=1` на всю
+        сверку. Заодно это закрепляет ширину `except`: `ValueError` мимо
+        `except ImportError` пролетел бы."""
+        root = tempfile.mkdtemp(prefix="mara-root-")
+        self.addCleanup(shutil.rmtree, root, True)
+        con = mi.connect(root)
+        self.addCleanup(con.close)
+        import blob_retention
+        self.addCleanup(sys.modules.__setitem__, "blob_retention",
+                        blob_retention)
+        del sys.modules["blob_retention"]
+        заплата = unittest.mock.patch.dict(
+            os.environ, {"MARA_RAW_DAYS": "тридцать"})
+        заплата.start()
+        self.addCleanup(заплата.stop)
+        importlib.invalidate_caches()
+        f = rc.run(con, root, vault=self.vault, targets=[])
+        находки = {x["check"]: x for x in f}
+        self.assertIn("ретеншен-не-проверен", находки)
+        self.assertEqual("warn", находки["ретеншен-не-проверен"]["level"])
+        # Свидетель — последняя проверка в `run`: до неё не добрались бы, если
+        # бы исключение улетело наверх.
         self.assertIn("бэкап-ядра-конфиг", находки)
 
     def test_проверка_проведена_в_сверку(self):
