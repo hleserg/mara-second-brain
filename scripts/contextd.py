@@ -290,9 +290,16 @@ def metrics(con, root=None, vault=None):
     mobile = age_of(seen[0] if seen else None)
     pack_age, pack_bytes = pack_stat(vault)
     # mara_mobile_* берёт любое устройство, и Gmail-крон раз в 10 минут его
-    # всегда «освежит» — телефон виден только поимённо
+    # всегда «освежит» — телефон виден только поимённо.
+    #
+    # Поимённо — по имени, а не по строке таблицы: `pair` не запрещает второе
+    # устройство с тем же именем (перевыпуск токена так и делается), а две
+    # строки с одинаковым набором меток это не шум, а сломанная экспозиция:
+    # скрейп её либо отвергает, либо молча берёт одну из строк. Свежесть берём
+    # самую новую: имя молчит ровно тогда, когда молчат все его устройства.
     devices = [(n, age_of(t)) for n, t in con.execute(
-        "select name, last_seen from devices where revoked_at is null order by name")]
+        "select name, max(last_seen) from devices where revoked_at is null "
+        "group by name order by name")]
     rows = [
         ("mara_ingest_queue_depth", q("select count(*) from jobs where state='ready'")),
         ("mara_ingest_lag_seconds", lag),
