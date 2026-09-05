@@ -671,6 +671,41 @@ def самопроверка():
             except RuntimeError as e:
                 assert слово in str(e), (слово, str(e))
 
+        # `подделка` всегда кладёт и базу, и манифест, поэтому два сторожа
+        # ею не проверить: тот, что стоит на отсутствии базы, и тот, что не
+        # пускает наружу имена из тара. Их обоих до сих пор не проверяло
+        # ничто — оба переживали мутацию при зелёном гейте.
+        def кривой_архив(члены):
+            сырой = os.path.join(tmp, "кривой.tar.gz")
+            with tarfile.open(сырой, "w:gz") as tf:
+                for arcname, откуда in члены:
+                    tf.add(откуда, arcname=arcname)
+            шифр(сырой, os.path.join(плохие, имя_п), пароль)
+            os.unlink(сырой)
+
+        пустой_м = os.path.join(tmp, "чужой-manifest.json")
+        with open(пустой_м, "w", encoding="utf-8") as fh:
+            json.dump({"counts": {}, "files": {}}, fh)
+        # Сторож на отсутствии базы стоит до `sqlite3.connect` не случайно:
+        # connect создал бы пустой файл сам, и проверять после него было бы
+        # нечего. Мутация «сторожа нет» отсюда и видна.
+        кривой_архив([("manifest.json", пустой_м)])
+        try:
+            проверка(плохие, пароль, root, имя=имя_п)
+            raise AssertionError("архив без базы прошёл проверку")
+        except RuntimeError as e:
+            assert "нет contextd.db" in str(e), str(e)
+        # `filter="data"` — единственное, что стоит между архивом и записью
+        # мимо каталога распаковки. Свой архив таких имён не содержит, но
+        # разворачиваем мы то, что лежит на носителе, а не то, что писали.
+        кривой_архив([("contextd.db", os.path.join(root, "contextd.db")),
+                      ("manifest.json", пустой_м), ("../беда", пустой_м)])
+        try:
+            проверка(плохие, пароль, root, имя=имя_п)
+            raise AssertionError("путь наружу прошёл распаковку")
+        except tarfile.TarError:
+            pass
+
         # порченый архив обязан валить проверку, а не молчать
         свежий = sorted(glob.glob(os.path.join(target, "core-*.tar.gz.gpg")))[-1]
         with open(свежий, "r+b") as fh:
