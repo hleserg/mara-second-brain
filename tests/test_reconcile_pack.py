@@ -6,7 +6,7 @@
 4:25 выглядел из сверки ровно как исправная система, и Мара всё это время
 подавала вчерашний список обязательств как текущий.
 """
-import os, sys, shutil, tempfile, time, unittest
+import importlib, io, os, sys, shutil, tempfile, time, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -104,8 +104,12 @@ class ВозрастПакета(unittest.TestCase):
             self.skipTest("под root права не запрещают ничего")
         d = os.path.join(self.vault, context_pack.DIR)
         os.chmod(d, 0)
-        self.addCleanup(os.chmod, d, 0o755)
-        f = rc.пакет_устарел(self.vault)
+        try:
+            f = rc.пакет_устарел(self.vault)
+        finally:
+            # Права — до `tearDown`, а не через `addCleanup`: тот бежит
+            # после, и `shutil.rmtree` уже не снёс бы каталог с правами 0.
+            os.chmod(d, 0o755)
         self.assertEqual(["пакет-не-прочитан"], self.виды(f))
         self.assertEqual("warn", f[0]["level"])
         self.assertNotIn("запустить", f[0]["detail"])
@@ -120,16 +124,33 @@ class ВозрастПакета(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         con = mi.connect(root)
         self.addCleanup(con.close)
+        # Ломаем так, как ломается в бою. `sys.modules[...] = None` дало бы
+        # `ImportError` — единственный класс, которого живой отказ как раз и
+        # не даёт: `context_pack` исполняет `mara-brief.py` с диска, и оттуда
+        # прилетает `SyntaxError`, `FileNotFoundError` или что угодно из тела
+        # модуля. Оракул на `ImportError` закреплял бы не ту заставу: сужение
+        # `except Exception` до `except ImportError` он бы пропустил.
+        подмена = tempfile.mkdtemp(prefix="mara-подмена-")
+        self.addCleanup(shutil.rmtree, подмена, True)
+        io.open(os.path.join(подмена, "context_pack.py"), "w",
+                encoding="utf-8").write(
+                    'raise RuntimeError("mara-brief.py битый")\n')
         self.addCleanup(sys.modules.__setitem__, "context_pack",
                         sys.modules["context_pack"])
-        # None в sys.modules — штатный способ уронить `import`; в бою так
-        # падает снесённый или битый `mara-brief.py`.
-        sys.modules["context_pack"] = None
+        del sys.modules["context_pack"]
+        sys.path.insert(0, подмена)
+        self.addCleanup(sys.path.remove, подмена)
+        importlib.invalidate_caches()
         f = rc.run(con, root, vault=self.vault, targets=[])
-        self.assertIn("пакет-не-проверен", self.виды(f))
+        находки = {x["check"]: x for x in f}
+        self.assertIn("пакет-не-проверен", находки)
+        # Уровень — решение, а не мелочь: `код()` даёт 0, то есть крон молчит,
+        # и находка живёт только сводкой. Тем же ходом идёт `лаг_индекса` на
+        # `sqlite3.Error`.
+        self.assertEqual("warn", находки["пакет-не-проверен"]["level"])
         # Свидетель — последняя проверка в `run`: не дошли бы до неё, если бы
-        # импорт улетел наверх.
-        self.assertIn("бэкап-ядра-конфиг", self.виды(f))
+        # исключение улетело наверх.
+        self.assertIn("бэкап-ядра-конфиг", находки)
 
     def test_проверка_проведена_в_сверку(self):
         """Находка, которую `run` не собирает, не доедет ни до крона, ни до
