@@ -511,8 +511,16 @@ class Сырьё(unittest.TestCase):
         # Нашёл ревьюер, круг 2.
         self.assertLess(присвоения[0], работы[0],
                         "присвоение ниже работы — работа его не увидит")
-        код = ("import sys; sys.path.insert(0, %r);"
-               " import blob_retention as br; print(br.RAW_DAYS)"
+        # Печатаем и жалобу, а не один срок. Сравнивая числа, зеркало
+        # видело бы только «в кроне другое годное число»: у опечатки, чей
+        # откат равен тридцати (`тридцать`, `-0.0`, `-1`, пустое значение),
+        # оба прогона дают тридцать — один потому, что переменной нет,
+        # другой потому, что модуль откатился после жалобы. Такая опечатка
+        # проезжала гейт зелёной и жила бы до тех пор, пока владелец сам не
+        # прочтёт ночную жалобу. Нашёл ревьюер, круг 2 — в правке, которую
+        # сам же и предложил кругом раньше.
+        код = ("import sys; sys.path.insert(0, %r); import blob_retention"
+               " as br; print(br.RAW_DAYS, br.ОШИБКА_КОНФИГА)"
                % os.path.join(ROOT, "scripts"))
         окр = {k: v for k, v in os.environ.items() if k != "MARA_RAW_DAYS"}
         r = subprocess.run([sys.executable, "-c", код], env=окр,
@@ -531,6 +539,8 @@ class Сырьё(unittest.TestCase):
         self.assertEqual(rк.returncode, 0, rк.stderr)
         self.assertEqual(rк.stdout, r.stdout,
                          "crontab и дефолт модуля разъехались: " + значение)
+        self.assertNotIn("MARA_RAW_DAYS", rк.stdout,
+                         "значение из crontab рождает жалобу: " + значение)
 
 
 class Сверка(unittest.TestCase):
