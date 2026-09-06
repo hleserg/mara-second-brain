@@ -108,10 +108,12 @@ class Адресат(unittest.TestCase):
     def test_канал_группа_и_имя_дайджеста_не_получают(self):
         # `-100…` — канал или супергруппа, просто отрицательный — группа,
         # `@имя` не различает их вовсе, поэтому отвергается вместе с мусором.
-        for чужой in ("-1001234567890", "-987654321", "@канал", "не число", "0"):
+        for чужой in ("-1001234567890", "-987654321", "@канал",
+                      "не число", "0"):
             with self.subTest(chat_id=чужой):
                 буфер = io.StringIO()
-                with self.отправка_запрещена(), contextlib.redirect_stderr(буфер):
+                with self.отправка_запрещена(), \
+                        contextlib.redirect_stderr(буфер):
                     состояние = cd.deliver("текст", "t", чужой)
                 self.assertEqual(состояние, "not-private",
                                  "%s принят за личный чат владельца" % чужой)
@@ -119,9 +121,11 @@ class Адресат(unittest.TestCase):
                               "отказ молчит: адресата в stderr нет")
 
     def test_личный_чат_дайджест_получает(self):
-        """Половина заставы, без которой она была бы «не отправлять никогда»."""
+        """Половина заставы, без которой она была бы «не отправлять
+        никогда»."""
         with mock.patch("urllib.request.urlopen") as у:
-            у.return_value.__enter__.return_value.read.return_value = b'{"ok":true}'
+            у.return_value.__enter__.return_value.read.return_value = (
+                b'{"ok":true}')
             self.assertEqual(cd.deliver("текст", "t", "123456789"), "sent")
 
 

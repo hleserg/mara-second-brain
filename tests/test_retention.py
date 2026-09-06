@@ -147,20 +147,25 @@ class СверкаИсточников(unittest.TestCase):
         # — скажет dlq(); здесь ждём только настроечные дыры. Их две, и обе
         # обязаны попасть в счёт: `not-private` — застава §8.3 (#61), и до
         # круга 1 по #64 сверка её не видела вовсе.
+        # Строк `not-private` две, а `no-transport` одна, и это не украшение:
+        # на симметричной фикстуре разбивку не держал ни один оракул — метки,
+        # переставленные местами, и `чужой = без` проходили весь гейт
+        # (перегнал на модели: оба выживают).
         for state, did in (("sent", "d1"), ("no-transport", "d2"),
-                           ("failed", "d3"), ("not-private", "d4")):
+                           ("failed", "d3"), ("not-private", "d4"),
+                           ("not-private", "d5")):
             self.con.execute("insert into digests(id,event_id,chat_id,text,items_json,"
                              "sent_at,state) values(?,?,?,?,?,?,?)",
                              (did, eid, "123456789", "текст", "[]",
                               mi.now_iso(), state))
         f = rc.дайджест_не_доставлен(self.con)
-        self.assertEqual(f[0]["count"], 2,
+        self.assertEqual(f[0]["count"], 3,
                          "доставленный дайджест — не находка, "
                          "а чужой адресат — находка")
         self.assertIn("нет токена или адресата: 1", f[0]["detail"])
-        self.assertIn("адресат не личный чат владельца: 1", f[0]["detail"],
+        self.assertIn("адресат не личный чат владельца: 2", f[0]["detail"],
                       "владелец должен прочитать, какая из двух дыр")
-        self.assertEqual(f[0]["sample"], [eid, eid])
+        self.assertEqual(f[0]["sample"], [eid, eid, eid])
         self.con.execute("update digests set state='sent'")
         self.assertEqual(rc.дайджест_не_доставлен(self.con), [])
 
