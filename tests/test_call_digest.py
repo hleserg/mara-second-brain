@@ -191,10 +191,31 @@ class Доставка(unittest.TestCase):
         self.assertEqual(self.состояние(), "projected",
                          "владелец дайджеста не видел — звонок не обработан")
 
+    def test_чужой_адресат_событие_не_закрывает(self):
+        """Застава живёт в `deliver`, а закрывает событие `run` — и знать про
+        отказ обязан именно он. `Адресат` проверяет заставу, `Доставка` без
+        транспорта — только `no-transport`, и между ними оставалась щель:
+        сужение `state != "sent"` до `state == "no-transport"` проходило весь
+        гейт, объявляя звонок обработанным, а владелец дайджеста не видел."""
+        env = os.path.join(self.dir, "чужой.env")
+        with open(env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\n"
+                     "TELEGRAM_HOME_CHANNEL=-1001234567890\n")
+        # `deliver` настоящий: до сети он не доходит — отказ раньше `urlopen`
+        cd.run(self.eid, root=self.dir, env_file=env)
+        row = self.con.execute("select state from digests where event_id=?",
+                               (self.eid,)).fetchone()
+        self.assertEqual(row["state"], "not-private",
+                         "текст дайджеста сохранён")
+        self.assertEqual(self.состояние(), "projected",
+                         "владелец дайджеста не видел — звонок не обработан")
+
     def test_доставленный_дайджест_закрывает_событие(self):
         env = os.path.join(self.dir, "есть.env")
         with open(env, "w", encoding="utf-8") as fh:
-            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=@c\n")
+            # адресат правдоподобный: `@c` здесь держался только заглушкой
+            # `deliver` и моделировал ровно то, что §8.3 запрещает
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
         было = cd.deliver
         cd.deliver = lambda text, token, chat: "sent"
         try:
