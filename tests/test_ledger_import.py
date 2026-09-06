@@ -272,7 +272,8 @@ class Перенос(unittest.TestCase):
     def test_чужой_source_id_на_месте_объекта_не_сливает_два_в_один(self):
         # у карточки по пути уже стоит объект Б, а объявленный `source_id`
         # принадлежит объекту А. Слить их — то самое схлопывание двух в один,
-        # которое запрещает §4.4: сверка обязана остановиться и сказать вслух.
+        # без доказательства, что это одно событие (ТЗ §4.3): сверка
+        # обязана остановиться и сказать вслух.
         а = "kb/commitments/2026-09-03-a.md"
         б = "kb/commitments/2026-09-03-b.md"
         карточка(self.vault, а, source_id="commitment/call_1/requests/1")
@@ -289,9 +290,45 @@ class Перенос(unittest.TestCase):
             {(п["path"], п["object_id"]) for п in self.строки("projections")},
             {(а, ид["commitment/call_1/requests/1"]), (б, ид["vault:" + б])})
 
+
+    def test_чужая_карточка_на_месте_объекта_не_затирает_его(self):
+        # карточку с `source_id` удалили, а на том же пути завели другую, без
+        # `source_id`: `call_project.py` наращивает суффикс `-N`, только пока
+        # файл есть, так что имя переиспользуется следующей же поправкой. По
+        # ключу не найдётся ничего, по пути найдётся чужой объект — взять его
+        # значит стереть строку ledger, которая никуда не девалась.
+        rel = "kb/commitments/2026-09-03-a.md"
+        карточка(self.vault, rel, source_id="commitment/call_1/requests/1")
+        self.перенести()
+        было, = [(r["id"], r["title"]) for r in self.строки("commitments")]
+        os.remove(os.path.join(self.vault, rel))
+        карточка(self.vault, rel, source_id=None, title="совсем другое")
+        итог = self.перенести()
+        self.assertEqual(
+            (итог["обязательств"], итог["обновлено"], итог["спорных"]), (0, 0, 1))
+        self.assertIn(было, [(r["id"], r["title"])
+                             for r in self.строки("commitments")],
+                      "объект с прежним ключом затёрт чужой карточкой")
+
+    def test_снятый_source_id_не_меняет_ключ_молча(self):
+        # обратный случай к тому же: `source_id` из карточки убрали, ключом
+        # снова стал путь. Тот же файл это или другой — из базы не видно, и
+        # разойтись эти два случая не могут. Значит спорная, а не догадка.
+        rel = "kb/commitments/2026-09-03-a.md"
+        карточка(self.vault, rel, source_id="commitment/call_1/requests/1")
+        self.перенести()
+        карточка(self.vault, rel, source_id=None)
+        итог = self.перенести()
+        self.assertEqual(
+            (итог["обязательств"], итог["обновлено"], итог["спорных"]), (0, 0, 1))
+        r, = self.строки("commitments")
+        self.assertEqual(r["source_native_id"], "commitment/call_1/requests/1",
+                         "ключ сменился без ведома человека")
+
     def test_нечисловой_confidence_не_уходит_молча(self):
-        # колонка `confidence` — real, «высокая» в неё не ляжет. Терять её
-        # молча нельзя: карточка выглядела бы перенесённой целиком.
+        # пустым `confidence` делает `_число`, а не база: `real` в SQLite
+        # — affinity, «высокая» легла бы туда как есть. Терять поле молча
+        # нельзя: карточка выглядела бы перенесённой целиком.
         карточка(self.vault, "kb/commitments/2026-09-03-smeta.md",
                  confidence="высокая")
         поток = io.StringIO()
