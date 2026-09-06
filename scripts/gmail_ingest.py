@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Личный Gmail → contextd (ТЗ §12 `TZ-ambient-memory.md`, спека 7).
+"""Личный Gmail → contextd (ТЗ §12 TZ-ambient-memory.md, спека 7).
 
 Раз в десять минут по крону: users.history.list от сохранённого historyId,
 новое письмо — событием в /v1/ingest/email, удаление — надгробием, корзина —

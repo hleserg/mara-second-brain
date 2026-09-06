@@ -120,8 +120,7 @@ class ВозрастПакета(unittest.TestCase):
         бы семь проверок ниже — вместе с §10 `TZ.md` и сводкой в 8:00.
         Сломать импорт можно не только правкой нашего файла: `context_pack`
         на импорте читает с диска `mara-brief.py`, а сверка в кроне —
-        отдельный процесс, где
-        импорт каждый час первый."""
+        отдельный процесс, где импорт каждый час первый."""
         root = tempfile.mkdtemp(prefix="mara-root-")
         self.addCleanup(shutil.rmtree, root, True)
         con = mi.connect(root)
