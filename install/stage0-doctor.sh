@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Этап 0 из ТЗ §12: волт, git, bare-зеркало, крон. Идемпотентно.
+# Этап 0 из ТЗ §12 `TZ.md`: волт, git, bare-зеркало, крон. Идемпотентно.
 set -euo pipefail
 
 VAULT="${VAULT:-/srv/vault}"

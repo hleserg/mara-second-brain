@@ -1,7 +1,8 @@
 # Личный Gmail — письма в память
 
-Спека 5 по ТЗ «Mara Ambient Memory» (§12, §17 «Gmail history cursor»,
-порядок §22 пункт 7). Предыдущие: [ядро](2026-09-02-ambient-memory-design.md),
+Спека 5 по ТЗ «Mara Ambient Memory» (§12 `TZ-ambient-memory.md`,
+§17 «Gmail history cursor», порядок §22 пункт 7). Предыдущие:
+[ядро](2026-09-02-ambient-memory-design.md),
 [контекст-брокер](2026-09-02-context-broker-design.md),
 [Mara Capture](2026-09-02-mara-capture-design.md),
 [Telegram](2026-09-02-telegram-tdlib-design.md).
@@ -16,18 +17,19 @@ doctor; наружу, как и у звонков, едет только то, �
 ## Что это НЕ делает
 
 **Рабочую почту не подключает — вообще.** `docs/decisions.md` §15.2 когда-то
-метил в корпоративный ящик; ТЗ §12 это отменяет, запись там помечена. Код
-закрывает границу не запиской: `--login` принимает только `@gmail.com` и
-`@googlemail.com`. Аккаунт Workspace с доменом компании отбрасывается до
-того, как refresh token попадёт на диск.
+метил в корпоративный ящик; ТЗ §12 `TZ-ambient-memory.md` это отменяет, запись
+там помечена. Код закрывает границу не запиской: `--login` принимает только
+`@gmail.com` и `@googlemail.com`. Аккаунт Workspace с доменом компании
+отбрасывается до того, как refresh token попадёт на диск.
 
-Не ходит в Pub/Sub. ТЗ §12 разрешает periodic history sync, если push
-неоправданно тяжёл для личного ящика — он тяжёл: проект в Google Cloud,
-топик, подписка, открытый эндпоинт. Раз в десять минут по крону хватает.
+Не ходит в Pub/Sub. ТЗ §12 `TZ-ambient-memory.md` разрешает periodic history
+sync, если push неоправданно тяжёл для личного ящика — он тяжёл: проект в
+Google Cloud, топик, подписка, открытый эндпоинт. Раз в десять минут по крону
+хватает.
 
-Не извлекает обязательства из писем: сначала посмотреть на живой поток,
-как и с Telegram. Не качает вложения: только метаданные (§12 «attachments:
-metadata всегда; текстовое извлечение — отдельным policy/job»).
+Не извлекает обязательства из писем: сначала посмотреть на живой поток, как и с
+Telegram. Не качает вложения: только метаданные (§12 `TZ-ambient-memory.md`
+«attachments: metadata всегда; текстовое извлечение — отдельным policy/job»).
 
 Не тянет клиентскую библиотеку Google. Три REST-вызова и обновление токена —
 это `urllib`, а `google-api-python-client` тащит с собой полсотни пакетов.
@@ -37,9 +39,9 @@ metadata всегда; текстовое извлечение — отдель�
 | Что | Где | Почему |
 |---|---|---|
 | client_id / client_secret, токен contextd | `/etc/mara/gmail.env`, 600 | как `tdlib.env`; в репо только `install/gmail.env.example` |
-| refresh token, адрес ящика | `/srv/mara-blobs/gmail/token.json`, 600 | §12 «никакие refresh tokens не класть в vault/Git/R2»; каталог вне волта и вне бэкапов, тест проверяет |
+| refresh token, адрес ящика | `/srv/mara-blobs/gmail/token.json`, 600 | §12 `TZ-ambient-memory.md` «никакие refresh tokens не класть в vault/Git/R2»; каталог вне волта и вне бэкапов, тест проверяет |
 | курсор `historyId` | `/srv/mara-blobs/gmail/cursor.json` | двигается только после 200 от contextd |
-| полные письма | `/srv/mara-blobs/gmail/raw/ГГГГ-ММ-ДД.jsonl` | §12 «локальный raw store»; retention — спека 10 |
+| полные письма | `/srv/mara-blobs/gmail/raw/ГГГГ-ММ-ДД.jsonl` | §12 `TZ-ambient-memory.md` «локальный raw store»; retention — спека 10 |
 | сердцебиение | `/srv/mara-blobs/gmail/heartbeat` | метрика `mara_gmail_lag_seconds`, находка сверки при молчании дольше часа |
 | замок | `/srv/mara-blobs/gmail/lock` | второй прогон при незакончившемся первом выходит сразу |
 
