@@ -152,6 +152,19 @@ class СверкаИсточников(unittest.TestCase):
                      if x["check"] == "запись-не-долита"]
         self.assertEqual(len(через_run), 1,
                          "сверка обязана звать находку сама")
+        # Одной старой записи мало: на ней не видны ни порядок, ни
+        # обрезка — `order by e.received desc` и `sample=старые` проходили
+        # весь гейт (перегнано: оба выживают). Старых надо шесть, и у
+        # каждой своё время.
+        ещё = [self.событие("phone", d, blob="%02dc" % d + "c" * 61)
+               for d in range(3, 8)]
+        f = rc.запись_не_долита(self.con)
+        self.assertEqual(f[0]["count"], 6, "в счёт идут все шесть")
+        self.assertEqual(f[0]["sample"], ещё[::-1],
+                         "образец — пять самых давних, по возрастанию "
+                         "received")
+        self.assertNotIn(старый, f[0]["sample"],
+                         "самая свежая из старых в пятёрку не попадает")
 
     def test_недоставленный_дайджест_видно_в_сверке(self):
         """N11: звонок разобран, а владелец о нём не узнал — это находка."""
@@ -236,6 +249,22 @@ class СверкаИсточников(unittest.TestCase):
                          "никто")
         self.assertIn("chat not found", f[0]["detail"],
                       "владельцу нужна причина, а не только число")
+        # Одной работы мало: на ней не виден `order by updated desc`
+        # (перегнано: `desc` → `asc` выживает). Вторая — старше и с другой
+        # причиной; владельцу нужна свежая.
+        вчера = (datetime.now(mi.TZ) - timedelta(days=1)).isoformat(
+            timespec="seconds")
+        self.con.execute(
+            "insert into jobs(id,event_id,kind,state,attempts,last_error,"
+            "created,updated) values(?,?,?,?,?,?,?,?)",
+            ("j0", self.событие("phone", 3), "digest", "dlq", 7,
+             "telegram 401: unauthorized", вчера, вчера))
+        f = rc.dlq(self.con)
+        self.assertEqual(f[0]["count"], 2, "в счёт идут обе")
+        self.assertIn("chat not found", f[0]["detail"],
+                      "«последняя» — самая свежая по updated")
+        self.assertNotIn("unauthorized", f[0]["detail"],
+                         "старая причина владельца бы обманула")
 
     def test_образец_это_первые_пять_по_времени(self):
         """Фикстура выше симметрична по событию — все пять строк об одном
