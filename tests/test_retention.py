@@ -166,8 +166,41 @@ class СверкаИсточников(unittest.TestCase):
         self.assertIn("адресат не личный чат владельца: 2", f[0]["detail"],
                       "владелец должен прочитать, какая из двух дыр")
         self.assertEqual(f[0]["sample"], [eid, eid, eid])
+        self.assertEqual(f[0]["level"], "warn",
+                         "настроечная дыра — в сводку, а не в код возврата")
+        # Прямой вызов доказывает работу функции, но не её место в цепочке:
+        # мутант «убрать `out += дайджест_не_доставлен(con)` из `run()`»
+        # проходил и этот тест, и весь гейт — сверка молчала бы вовсе.
+        через_run = [x for x in rc.run(self.con, self.root, vault=None)
+                     if x["check"] == "дайджест-не-доставлен"]
+        self.assertEqual(len(через_run), 1,
+                         "сверка обязана звать находку сама")
         self.con.execute("update digests set state='sent'")
         self.assertEqual(rc.дайджест_не_доставлен(self.con), [])
+
+    def test_разбивка_держится_и_когда_дыра_одна(self):
+        """Обе строки разбивки условные, и на фикстуре 1+2 оба условия истинны
+        при любой порче: `if без:` → `if True:` и `if чужой:` → `if чужой > 1:`
+        проходили весь гейт. Держат их только односторонние случаи — там, где
+        одного из состояний нет вовсе, а второе ровно одно."""
+        eid = self.событие("phone", 0)
+
+        def дайджест(did, state):
+            self.con.execute("insert into digests(id,event_id,chat_id,text,"
+                             "items_json,sent_at,state) values(?,?,?,?,?,?,?)",
+                             (did, eid, "123456789", "текст", "[]",
+                              mi.now_iso(), state))
+
+        дайджест("d1", "not-private")
+        detail = rc.дайджест_не_доставлен(self.con)[0]["detail"]
+        self.assertIn("адресат не личный чат владельца: 1", detail)
+        self.assertNotIn("нет токена", detail, "дыры без токена здесь нет")
+        self.con.execute("delete from digests")
+        дайджест("d2", "no-transport")
+        detail = rc.дайджест_не_доставлен(self.con)[0]["detail"]
+        self.assertIn("нет токена или адресата: 1", detail)
+        self.assertNotIn("адресат не личный", detail,
+                         "чужого адресата здесь нет")
 
     def test_сводка_владельцу_только_о_проблемах(self):
         self.assertIsNone(rc.текст([]))

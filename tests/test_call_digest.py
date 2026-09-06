@@ -228,6 +228,25 @@ class Доставка(unittest.TestCase):
             cd.deliver = было
         self.assertEqual(self.состояние(), "done")
 
+    def test_сбой_отправки_роняет_шаг(self):
+        """`failed` — сбой сети, а не настройка: работа обязана уйти в ретрай,
+        а встанет насовсем — скажет `dlq()`. Держится это одним `raise`, и без
+        него шаг выходил нулём: звонок оставался `projected` навсегда, ретрая
+        не было, а сверка про `failed` молчит намеренно (N11 — про настройку).
+        Мутант «убрать `raise`» проходил весь гейт."""
+        env = os.path.join(self.dir, "сбой.env")
+        with open(env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
+        было = cd.deliver
+        cd.deliver = lambda text, token, chat: "failed"
+        try:
+            with self.assertRaises(RuntimeError):
+                cd.run(self.eid, root=self.dir, env_file=env)
+        finally:
+            cd.deliver = было
+        self.assertEqual(self.состояние(), "projected",
+                         "до ретрая звонок обработанным не считается")
+
 
 if __name__ == "__main__":
     unittest.main()
