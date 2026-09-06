@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Basic Memory + MCP + локальные эмбеддинги на doctor
-# (ТЗ §12 `TZ.md` этап 0, §8.2).
+# (ТЗ §12 `TZ.md` этап 0, §8.2 `TZ.md`).
 # Идемпотентно.
 #
 # Грабли, из-за которых нельзя взять дефолты:
@@ -23,7 +23,7 @@ uv tool install "basic-memory==$BM_VERSION"
 basic-memory project add vault "$VAULT" 2>/dev/null || true
 basic-memory project default vault
 
-# Эмбеддинги локально через Ollama (§8.2). Модель — bge-m3.
+# Эмбеддинги локально через Ollama (§8.2 `TZ.md`). Модель — bge-m3.
 # Замер на doctor (i5-7200U, 4 потока, без GPU), кусок 3000 символов:
 #   bge-m3               11.3 с, запрос 0.28 с
 #   qwen3-embedding:0.6b 25.6 с, запрос 0.42 с
