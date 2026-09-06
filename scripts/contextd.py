@@ -91,6 +91,7 @@ TRUSTED_PROXY = tuple(a.strip() for a in
 ОКНО = 300                              # за столько секунд
 ОСТЫТЬ = 300                            # и столько же потом получает 429
 _неудачи = {}                           # адрес -> [сколько, когда первая]
+_отказы = {}                            # код -> сколько отдали (#71)
 _замок = threading.Lock()
 
 
@@ -280,7 +281,17 @@ def heartbeat_lag(root, name):
 
 
 def metrics(con, root=None, vault=None):
-    """Считаем запросом, а не копим в памяти: перезапуск не теряет счётчики."""
+    """Состояние считаем запросом, а не копим в памяти: рестарт его не теряет.
+
+    Исключение одно и осознанное: `mara_http_errors_total` — счёт событий, а
+    не состояние, и спросить его у базы не у кого. Он живёт в памяти демона и
+    рестартом обнуляется — для Prometheus-counter это норма, `rate()` сброс
+    переживает.
+
+    Считает он ровно те отказы, которые мы отдали сами, через `say`. Мимо
+    идут `send_error` самого `BaseHTTPRequestHandler` (кривая строка запроса,
+    метод без `do_*`) и оборванная загрузка, где ответа нет вовсе.
+    """
     root = root or mi.ROOT
     q = lambda sql, *a: con.execute(sql, a).fetchone()[0]
     last = con.execute("select received from events order by received desc limit 1").fetchone()
@@ -289,6 +300,9 @@ def metrics(con, root=None, vault=None):
                        "order by last_seen desc limit 1").fetchone()
     mobile = age_of(seen[0] if seen else None)
     pack_age, pack_bytes = pack_stat(vault)
+    # Снимок под замком: словарь правят рабочие потоки, а мы его обходим.
+    with _замок:
+        отказы = sorted(_отказы.items())
     # mara_mobile_* берёт любое устройство, и Gmail-крон раз в 10 минут его
     # всегда «освежит» — телефон виден только поимённо.
     #
@@ -325,6 +339,7 @@ def metrics(con, root=None, vault=None):
         ("mara_sms_lag_seconds", source_lag(con, "sms")),
         ("mara_context_pack_age_seconds", pack_age),
         ("mara_context_pack_bytes", pack_bytes),
+        *[('mara_http_errors_total{code="%d"}' % k, n) for k, n in отказы],
     ]
     return "".join("%s %s\n" % (k, v) for k, v in rows)
 
@@ -430,6 +445,12 @@ class Handler(BaseHTTPRequestHandler):
             print(log_line(self.command,
                            urllib.parse.urlparse(self.path).path,
                            code, поля, клиент(self)), flush=True)
+            # Тот же довод и для счётчика: в логе отказ виден поштучно и
+            # человеку, в `/metrics` — числом и мониторингу. Раньше 401 и 413
+            # снаружи выглядели одинаково, тишиной, а чинятся по-разному:
+            # первый перевыпуском пары, второй на телефоне (#71).
+            with _замок:
+                _отказы[code] = _отказы.get(code, 0) + 1
         body = (obj if isinstance(obj, (bytes, bytearray)) else
                 json.dumps(obj, ensure_ascii=False).encode("utf-8")
                 if ctype == "application/json" else obj.encode("utf-8"))

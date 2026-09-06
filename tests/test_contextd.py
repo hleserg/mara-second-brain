@@ -1748,6 +1748,56 @@ class ТестЛогОтказов(unittest.TestCase):
         self.assertNotIn(длинный, строка)
         self.assertLess(len(строка), 250, строка)
 
+    def метрики(self, срв):
+        """`/metrics` без токена отдаётся только с петли — оттуда и берём."""
+        адрес = "http://127.0.0.1:%d/metrics" % срв.server_address[1]
+        with urllib.request.urlopen(адрес, timeout=10) as r:
+            текст = r.read().decode("utf-8")
+        return dict(s.rsplit(" ", 1) for s in текст.splitlines() if s)
+
+    def test_отказы_считаются_по_коду(self):
+        """#71: снаружи 401 и 413 выглядели одинаково — тишиной.
+
+        Раскладка неслучайна во всех трёх частях.
+
+        Коды разведены по пути: 401 и 413 идут через `отлуп`, а 404 — через
+        `say` напрямую. Перенеси инкремент из `say` в `отлуп` — и 404
+        перестанет считаться, а пока код считается хотя бы где-то, застава на
+        одном 401 этого не заметит.
+
+        Числа попарно различны (1, 2, 3): на равных счётчиках перестановка
+        меток между кодами прошла бы незамеченной.
+
+        Успешный `/healthz` — чтобы счётчик отказов не оказался счётчиком
+        ответов. Свой собственный 200 `/metrics` в свой вывод не попадает
+        (`metrics()` считается аргументом, до `say`), и без отдельного успеха
+        мутант «считаем все коды» выжил бы.
+        """
+        # Счётчик — модульный глобал, а соседи по файлу отказов наделали
+        # задолго до нас. Читает его только этот тест, ему и сбрасывать.
+        contextd._отказы.clear()
+        _, срв, токен = self.поднять()
+        было = (contextd.MAX_JSON, contextd.MAX_BODY)
+        contextd.MAX_JSON = contextd.MAX_BODY = 8
+        try:
+            self.assertEqual(self.под_логом(срв, "/healthz")[0], 200)
+            self.assertEqual(self.под_логом(
+                срв, "/v1/ingest/event", b"{}", None, "POST")[0], 401)
+            for _ in range(2):
+                self.assertEqual(self.под_логом(
+                    срв, "/v1/ingest/event", b"a" * 64, токен, "POST")[0], 413)
+            for _ in range(3):
+                self.assertEqual(self.под_логом(
+                    срв, "/v1/no-such", токен=токен)[0], 404)
+            m = self.метрики(срв)
+        finally:
+            contextd.MAX_JSON, contextd.MAX_BODY = было
+        имя = 'mara_http_errors_total{code="%d"}'
+        self.assertEqual(m.get(имя % 401), "1", m)
+        self.assertEqual(m.get(имя % 413), "2", m)
+        self.assertEqual(m.get(имя % 404), "3", m)
+        self.assertNotIn(имя % 200, m)
+
     def test_тысяча_полей_не_раздувает_строку(self):
         """Мегабайт json — это десятки тысяч ключей."""
         строка = contextd.log_line("POST", "/v1/ingest/event", 400,
