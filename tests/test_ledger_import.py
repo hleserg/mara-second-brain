@@ -254,20 +254,32 @@ class Перенос(unittest.TestCase):
         r, = self.строки("commitments")
         self.assertEqual(r["origin_event"], "ev_c1")
 
-    def test_source_id_проставленный_позже_не_плодит_второй_объект(self):
-        # карточку завели руками, без `source_id` — ключом стал путь. Потом
-        # `source_id` проставили, и ключ сменился: без сверки по проекции
-        # завёлся бы второй объект, а первый остался бы вообще без файла.
+    def test_source_id_проставленный_позже_уходит_в_спор_а_не_в_дубль(self):
+        # Карточку завели руками, без `source_id` — ключом стал путь. Потом
+        # `source_id` проставили, и ключ сменился. На `main` здесь молча
+        # заводился второй объект, а первый оставался вообще без проекции.
+        #
+        # Слить их нечем, и в этом вся суть. Ровно так же из базы выглядит
+        # чужая карточка, легшая на освободившийся путь, — и путь она займёт
+        # ровно при совпадении заголовка, потому что складывается из даты и
+        # `slug(...)[:40]` (`call_project.py:159`, `:391`). Значит спор, а не
+        # догадка: строка ledger цела, дубля нет, причина названа вслух.
         rel = "kb/commitments/2026-09-03-ruchnaya.md"
         карточка(self.vault, rel, source_id=None)
         self.перенести()
-        было, = [r["id"] for r in self.строки("commitments")]
-        карточка(self.vault, rel, source_id="commitment/call_1/requests/1")
-        итог = self.перенести()
-        self.assertEqual((итог["обязательств"], итог["обновлено"]), (0, 1))
-        r, = self.строки("commitments")
-        self.assertEqual(r["id"], было, "ТЗ §4.3: id не меняется")
-        self.assertEqual(r["source_native_id"], "commitment/call_1/requests/1")
+        было, = [(r["id"], r["status"]) for r in self.строки("commitments")]
+        карточка(self.vault, rel, source_id="commitment/call_1/requests/1",
+                 status="done")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["обновлено"],
+                          итог["спорных"]), (0, 0, 1))
+        self.assertIn("ключ сменился", поток.getvalue(),
+                      "причина спора не названа")
+        self.assertEqual([(r["id"], r["status"])
+                          for r in self.строки("commitments")], [было],
+                         "объект тронут, хотя доказательства не было")
 
     def test_чужой_source_id_на_месте_объекта_не_сливает_два_в_один(self):
         # у карточки по пути уже стоит объект Б, а объявленный `source_id`
@@ -282,9 +294,13 @@ class Перенос(unittest.TestCase):
         ид = {r["source_native_id"]: r["id"] for r in self.строки("commitments")}
         os.remove(os.path.join(self.vault, а))
         карточка(self.vault, б, source_id="commitment/call_1/requests/1")
-        итог = self.перенести()
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
         self.assertEqual(
             (итог["обязательств"], итог["обновлено"], итог["спорных"]), (0, 0, 1))
+        self.assertIn("по ключу стоит другой объект", поток.getvalue(),
+                      "причина спора не названа")
         self.assertEqual(len(self.строки("commitments")), 2, "объект А не пропал")
         self.assertEqual(
             {(п["path"], п["object_id"]) for п in self.строки("projections")},
@@ -330,9 +346,8 @@ class Перенос(unittest.TestCase):
     def test_другая_карточка_на_освободившемся_пути_не_затирает_объект(self):
         # Зеркало к «`source_id` проставили позже», и из базы неотличимо:
         # там та же карточка получила ключ, здесь на её место легла чужая.
-        # Ключ у объекта за проекцией в обоих случаях один — путь. Разошёлся
-        # только заголовок, и это улика против слияния: совпадение текста
-        # доказательством не считается (§4.3), а расхождение — считается.
+        # Заголовок в решении не участвует намеренно — он расходится далеко
+        # не всегда, а слияние стирало бы строку ledger в обоих случаях.
         rel = "kb/commitments/2026-09-03-a.md"
         карточка(self.vault, rel, source_id=None)
         self.перенести()
@@ -345,11 +360,31 @@ class Перенос(unittest.TestCase):
             итог = self.перенести()
         self.assertEqual((итог["обязательств"], итог["обновлено"],
                           итог["спорных"]), (0, 0, 1))
-        self.assertIn("заголовок", поток.getvalue(),
+        self.assertIn("ключ сменился", поток.getvalue(),
                       "причина спора не названа")
+        self.assertEqual([п["object_id"] for п in self.строки("projections")],
+                         [было[0]], "проекция уведена на чужой объект")
         self.assertIn(было, [(r["id"], r["title"])
                              for r in self.строки("commitments")],
                       "объект затёрт карточкой, которая заняла его путь")
+
+    def test_карточка_ушедшая_в_спор_не_считается_перенесённой(self):
+        # `видели` отмечает `source_id` уже перенесённых карточек. Пока
+        # отметка стояла выше заставы, она врала: первая карточка уходила в
+        # спор, а второй с тем же `source_id` сообщалось «перенесён первый»
+        # — при том, что первый не перенесён никуда.
+        а = "kb/commitments/2026-09-03-a.md"
+        б = "kb/commitments/2026-09-03-b.md"
+        карточка(self.vault, а, source_id=None)
+        self.перенести()
+        карточка(self.vault, а, source_id="commitment/call_1/requests/1")
+        карточка(self.vault, б, source_id="commitment/call_1/requests/1")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["спорных"]), (1, 1))
+        self.assertNotIn("перенесён первый", поток.getvalue(),
+                         "спорная карточка объявлена перенесённой")
 
     def test_проекция_на_снесённую_строку_объекта_не_даёт_вечный_спор(self):
         # Строку объекта снесли руками, проекцию за ней никто не почистил.
