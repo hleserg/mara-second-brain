@@ -9,7 +9,7 @@
 второй запуск (ТЗ §4.3: id не меняется никогда), иначе первый же откат
 разъедется с волтом.
 """
-import os, sys, hashlib, tempfile, unittest
+import os, sys, io, hashlib, contextlib, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -135,6 +135,25 @@ class Перенос(unittest.TestCase):
         self.assertEqual([п["path"] for п in self.строки("projections")],
                          ["kb/commitments/2026-09-03-a.md"])
 
+    def test_проба_отчитывается_о_споре_так_же_как_боевой_прогон(self):
+        # §9 обещает: вывод пробы — тот самый отчёт, по которому владелец
+        # решает, запускать ли настоящий прогон. Обещание держится ровно на
+        # том, что `видели` заполняется до `if dry_run: continue`. Опусти
+        # отметку ниже — и проба насчитает два обязательства и промолчит про
+        # спор, то есть соврёт именно там, куда смотрят.
+        карточка(self.vault, "kb/commitments/2026-09-03-a.md")
+        карточка(self.vault, "kb/commitments/2026-09-03-b.md", status="done")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            проба = self.перенести(dry_run=True)
+        жалоба = поток.getvalue()
+        боевой = self.перенести()
+        self.assertEqual((проба["обязательств"], проба["спорных"]),
+                         (боевой["обязательств"], боевой["спорных"]),
+                         "проба насчитала не то, что боевой прогон")
+        self.assertIn("перенесён первый", жалоба,
+                      "проба смолчала про дубль")
+
     def test_два_обязательства_переносятся_оба(self):
         # без этого теста мимо гейта проходит потеря фильтра по object_id в
         # `delete from projections`: с одним объектом стирать нечего, а с
@@ -243,6 +262,178 @@ class Перенос(unittest.TestCase):
                           "спорных": 0})
 
 
+    def test_обязательство_из_поправки_помнит_событие(self):
+        # поправка — такое же событие в `events`, и `call_project.py:409`
+        # пишет в карточку `origin: correction/<id>`. Пока разбирался один
+        # префикс `call/`, у обязательств из поправок `origin_event` уходил
+        # пустым — то есть связь с поправкой терялась при самом переносе.
+        карточка(self.vault, "kb/commitments/2026-09-03-popravka.md",
+                 origin="correction/ev_c1")
+        self.перенести()
+        r, = self.строки("commitments")
+        self.assertEqual(r["origin_event"], "ev_c1")
+
+    def test_source_id_проставленный_позже_уходит_в_спор_а_не_в_дубль(self):
+        # Карточку завели руками, без `source_id` — ключом стал путь. Потом
+        # `source_id` проставили, и ключ сменился. На `main` здесь молча
+        # заводился второй объект, а первый оставался вообще без проекции.
+        #
+        # Слить их нечем, и в этом вся суть. Ровно так же из базы выглядит
+        # чужая карточка, легшая на освободившийся путь, — и путь она займёт
+        # ровно при совпадении заголовка, потому что складывается из даты и
+        # `slug(...)[:40]` (`call_project.py:159`, `:391`). Значит спор, а не
+        # догадка: строка ledger цела, дубля нет, причина названа вслух.
+        rel = "kb/commitments/2026-09-03-ruchnaya.md"
+        карточка(self.vault, rel, source_id=None)
+        self.перенести()
+        было, = [(r["id"], r["status"]) for r in self.строки("commitments")]
+        карточка(self.vault, rel, source_id="commitment/call_1/requests/1",
+                 status="done")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["обновлено"],
+                          итог["спорных"]), (0, 0, 1))
+        self.assertIn("ключ сменился", поток.getvalue(),
+                      "причина спора не названа")
+        self.assertEqual([(r["id"], r["status"])
+                          for r in self.строки("commitments")], [было],
+                         "объект тронут, хотя доказательства не было")
+
+    def test_чужой_source_id_на_месте_объекта_не_сливает_два_в_один(self):
+        # у карточки по пути уже стоит объект Б, а объявленный `source_id`
+        # принадлежит объекту А. Слить их — то самое схлопывание двух в один,
+        # без доказательства, что это одно событие (ТЗ §4.3): сверка
+        # обязана остановиться и сказать вслух.
+        а = "kb/commitments/2026-09-03-a.md"
+        б = "kb/commitments/2026-09-03-b.md"
+        карточка(self.vault, а, source_id="commitment/call_1/requests/1")
+        карточка(self.vault, б, source_id=None)
+        self.перенести()
+        ид = {r["source_native_id"]: r["id"] for r in self.строки("commitments")}
+        os.remove(os.path.join(self.vault, а))
+        карточка(self.vault, б, source_id="commitment/call_1/requests/1")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
+        self.assertEqual(
+            (итог["обязательств"], итог["обновлено"], итог["спорных"]), (0, 0, 1))
+        self.assertIn("по ключу стоит другой объект", поток.getvalue(),
+                      "причина спора не названа")
+        self.assertEqual(len(self.строки("commitments")), 2, "объект А не пропал")
+        self.assertEqual(
+            {(п["path"], п["object_id"]) for п in self.строки("projections")},
+            {(а, ид["commitment/call_1/requests/1"]), (б, ид["vault:" + б])})
+
+
+    def test_чужая_карточка_на_месте_объекта_не_затирает_его(self):
+        # карточку с `source_id` удалили, а на том же пути завели другую, без
+        # `source_id`. Так пишет не проектор — `call_project.py` ставит
+        # `source_id` всегда (`:176`, `:400`), — а рука в Obsidian: имя файла
+        # складывается из даты и первых сорока знаков заголовка, и повторить
+        # его нетрудно. По ключу не найдётся ничего, по пути найдётся чужой
+        # объект — взять его значит стереть строку ledger, которая никуда не
+        # девалась.
+        rel = "kb/commitments/2026-09-03-a.md"
+        карточка(self.vault, rel, source_id="commitment/call_1/requests/1")
+        self.перенести()
+        было, = [(r["id"], r["title"]) for r in self.строки("commitments")]
+        os.remove(os.path.join(self.vault, rel))
+        карточка(self.vault, rel, source_id=None, title="совсем другое")
+        итог = self.перенести()
+        self.assertEqual(
+            (итог["обязательств"], итог["обновлено"], итог["спорных"]), (0, 0, 1))
+        self.assertIn(было, [(r["id"], r["title"])
+                             for r in self.строки("commitments")],
+                      "объект с прежним ключом затёрт чужой карточкой")
+
+    def test_снятый_source_id_не_меняет_ключ_молча(self):
+        # обратный случай к тому же: `source_id` из карточки убрали, ключом
+        # снова стал путь. Тот же файл это или другой — из базы не видно, и
+        # разойтись эти два случая не могут. Значит спорная, а не догадка.
+        rel = "kb/commitments/2026-09-03-a.md"
+        карточка(self.vault, rel, source_id="commitment/call_1/requests/1")
+        self.перенести()
+        карточка(self.vault, rel, source_id=None)
+        итог = self.перенести()
+        self.assertEqual(
+            (итог["обязательств"], итог["обновлено"], итог["спорных"]), (0, 0, 1))
+        r, = self.строки("commitments")
+        self.assertEqual(r["source_native_id"], "commitment/call_1/requests/1",
+                         "ключ сменился без ведома человека")
+
+    def test_другая_карточка_на_освободившемся_пути_не_затирает_объект(self):
+        # Зеркало к «`source_id` проставили позже», и из базы неотличимо:
+        # там та же карточка получила ключ, здесь на её место легла чужая.
+        # Заголовок в решении не участвует намеренно — он расходится далеко
+        # не всегда, а слияние стирало бы строку ledger в обоих случаях.
+        rel = "kb/commitments/2026-09-03-a.md"
+        карточка(self.vault, rel, source_id=None)
+        self.перенести()
+        было, = [(r["id"], r["title"]) for r in self.строки("commitments")]
+        os.remove(os.path.join(self.vault, rel))
+        карточка(self.vault, rel, source_id="commitment/call_9/requests/7",
+                 title="совсем другое")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["обновлено"],
+                          итог["спорных"]), (0, 0, 1))
+        self.assertIn("ключ сменился", поток.getvalue(),
+                      "причина спора не названа")
+        self.assertEqual([п["object_id"] for п in self.строки("projections")],
+                         [было[0]], "проекция уведена на чужой объект")
+        self.assertIn(было, [(r["id"], r["title"])
+                             for r in self.строки("commitments")],
+                      "объект затёрт карточкой, которая заняла его путь")
+
+    def test_карточка_ушедшая_в_спор_не_считается_перенесённой(self):
+        # `видели` отмечает `source_id` уже перенесённых карточек. Пока
+        # отметка стояла выше заставы, она врала: первая карточка уходила в
+        # спор, а второй с тем же `source_id` сообщалось «перенесён первый»
+        # — при том, что первый не перенесён никуда.
+        а = "kb/commitments/2026-09-03-a.md"
+        б = "kb/commitments/2026-09-03-b.md"
+        карточка(self.vault, а, source_id=None)
+        self.перенести()
+        карточка(self.vault, а, source_id="commitment/call_1/requests/1")
+        карточка(self.vault, б, source_id="commitment/call_1/requests/1")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["спорных"]), (1, 1))
+        self.assertNotIn("перенесён первый", поток.getvalue(),
+                         "спорная карточка объявлена перенесённой")
+
+    def test_проекция_на_снесённую_строку_объекта_не_даёт_вечный_спор(self):
+        # Строку объекта снесли руками, проекцию за ней никто не почистил.
+        # Соединение в запросе обычное, не `left`: пары из пустот не будет,
+        # проекция прочтётся как отсутствующая, и карточка заведётся заново.
+        # При `left join` ключ не совпал бы ни с чем и спор стал бы вечным.
+        rel = "kb/commitments/2026-09-03-a.md"
+        карточка(self.vault, rel)
+        self.перенести()
+        self.con.execute("delete from commitments")
+        итог = self.перенести()
+        self.assertEqual((итог["обязательств"], итог["спорных"]), (1, 0))
+        self.assertEqual(len(self.строки("commitments")), 1)
+
+    def test_нечисловой_confidence_не_уходит_молча(self):
+        # пустым `confidence` делает `_число`, а не база: `real` в SQLite
+        # — affinity, «высокая» легла бы туда как есть. Терять поле молча
+        # нельзя: карточка выглядела бы перенесённой целиком.
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md",
+                 confidence="высокая")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = self.перенести()
+        r, = self.строки("commitments")
+        self.assertIsNone(r["confidence"])
+        self.assertEqual(итог["спорных"], 0, "одно поле — не повод ронять прогон")
+        self.assertIn("2026-09-03-smeta.md", поток.getvalue())
+        self.assertIn("высокая", поток.getvalue())
+
+
 class Идентификатор(unittest.TestCase):
     def test_uuid7_сортируется_по_времени_и_разбирается(self):
         import uuid
@@ -305,3 +496,45 @@ class Идентификатор(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Запуск(unittest.TestCase):
+    """`main()`: коды возврата и цена пробы. До этого класса он не звался."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.vault = os.path.join(self.tmp.name, "vault")
+
+    def запустить(self, *флаги):
+        argv = sys.argv
+        sys.argv = (["ledger_import", "--root", self.root, "--vault", self.vault]
+                    + list(флаги))
+        поток = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(поток), \
+                    contextlib.redirect_stderr(поток):
+                код = li.main()
+        finally:
+            sys.argv = argv
+        return код, поток.getvalue()
+
+    def test_проба_на_чистой_машине_не_заводит_базу(self):
+        # `--dry-run` — вопрос «что бы перенеслось», а не команда завести
+        # каталог блобов со схемой: `mi.connect` звался до проверки флага.
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        код, вывод = self.запустить("--dry-run")
+        self.assertEqual(код, 0)
+        self.assertFalse(os.path.exists(self.root), "проба завела " + self.root)
+        self.assertIn("обязательств 1", вывод)
+
+    def test_спорная_карточка_даёт_единицу(self):
+        карточка(self.vault, "kb/commitments/2026-09-03-a.md")
+        карточка(self.vault, "kb/commitments/2026-09-03-b.md")
+        код, вывод = self.запустить()
+        self.assertEqual(код, 1, "спорную карточку крон обязан заметить")
+        self.assertIn("спорных 1", вывод)
+
+    def test_самопроверка_проходит(self):
+        self.assertEqual(self.запустить("--self-check")[0], 0)
