@@ -83,7 +83,7 @@ sock=$(sudo ss -ltnp | grep "pid=$pid," || true)
 local_addr=$(awk '{print $4}' <<<"$sock")
 case "$local_addr" in
   127.0.0.1:*|\[::1\]:*) ;;
-  *) echo "ОШИБКА: MCP слушает $local_addr — нарушение TZ.md §11" >&2
+  *) echo "ОШИБКА: MCP слушает $local_addr — нарушение §11 TZ.md" >&2
      exit 1 ;;
 esac
 echo "$sock"
