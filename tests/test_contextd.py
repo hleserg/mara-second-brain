@@ -1,5 +1,5 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
-import os, sys, io, json, hashlib, socket, tempfile, threading, unittest
+import os, sys, io, json, hashlib, socket, tempfile, threading, time, unittest
 import urllib.request, urllib.error
 from datetime import datetime, timedelta
 
@@ -1804,6 +1804,93 @@ class ТестЛогОтказов(unittest.TestCase):
                                    {"k%04d" % i: 1 for i in range(1000)})
         self.assertIn("+980", строка)
         self.assertLess(len(строка), 300, строка)
+
+
+class ТестПределЗаливок(unittest.TestCase):
+    """Одно устройство не занимает сколько угодно потоков и диска (#39).
+
+    Заливка держит поток демона и `.part`-файл всё время чтения тела. Предела
+    на это не было вовсе: телефон с десятком записей и плохой связью открывал
+    десяток того и другого, а плата — не сервер.
+    """
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        срв = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=срв.serve_forever, daemon=True).start()
+        con = mi.connect(каталог)
+        _, токен = contextd.pair(con, "телефон")
+        self.addCleanup(срв.server_close)
+        self.addCleanup(срв.shutdown)
+        return con, срв, токен
+
+    def событие(self, con, сырьё):
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": sha,
+                                    "blob": {"sha256": sha, "ext": "m4a",
+                                             "bytes": len(сырьё)}})
+        return eid
+
+    def залить(self, срв, токен, eid, тело):
+        адрес = "http://127.0.0.1:%d/v1/ingest/audio?event=%s" % (
+            срв.server_address[1], eid)
+        req = urllib.request.Request(адрес, data=тело, method="POST")
+        req.add_header("Authorization", "Bearer " + токен)
+        req.add_header("Content-Type", "application/octet-stream")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                r.read()
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def дождаться(self, сколько, жалоба):
+        """Опрос, а не sleep: заливку держит поток сервера, момент не наш."""
+        предел = time.monotonic() + 10
+        while time.monotonic() < предел:
+            if sum(contextd._заливки.values()) == сколько:
+                return
+            time.sleep(0.02)
+        self.fail("%s: %r" % (жалоба, contextd._заливки))
+
+    def test_вторая_заливка_с_того_же_устройства_получает_503(self):
+        con, срв, токен = self.поднять()
+        а, б = os.urandom(4096), os.urandom(4096)
+        eid_а, eid_б = self.событие(con, а), self.событие(con, б)
+        было = contextd.ЗАЛИВОК
+        contextd.ЗАЛИВОК = 1
+        contextd._заливки.clear()
+        contextd._отказы.clear()
+        держим = socket.create_connection(
+            ("127.0.0.1", срв.server_address[1]), timeout=10)
+        try:
+            # Заголовки целиком, тело обрывком: демон встаёт в `слить` и ждёт
+            # хвоста, то есть держит место ровно так, как в бою держит его
+            # телефон на плохой связи.
+            держим.sendall((
+                "POST /v1/ingest/audio?event=%s HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Authorization: Bearer %s\r\n"
+                "Content-Type: application/octet-stream\r\n"
+                "Content-Length: %d\r\n\r\n" % (eid_а, токен, len(а))
+            ).encode("utf-8"))
+            держим.sendall(а[:16])
+            self.дождаться(1, "место под заливку так и не занято")
+            self.assertEqual(self.залить(срв, токен, eid_б, б), 503)
+            # Счётчик кодов уже на main (#71): 503 обязан быть в нём виден,
+            # иначе новый отказ окажется тем самым молчаливым, от которого
+            # чинили. Разложение по строкам `/metrics` держит свой тест.
+            self.assertEqual(contextd._отказы.get(503), 1, contextd._отказы)
+            держим.close()
+            self.дождаться(0, "место не вернулось после обрыва связи")
+            # Третий заход обязателен: без него тест зелёный и при утечке
+            # места — 503 он бы поймал, а невозврат нет.
+            self.assertEqual(self.залить(срв, токен, eid_б, б), 200)
+        finally:
+            contextd.ЗАЛИВОК = было
+            держим.close()
 
 
 if __name__ == "__main__":
