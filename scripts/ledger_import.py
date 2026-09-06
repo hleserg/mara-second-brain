@@ -49,10 +49,17 @@ mb = _brief()
 )
 
 
+# Префиксы `source_id`/`origin`, за которыми стоит строка в `events`. Их
+# ровно два, и оба ставит `call_project.py`: `call/` — строки 129 и 186,
+# `correction/` — строка 409. Остальные (`commitment/`, `person-`, `vault:`)
+# события за собой не несут.
+СОБЫТИЙНЫЕ = ("call", "correction")
+
+
 def событие(s):
-    """`call/call_1` → `call_1`. Не звонок — значит события за карточкой нет."""
-    s = (s or "").strip()
-    return s[5:] or None if s.startswith("call/") else None
+    """`call/call_1` → `call_1`. Не событийный префикс — события нет."""
+    голова, _, хвост = (s or "").strip().partition("/")
+    return хвост or None if голова in СОБЫТИЙНЫЕ else None
 
 
 def _число(s):
@@ -129,15 +136,42 @@ def run(con, vault=None, dry_run=False):
                 continue
             видели[native] = rel
             row = con.execute("select id from %s where source_native_id=?" % таблица,
-                              (native,)).fetchone()
-            новый = row is None
+                              (native,)).fetchone() if con else None
+            # Карточку могли завести без `source_id` — ключом тогда стал путь.
+            # Когда `source_id` наконец проставили, ключ сменился, и по одному
+            # `row` перенос завёл бы второй объект, а первый остался бы вообще
+            # без файла. Поэтому спрашиваем ещё и проекцию по пути.
+            проекция = con.execute(
+                "select object_id from projections where path=? "
+                "and object_kind=?", (rel, вид)).fetchone() if con else None
+            if row and проекция and row["id"] != проекция["object_id"]:
+                # По пути стоит один объект, а объявленный `source_id`
+                # принадлежит другому. Сливать их нельзя: §4.4 запрещает
+                # схлопывать два объекта в один. Обратный случай (`source_id`
+                # убрали, native стал `vault:путь`) сюда же и приходит.
+                итог["спорных"] += 1
+                print("ledger_import: %s стоит за объектом %s, а source_id %s "
+                      "принадлежит %s — не сливаем" %
+                      (rel, проекция["object_id"], native, row["id"]),
+                      file=sys.stderr)
+                continue
+            прежний = row["id"] if row else (
+                проекция["object_id"] if проекция else None)
+            новый = прежний is None
             итог[счётчик if новый else "обновлено"] += 1
             if dry_run:
                 continue
-            oid = mi.uuid7() if новый else row["id"]
+            oid = прежний or mi.uuid7()
             значения = {k: (_строка(fm.get(k)) or None) for k in поля}
             if "confidence" in значения:
-                значения["confidence"] = _число(значения["confidence"])
+                сырое = значения["confidence"]
+                значения["confidence"] = _число(сырое)
+                # колонка `real`, «высокая» в неё не ляжет. Молчать нельзя:
+                # карточка выглядела бы перенесённой целиком. И не спорная —
+                # одно поле руками не повод ронять весь прогон.
+                if сырое is not None and значения["confidence"] is None:
+                    print("ledger_import: %s — confidence %r не число, "
+                          "перенесено пустым" % (rel, сырое), file=sys.stderr)
             значения["id"] = oid
             значения["source_native_id"] = native
             значения["origin_event"] = (
@@ -196,7 +230,16 @@ def main():
     a = ap.parse_args()
     if a.self_check:
         return self_check()
-    итог = run(mi.connect(a.root), a.vault, dry_run=a.dry_run)
+    # Проба — вопрос «что бы перенеслось», а не команда завести каталог
+    # блобов со схемой: `mi.connect` создаёт и то и другое (mara_ingest.py,
+    # `def connect`). Базы нет — значит новым будет всё, и это правда.
+    без_базы = a.dry_run and not os.path.exists(
+        os.path.join(a.root, "contextd.db"))
+    if без_базы:
+        print("ledger_import: базы в %s нет — считаем всё новым" % a.root,
+              file=sys.stderr)
+    итог = run(None if без_базы else mi.connect(a.root), a.vault,
+               dry_run=a.dry_run)
     print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d, спорных %d"
           % (" (проба)" if a.dry_run else "", итог["обязательств"],
              итог["разговоров"], итог["обновлено"], итог["спорных"]))
