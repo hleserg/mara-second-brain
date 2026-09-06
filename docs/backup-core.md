@@ -32,8 +32,9 @@ git-зеркало, ни в бандл, ни в R2. Диск doctor умирае
 
 ## Что не уезжает
 
-`tdlib/` и `gmail/` — состояние сессии Telegram и refresh token Gmail. ТЗ
-§11: credentials и session-файлы denylisted из Git, R2 и бэкапов. Возить
+`tdlib/` и `gmail/` — состояние сессии Telegram и refresh token Gmail.
+§11 `TZ-ambient-memory.md`: credentials и session-файлы denylisted из
+Git, R2 и бэкапов. Возить
 ключи по сетевым шарам ради экономии двух логинов не стоит того.
 
 **Следствие для восстановления:** после разворачивания нужен повторный вход

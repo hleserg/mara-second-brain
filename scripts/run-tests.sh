@@ -59,6 +59,22 @@ else
   echo "FAIL install/mara-context"; echo "$out" | tail -3 | sed 's/^/     /'; fail=1
 fi
 
+# Шелл-скрипты в гейт не входили вовсе, а правятся руками и запускаются на
+# doctor — там опечатка видна ровно в тот момент, когда скрипт уже нужен.
+# `bash -n` разбирает файл, не исполняя ни строки, так что проверка ничего
+# не ставит и никуда не ходит. Фикстуры под tests/ не берём намеренно: они
+# входные данные, и сломанный синтаксис там бывает предметом теста.
+bad=""
+for f in hooks/*.sh install/*.sh scripts/*.sh; do
+  [ -e "$f" ] || continue
+  bash -n "$f" 2>/dev/null || bad="$bad $f"
+done
+if [ -z "$bad" ]; then
+  echo "ok   bash -n hooks install scripts"
+else
+  echo "FAIL bash -n:$bad"; fail=1
+fi
+
 # Kotlin-ядро приложения. aapt2 и d8 Google выпускает только под x86_64,
 # поэтому на BetaPi этого шага нет — сборка живёт на doctor. Правило простое:
 # трогал android/ — прогони гейт на doctor, иначе сюда уедет несобираемое.

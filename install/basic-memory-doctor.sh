@@ -5,7 +5,8 @@
 #
 # Грабли, из-за которых нельзя взять дефолты:
 #   1. Порт 8765 на doctor занят docker-proxy контейнера caddy-letheclaw.
-#   2. Версия пинится (§11): `uv tool install --upgrade` тащит fastmcp 4.0.0b1.
+#   2. Версия пинится (§11 `TZ.md`): `uv tool install --upgrade` тащит
+#      fastmcp 4.0.0b1.
 #   3. Дефолтный fastembed берёт bge-small-en-v1.5 — английскую модель на
 #      русский волт. Уводим на Ollama через litellm.
 set -euo pipefail
@@ -71,7 +72,7 @@ sudo systemctl reenable -q basic-memory-mcp.service
 sudo systemctl restart basic-memory-mcp.service
 sleep 10
 
-# Проверка ТЗ §11: наружу торчать нельзя. Смотрим сокет своего PID, а не
+# Проверка §11 `TZ.md`: наружу торчать нельзя. Смотрим сокет своего PID, а не
 # любой сокет на порту — иначе увидим чужой контейнер.
 systemctl is-active --quiet basic-memory-mcp.service || {
   journalctl -u basic-memory-mcp -n 20 --no-pager; exit 1; }
@@ -82,7 +83,8 @@ sock=$(sudo ss -ltnp | grep "pid=$pid," || true)
 local_addr=$(awk '{print $4}' <<<"$sock")
 case "$local_addr" in
   127.0.0.1:*|\[::1\]:*) ;;
-  *) echo "ОШИБКА: MCP слушает $local_addr — нарушение ТЗ §11" >&2; exit 1 ;;
+  *) echo "ОШИБКА: MCP слушает $local_addr — нарушение TZ.md §11" >&2
+     exit 1 ;;
 esac
 echo "$sock"
 echo "ок: MCP только на loopback, порт $PORT"
