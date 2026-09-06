@@ -14,7 +14,6 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
-import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.mara.capture.databinding.ActivityMainBinding
 import java.text.SimpleDateFormat
@@ -61,13 +60,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Расписание ставят четыре редких внешних события: загрузка
-        // (`Receivers.kt:11`), отбой звонка (`:26`), приход SMS
-        // (`Messages.kt:52`) и кнопка «сохранить» ниже. Если не случилось ни
-        // одного — свежая установка, очищенные данные, отменённая работа, —
-        // сверка не идёт вовсе, и по экрану это неотличимо от «система душит».
-        // Открытие приложения — единственный момент, когда владелец рядом и
-        // может помочь; политика UPDATE делает повтор безвредным.
+        // Периодическую работу ставят ровно два места: загрузка телефона
+        // (`Receivers.kt:11`) и кнопка «сохранить» ниже. Толчки `kick` из
+        // `Receivers.kt:26` и `Messages.kt:52` — одноразовые, расписание они
+        // не восстанавливают. Значит, если WorkManager потерял работу (EMUI
+        // прибил, «очистить данные», отмена), сверка не идёт вовсе — и до
+        // следующей перезагрузки не пойдёт. По экрану это неотличимо от
+        // «система душит фоном». Открытие приложения — единственный частый
+        // момент, когда владелец рядом; политика UPDATE делает повтор
+        // безвредным.
         if (s.paired) SyncWorker.schedule(this)
 
         b.url.setText(s.baseUrl)
@@ -153,22 +154,12 @@ class MainActivity : AppCompatActivity() {
      * весь экран целиком, а здесь стоит одной строки. `get()` блокирующий,
      * но `здоровье` и так считается не на главном потоке.
      */
-    private fun расписание(): String {
-        val работы = runCatching {
+    private fun расписание(): String = SyncWorker.расписаниеСловами(
+        runCatching {
             WorkManager.getInstance(this)
-                .getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
-        }.getOrNull() ?: return "спросить не вышло"
-        val живые = работы.filterNot { it.state.isFinished }
-        if (живые.isEmpty()) return "не поставлена"
-        return живые.joinToString(", ") {
-            when (it.state) {
-                WorkInfo.State.ENQUEUED -> "ждёт своего часа"
-                WorkInfo.State.RUNNING -> "идёт сейчас"
-                WorkInfo.State.BLOCKED -> "ждёт условий"
-                else -> it.state.name
-            }
-        }
-    }
+                .getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get().map { it.state }
+        }.getOrNull()
+    )
 
     /** Доступ к уведомлениям — не runtime-разрешение, а системный список. */
     private fun слушаем(): Boolean =
