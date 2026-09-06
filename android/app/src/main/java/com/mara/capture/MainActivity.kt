@@ -14,6 +14,8 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.mara.capture.databinding.ActivityMainBinding
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -58,6 +60,15 @@ class MainActivity : AppCompatActivity() {
             покажи("Keystore не завёлся — пришли эту строку:\n${e.javaClass.name}: ${e.message}")
             return
         }
+
+        // Расписание ставят четыре редких внешних события: загрузка
+        // (`Receivers.kt:11`), отбой звонка (`:26`), приход SMS
+        // (`Messages.kt:52`) и кнопка «сохранить» ниже. Если не случилось ни
+        // одного — свежая установка, очищенные данные, отменённая работа, —
+        // сверка не идёт вовсе, и по экрану это неотличимо от «система душит».
+        // Открытие приложения — единственный момент, когда владелец рядом и
+        // может помочь; политика UPDATE делает повтор безвредным.
+        if (s.paired) SyncWorker.schedule(this)
 
         b.url.setText(s.baseUrl)
         b.token.setText(s.token)
@@ -111,6 +122,7 @@ class MainActivity : AppCompatActivity() {
                 ?: "не вижу ни одной"),
             "в очереди: ${q.depth()}, отправлено: ${q.count(JobState.DONE)}, " +
                 "сдалось: ${q.count(JobState.FAILED)}",
+            "сверка по расписанию: " + расписание(),
             "последняя отправка: " + когда(s.lastUploadMs),
             // пишется при любой попытке, и неудачной тоже: удачные видно на сервере
             "последняя попытка связи: " + когда(s.lastContactMs),
@@ -130,6 +142,32 @@ class MainActivity : AppCompatActivity() {
             "сообщений в очереди: ${q.countMessages(JobState.NEW)}, отправлено: " +
                 "${q.countMessages(JobState.DONE)}, сдалось: ${q.countMessages(JobState.FAILED)}",
         ).joinToString("\n")
+    }
+
+    /**
+     * Стоит ли периодическая сверка. Без этой строки «последняя попытка
+     * связи: никогда» читается двояко: расписания нет вовсе или Huawei душит
+     * приложение (ТЗ §5.1F), — а чинится это по-разному.
+     *
+     * Своя ловушка, хотя весь сбор уже обёрнут в `фоном`: там она съела бы
+     * весь экран целиком, а здесь стоит одной строки. `get()` блокирующий,
+     * но `здоровье` и так считается не на главном потоке.
+     */
+    private fun расписание(): String {
+        val работы = runCatching {
+            WorkManager.getInstance(this)
+                .getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
+        }.getOrNull() ?: return "спросить не вышло"
+        val живые = работы.filterNot { it.state.isFinished }
+        if (живые.isEmpty()) return "не поставлена"
+        return живые.joinToString(", ") {
+            when (it.state) {
+                WorkInfo.State.ENQUEUED -> "ждёт своего часа"
+                WorkInfo.State.RUNNING -> "идёт сейчас"
+                WorkInfo.State.BLOCKED -> "ждёт условий"
+                else -> it.state.name
+            }
+        }
     }
 
     /** Доступ к уведомлениям — не runtime-разрешение, а системный список. */
