@@ -63,11 +63,16 @@ object Device {
     /**
      * Способ 2 — папка, выбранная владельцем один раз через SAF. За SAF-деревом
      * FileObserver следить не умеет, поэтому здесь только обход.
+     *
+     * Обход именно в глубину: ACR кладёт записи не в выбранную папку, а в
+     * `[гггг]/[ММ]/[дд]/[номер телефона]/` внутри неё, и плоский список
+     * находил там ровно ноль. Потолки и само дерево — в `Дерево.файлы`.
      */
     fun folder(ctx: Context, uri: String): List<Recording> {
         if (uri.isEmpty()) return emptyList()
         val dir = DocumentFile.fromTreeUri(ctx, Uri.parse(uri)) ?: return emptyList()
-        return dir.listFiles().filter { it.isFile && (it.length() > 0) }
+        return Дерево.файлы(dir, { it.isDirectory }, { it.listFiles().toList() })
+            .filter { it.isFile && (it.length() > 0) }
             .map { Recording(it.uri.toString(), it.name ?: "?", it.length(), it.lastModified()) }
     }
 
