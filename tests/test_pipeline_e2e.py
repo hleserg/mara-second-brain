@@ -87,7 +87,9 @@ class Сквозной(unittest.TestCase):
             # телеграм заменяем адресом, а не заглушкой в памяти
             "MARA_TELEGRAM_API": base + "/bot%s/sendMessage",
             "TELEGRAM_BOT_TOKEN": "test-token",   # уходит в путь URL: только ascii
-            "TELEGRAM_HOME_CHANNEL": "@тест",
+            # число, а не `@имя`: с #61 доставка берёт только приватный
+            # чат владельца, а `@имя` канал от чата не отличает
+            "TELEGRAM_HOME_CHANNEL": "424242",
         })
         import mara_ingest as mi
         import contextd

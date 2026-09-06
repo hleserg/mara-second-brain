@@ -1,5 +1,5 @@
 """Формат дайджеста (ТЗ §16). Рендер без модели и без сети."""
-import os, sys, json, tempfile, subprocess, unittest
+import contextlib, io, os, sys, json, tempfile, subprocess, unittest
 from unittest import mock
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -94,6 +94,35 @@ class Транспорт(unittest.TestCase):
         state = cd.deliver("текст", token=None, chat_id=None)
         self.assertEqual(state, "no-transport",
                          "нет токена — дайджест остаётся в базе, а не пропадает")
+
+
+class Адресат(unittest.TestCase):
+    """§8.3 пускает дайджест наружу без редакции ровно потому, что читатель у
+    него один — владелец. Пока адресат не проверялся, это условие держалось
+    словом: канал обзаводится подписчиками без единой правки кода (#61)."""
+
+    def отправка_запрещена(self):
+        return mock.patch("urllib.request.urlopen",
+                          side_effect=AssertionError("дайджест ушёл в сеть"))
+
+    def test_канал_группа_и_имя_дайджеста_не_получают(self):
+        # `-100…` — канал или супергруппа, просто отрицательный — группа,
+        # `@имя` не различает их вовсе, поэтому отвергается вместе с мусором.
+        for чужой in ("-1001234567890", "-987654321", "@канал", "не число", "0"):
+            with self.subTest(chat_id=чужой):
+                буфер = io.StringIO()
+                with self.отправка_запрещена(), contextlib.redirect_stderr(буфер):
+                    состояние = cd.deliver("текст", "t", чужой)
+                self.assertEqual(состояние, "not-private",
+                                 "%s принят за личный чат владельца" % чужой)
+                self.assertIn(чужой, буфер.getvalue(),
+                              "отказ молчит: адресата в stderr нет")
+
+    def test_личный_чат_дайджест_получает(self):
+        """Половина заставы, без которой она была бы «не отправлять никогда»."""
+        with mock.patch("urllib.request.urlopen") as у:
+            у.return_value.__enter__.return_value.read.return_value = b'{"ok":true}'
+            self.assertEqual(cd.deliver("текст", "t", "123456789"), "sent")
 
 
 class ИмяEnvФайла(unittest.TestCase):

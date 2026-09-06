@@ -110,10 +110,30 @@ def render(event, extraction, created_count):
     return "\n".join(out), items
 
 
+def приватный_чат(chat_id):
+    """Личный чат владельца — и только он (§8.3, #61).
+
+    Исключение §8.3 написано под одного читателя, поэтому «адресат ровно один»
+    обязано быть механикой, а не словом: канал заводит подписчиков без единой
+    правки кода. У приватного чата id положителен, у группы отрицателен, у
+    канала и супергруппы начинается с `-100`, а `@имя` не различает их вовсе —
+    поэтому проходят только положительные числа.
+    """
+    s = str(chat_id).strip()
+    return s.isascii() and s.isdigit() and int(s) > 0
+
+
 def deliver(text, token, chat_id):
     """Отправить или честно сказать, что транспорта нет. Текст не теряется."""
     if not token or not chat_id:
         return "no-transport"
+    if not приватный_чат(chat_id):
+        # Не исключение и не тишина: ночь ронять из-за настройки нельзя, но и
+        # уехать мимо §8.3 дайджест не должен. Текст остаётся в `digests`,
+        # событие — незакрытым, а реконсилятор раз в час считает такие (N11).
+        print("call_digest: адресат %s — не личный чат владельца, не отправляю "
+              "(§8.3, #61)" % chat_id, file=sys.stderr)
+        return "not-private"
     data = urllib.parse.urlencode({"chat_id": chat_id, "text": text,
                                    "disable_web_page_preview": "true"}).encode()
     req = urllib.request.Request(API % token, data=data, method="POST")
@@ -173,6 +193,9 @@ def self_check():
     assert "1 задача" in text, text
     assert len(items) == 2
     assert задач(1) == "1 задача" and задач(3) == "3 задачи" and задач(11) == "11 задач"
+    assert приватный_чат("123456789") and приватный_чат(123456789)
+    assert not приватный_чат("-1001234567890") and not приватный_чат("-99")
+    assert not приватный_чат("@канал") and not приватный_чат("١٢٣")
     assert deliver("x", None, None) == "no-transport"
     print("call_digest self-check: ок")
     return 0
