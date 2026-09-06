@@ -1,5 +1,5 @@
 """Формат дайджеста (ТЗ §16). Рендер без модели и без сети."""
-import os, sys, json, tempfile, subprocess, unittest
+import contextlib, io, os, sys, json, tempfile, subprocess, unittest
 from unittest import mock
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -96,6 +96,39 @@ class Транспорт(unittest.TestCase):
                          "нет токена — дайджест остаётся в базе, а не пропадает")
 
 
+class Адресат(unittest.TestCase):
+    """§8.3 пускает дайджест наружу без редакции ровно потому, что читатель у
+    него один — владелец. Пока адресат не проверялся, это условие держалось
+    словом: канал обзаводится подписчиками без единой правки кода (#61)."""
+
+    def отправка_запрещена(self):
+        return mock.patch("urllib.request.urlopen",
+                          side_effect=AssertionError("дайджест ушёл в сеть"))
+
+    def test_канал_группа_и_имя_дайджеста_не_получают(self):
+        # `-100…` — канал или супергруппа, просто отрицательный — группа,
+        # `@имя` не различает их вовсе, поэтому отвергается вместе с мусором.
+        for чужой in ("-1001234567890", "-987654321", "@канал",
+                      "не число", "0"):
+            with self.subTest(chat_id=чужой):
+                буфер = io.StringIO()
+                with self.отправка_запрещена(), \
+                        contextlib.redirect_stderr(буфер):
+                    состояние = cd.deliver("текст", "t", чужой)
+                self.assertEqual(состояние, "not-private",
+                                 "%s принят за личный чат владельца" % чужой)
+                self.assertIn(чужой, буфер.getvalue(),
+                              "отказ молчит: адресата в stderr нет")
+
+    def test_личный_чат_дайджест_получает(self):
+        """Половина заставы, без которой она была бы «не отправлять
+        никогда»."""
+        with mock.patch("urllib.request.urlopen") as у:
+            у.return_value.__enter__.return_value.read.return_value = (
+                b'{"ok":true}')
+            self.assertEqual(cd.deliver("текст", "t", "123456789"), "sent")
+
+
 class ИмяEnvФайла(unittest.TestCase):
     """MARA_ENV_FILE сюда не относится, и это надо держать проверенным.
 
@@ -162,10 +195,31 @@ class Доставка(unittest.TestCase):
         self.assertEqual(self.состояние(), "projected",
                          "владелец дайджеста не видел — звонок не обработан")
 
+    def test_чужой_адресат_событие_не_закрывает(self):
+        """Застава живёт в `deliver`, а закрывает событие `run` — и знать про
+        отказ обязан именно он. `Адресат` проверяет заставу, `Доставка` без
+        транспорта — только `no-transport`, и между ними оставалась щель:
+        сужение `state != "sent"` до `state == "no-transport"` проходило весь
+        гейт, объявляя звонок обработанным, а владелец дайджеста не видел."""
+        env = os.path.join(self.dir, "чужой.env")
+        with open(env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\n"
+                     "TELEGRAM_HOME_CHANNEL=-1001234567890\n")
+        # `deliver` настоящий: до сети он не доходит — отказ раньше `urlopen`
+        cd.run(self.eid, root=self.dir, env_file=env)
+        row = self.con.execute("select state from digests where event_id=?",
+                               (self.eid,)).fetchone()
+        self.assertEqual(row["state"], "not-private",
+                         "текст дайджеста сохранён")
+        self.assertEqual(self.состояние(), "projected",
+                         "владелец дайджеста не видел — звонок не обработан")
+
     def test_доставленный_дайджест_закрывает_событие(self):
         env = os.path.join(self.dir, "есть.env")
         with open(env, "w", encoding="utf-8") as fh:
-            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=@c\n")
+            # адресат правдоподобный: `@c` здесь держался только заглушкой
+            # `deliver` и моделировал ровно то, что §8.3 запрещает
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
         было = cd.deliver
         cd.deliver = lambda text, token, chat: "sent"
         try:
@@ -173,6 +227,25 @@ class Доставка(unittest.TestCase):
         finally:
             cd.deliver = было
         self.assertEqual(self.состояние(), "done")
+
+    def test_сбой_отправки_роняет_шаг(self):
+        """`failed` — сбой сети, а не настройка: работа обязана уйти в ретрай,
+        а встанет насовсем — скажет `dlq()`. Держится это одним `raise`, и без
+        него шаг выходил нулём: звонок оставался `projected` навсегда, ретрая
+        не было, а сверка про `failed` молчит намеренно (N11 — про настройку).
+        Мутант «убрать `raise`» проходил весь гейт."""
+        env = os.path.join(self.dir, "сбой.env")
+        with open(env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
+        было = cd.deliver
+        cd.deliver = lambda text, token, chat: "failed"
+        try:
+            with self.assertRaises(RuntimeError):
+                cd.run(self.eid, root=self.dir, env_file=env)
+        finally:
+            cd.deliver = было
+        self.assertEqual(self.состояние(), "projected",
+                         "до ретрая звонок обработанным не считается")
 
 
 if __name__ == "__main__":

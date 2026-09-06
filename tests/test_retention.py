@@ -111,6 +111,10 @@ class СверкаИсточников(unittest.TestCase):
         f = [x for x in rc.run(self.con, self.root, vault=None) if x["check"] == "источник-замолчал"]
         self.assertEqual([x["source"] for x in f], ["whatsapp"])
         self.assertEqual(f[0]["level"], "warn", "эвристика — в дневную сводку, не в код возврата")
+        # Срок тишины — часть находки, а не украшение: без этой строки
+        # `age // 86400` → `age // 3600` проходит весь гейт (перегнано:
+        # выживает), и владелец читает «молчит 120 дн.» про пять суток.
+        self.assertIn("молчит 5 дн.", f[0]["detail"])
 
     def test_телефон_сам_не_на_связи_не_находка(self):
         self.событие("sms", 5); self.устройство(hours_ago=72)
@@ -139,21 +143,146 @@ class СверкаИсточников(unittest.TestCase):
         f = rc.запись_не_долита(self.con)
         self.assertEqual((f[0]["count"], f[0]["sample"]), (1, [старый]))
         self.assertNotIn(свежий, f[0]["sample"])
+        self.assertEqual(f[0]["level"], "warn",
+                         "недолитая запись — в сводку, а не в код возврата")
+        # То же, что у дайджеста: прямой вызов доказывает работу функции,
+        # но не её место в цепочке. `out += запись_не_долита(con)`,
+        # выкинутый из `run()`, проходил весь гейт (перегнано: выживает).
+        через_run = [x for x in rc.run(self.con, self.root, vault=None)
+                     if x["check"] == "запись-не-долита"]
+        self.assertEqual(len(через_run), 1,
+                         "сверка обязана звать находку сама")
+        # Одной старой записи мало: на ней не видны ни порядок, ни
+        # обрезка — `order by e.received desc` и `sample=старые` проходили
+        # весь гейт (перегнано: оба выживают). Старых надо шесть, и у
+        # каждой своё время.
+        ещё = [self.событие("phone", d, blob="%02dc" % d + "c" * 61)
+               for d in range(3, 8)]
+        f = rc.запись_не_долита(self.con)
+        self.assertEqual(f[0]["count"], 6, "в счёт идут все шесть")
+        self.assertEqual(f[0]["sample"], ещё[::-1],
+                         "образец — пять самых давних, по возрастанию "
+                         "received")
+        self.assertNotIn(старый, f[0]["sample"],
+                         "самая свежая из старых в пятёрку не попадает")
 
     def test_недоставленный_дайджест_видно_в_сверке(self):
         """N11: звонок разобран, а владелец о нём не узнал — это находка."""
         eid = self.событие("phone", 0)
         # failed — это сбой отправки: работа уйдёт в ретрай, а встанет насовсем
-        # — скажет dlq(); здесь ждём только настроечную дыру
-        for state, did in (("sent", "d1"), ("no-transport", "d2"), ("failed", "d3")):
+        # — скажет dlq(); здесь ждём только настроечные дыры. Их две, и обе
+        # обязаны попасть в счёт: `not-private` — застава §8.3 (#61), и до
+        # круга 1 по #64 сверка её не видела вовсе.
+        # Строк `not-private` две, а `no-transport` одна, и это не украшение:
+        # на симметричной фикстуре разбивку не держал ни один оракул — метки,
+        # переставленные местами, и `чужой = без` проходили весь гейт
+        # (перегнал на модели: оба выживают).
+        for state, did in (("sent", "d1"), ("no-transport", "d2"),
+                           ("failed", "d3"), ("not-private", "d4"),
+                           ("not-private", "d5")):
             self.con.execute("insert into digests(id,event_id,chat_id,text,items_json,"
                              "sent_at,state) values(?,?,?,?,?,?,?)",
-                             (did, eid, "@c", "текст", "[]", mi.now_iso(), state))
+                             (did, eid, "123456789", "текст", "[]",
+                              mi.now_iso(), state))
         f = rc.дайджест_не_доставлен(self.con)
-        self.assertEqual((f[0]["count"], f[0]["sample"]), (1, [eid]),
-                         "доставленный дайджест — не находка")
+        self.assertEqual(f[0]["count"], 3,
+                         "доставленный дайджест — не находка, "
+                         "а чужой адресат — находка")
+        self.assertIn("нет токена или адресата: 1", f[0]["detail"])
+        self.assertIn("адресат не личный чат владельца: 2", f[0]["detail"],
+                      "владелец должен прочитать, какая из двух дыр")
+        self.assertEqual(f[0]["sample"], [eid, eid, eid])
+        self.assertEqual(f[0]["level"], "warn",
+                         "настроечная дыра — в сводку, а не в код возврата")
+        # Прямой вызов доказывает работу функции, но не её место в цепочке:
+        # мутант «убрать `out += дайджест_не_доставлен(con)` из `run()`»
+        # проходил и этот тест, и весь гейт — сверка молчала бы вовсе.
+        через_run = [x for x in rc.run(self.con, self.root, vault=None)
+                     if x["check"] == "дайджест-не-доставлен"]
+        self.assertEqual(len(через_run), 1,
+                         "сверка обязана звать находку сама")
         self.con.execute("update digests set state='sent'")
         self.assertEqual(rc.дайджест_не_доставлен(self.con), [])
+
+    def test_разбивка_держится_и_когда_дыра_одна(self):
+        """Обе строки разбивки условные, и на фикстуре 1+2 оба условия истинны
+        при любой порче: `if без:` → `if True:` и `if чужой:` → `if чужой > 1:`
+        проходили весь гейт. Держат их только односторонние случаи — там, где
+        одного из состояний нет вовсе, а второе ровно одно."""
+        eid = self.событие("phone", 0)
+
+        def дайджест(did, state):
+            self.con.execute("insert into digests(id,event_id,chat_id,text,"
+                             "items_json,sent_at,state) values(?,?,?,?,?,?,?)",
+                             (did, eid, "123456789", "текст", "[]",
+                              mi.now_iso(), state))
+
+        дайджест("d1", "not-private")
+        detail = rc.дайджест_не_доставлен(self.con)[0]["detail"]
+        self.assertIn("адресат не личный чат владельца: 1", detail)
+        self.assertNotIn("нет токена", detail, "дыры без токена здесь нет")
+        self.con.execute("delete from digests")
+        дайджест("d2", "no-transport")
+        detail = rc.дайджест_не_доставлен(self.con)[0]["detail"]
+        self.assertIn("нет токена или адресата: 1", detail)
+        self.assertNotIn("адресат не личный", detail,
+                         "чужого адресата здесь нет")
+
+    def test_вставшая_работа_доезжает_до_владельца(self):
+        """`дайджест_не_доставлен` не считает `failed` находкой и причиной
+        называет `dlq()` — дважды, в своём докстринге и в докстринге теста
+        выше. Обещание держится только если у `dlq()` есть свой вход: до
+        круга 4 её не звал ни один тест, и `warn` → `fixed` (находка пропадает
+        из сводки владельца: `текст()` берёт только не-`fixed`) проходил весь
+        гейт, как и `out += dlq(con)`, выкинутый из `run()`."""
+        self.con.execute(
+            "insert into jobs(id,event_id,kind,state,attempts,last_error,"
+            "created,updated) values(?,?,?,?,?,?,?,?)",
+            ("j1", self.событие("phone", 0), "digest", "dlq", 7,
+             "telegram 400: chat not found", mi.now_iso(), mi.now_iso()))
+        f = [x for x in rc.run(self.con, self.root, vault=None)
+             if x["check"] == "работы-в-dlq"]
+        self.assertEqual(len(f), 1, "сверка обязана звать dlq() сама")
+        self.assertEqual(f[0]["count"], 1)
+        self.assertEqual(f[0]["level"], "warn",
+                         "вставшая работа — в сводку, иначе её не увидит "
+                         "никто")
+        self.assertIn("chat not found", f[0]["detail"],
+                      "владельцу нужна причина, а не только число")
+        # Одной работы мало: на ней не виден `order by updated desc`
+        # (перегнано: `desc` → `asc` выживает). Вторая — старше и с другой
+        # причиной; владельцу нужна свежая.
+        вчера = (datetime.now(mi.TZ) - timedelta(days=1)).isoformat(
+            timespec="seconds")
+        self.con.execute(
+            "insert into jobs(id,event_id,kind,state,attempts,last_error,"
+            "created,updated) values(?,?,?,?,?,?,?,?)",
+            ("j0", self.событие("phone", 3), "digest", "dlq", 7,
+             "telegram 401: unauthorized", вчера, вчера))
+        f = rc.dlq(self.con)
+        self.assertEqual(f[0]["count"], 2, "в счёт идут обе")
+        self.assertIn("chat not found", f[0]["detail"],
+                      "«последняя» — самая свежая по updated")
+        self.assertNotIn("unauthorized", f[0]["detail"],
+                         "старая причина владельца бы обманула")
+
+    def test_образец_это_первые_пять_по_времени(self):
+        """Фикстура выше симметрична по событию — все пять строк об одном
+        `event_id` и с одним `sent_at`, поэтому на ней не видны ни порядок,
+        ни обрезка: `order by sent_at desc` и `rows[:5]` → `rows` проходили
+        весь гейт (перегнано: оба выживают). Здесь событий шесть, и время у
+        каждого своё."""
+        eids = [self.событие("phone", i) for i in range(6)]
+        for i, eid in enumerate(eids):
+            self.con.execute(
+                "insert into digests(id,event_id,chat_id,text,items_json,"
+                "sent_at,state) values(?,?,?,?,?,?,?)",
+                ("d%d" % i, eid, "123456789", "текст", "[]",
+                 "2026-09-06T0%d:00:00+03:00" % i, "no-transport"))
+        f = rc.дайджест_не_доставлен(self.con)
+        self.assertEqual(f[0]["count"], 6, "в счёт идут все шесть")
+        self.assertEqual(f[0]["sample"], eids[:5],
+                         "образец — пять самых ранних, по возрастанию sent_at")
 
     def test_сводка_владельцу_только_о_проблемах(self):
         self.assertIsNone(rc.текст([]))
