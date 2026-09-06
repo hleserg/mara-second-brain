@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Личный Gmail → contextd (ТЗ §12, спека 7).
+"""Личный Gmail → contextd (ТЗ §12 `TZ-ambient-memory.md`, спека 7).
 
 Раз в десять минут по крону: users.history.list от сохранённого historyId,
 новое письмо — событием в /v1/ingest/email, удаление — надгробием, корзина —
@@ -128,7 +128,8 @@ def _части(p):
 
 
 def тело(payload):
-    """(текст, вложения, был ли html). Вложения — метаданные, тел нет (§12)."""
+    """(текст, вложения, был ли html). Вложения — метаданные, тел нет
+    (§12 `TZ-ambient-memory.md`)."""
     plain = html = None
     вложения = []
     for part in _части(payload):
@@ -459,7 +460,9 @@ def login(home, client_id, client_secret, port=ПОРТ):
     req = urllib.request.Request(API + "profile", headers={"Authorization": "Bearer " + tok["access_token"]})
     email = _json(req).get("emailAddress", "")
     if not личный(email):
-        raise SystemExit("%s — не личный Gmail, рабочую почту не подключаем (ТЗ §12); ничего не сохранил" % email)
+        raise SystemExit("%s — не личный Gmail, рабочую почту не "
+                         "подключаем (ТЗ §12 TZ-ambient-memory.md); "
+                         "ничего не сохранил" % email)
     p = os.path.join(home, "token.json")
     fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:

@@ -1,4 +1,5 @@
-"""Разбор письма и контракт события Gmail (спека 7, ТЗ §12) — без Google."""
+"""Разбор письма и контракт события Gmail
+(спека 7, ТЗ §12 `TZ-ambient-memory.md`) — без Google."""
 import os, sys, json, base64, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -75,7 +76,7 @@ class Граница(unittest.TestCase):
     def test_только_личный_ящик(self):
         self.assertTrue(g.личный("me@gmail.com"))
         self.assertTrue(g.личный("Me@GoogleMail.com"))
-        self.assertFalse(g.личный("me@example.com"), "домен компании — рабочая почта, ТЗ §12")
+        self.assertFalse(g.личный("me@example.com"), "домен компании — рабочая почта, ТЗ §12 `TZ-ambient-memory.md`")
         self.assertFalse(g.личный(None))
 
     def test_состояние_вне_волта_и_репо(self):
