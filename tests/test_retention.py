@@ -111,6 +111,10 @@ class СверкаИсточников(unittest.TestCase):
         f = [x for x in rc.run(self.con, self.root, vault=None) if x["check"] == "источник-замолчал"]
         self.assertEqual([x["source"] for x in f], ["whatsapp"])
         self.assertEqual(f[0]["level"], "warn", "эвристика — в дневную сводку, не в код возврата")
+        # Срок тишины — часть находки, а не украшение: без этой строки
+        # `age // 86400` → `age // 3600` проходит весь гейт (перегнано:
+        # выживает), и владелец читает «молчит 120 дн.» про пять суток.
+        self.assertIn("молчит 5 дн.", f[0]["detail"])
 
     def test_телефон_сам_не_на_связи_не_находка(self):
         self.событие("sms", 5); self.устройство(hours_ago=72)
@@ -139,6 +143,15 @@ class СверкаИсточников(unittest.TestCase):
         f = rc.запись_не_долита(self.con)
         self.assertEqual((f[0]["count"], f[0]["sample"]), (1, [старый]))
         self.assertNotIn(свежий, f[0]["sample"])
+        self.assertEqual(f[0]["level"], "warn",
+                         "недолитая запись — в сводку, а не в код возврата")
+        # То же, что у дайджеста: прямой вызов доказывает работу функции,
+        # но не её место в цепочке. `out += запись_не_долита(con)`,
+        # выкинутый из `run()`, проходил весь гейт (перегнано: выживает).
+        через_run = [x for x in rc.run(self.con, self.root, vault=None)
+                     if x["check"] == "запись-не-долита"]
+        self.assertEqual(len(через_run), 1,
+                         "сверка обязана звать находку сама")
 
     def test_недоставленный_дайджест_видно_в_сверке(self):
         """N11: звонок разобран, а владелец о нём не узнал — это находка."""
@@ -201,6 +214,46 @@ class СверкаИсточников(unittest.TestCase):
         self.assertIn("нет токена или адресата: 1", detail)
         self.assertNotIn("адресат не личный", detail,
                          "чужого адресата здесь нет")
+
+    def test_вставшая_работа_доезжает_до_владельца(self):
+        """`дайджест_не_доставлен` не считает `failed` находкой и причиной
+        называет `dlq()` — дважды, в своём докстринге и в докстринге теста
+        выше. Обещание держится только если у `dlq()` есть свой вход: до
+        круга 4 её не звал ни один тест, и `warn` → `fixed` (находка пропадает
+        из сводки владельца: `текст()` берёт только не-`fixed`) проходил весь
+        гейт, как и `out += dlq(con)`, выкинутый из `run()`."""
+        self.con.execute(
+            "insert into jobs(id,event_id,kind,state,attempts,last_error,"
+            "created,updated) values(?,?,?,?,?,?,?,?)",
+            ("j1", self.событие("phone", 0), "digest", "dlq", 7,
+             "telegram 400: chat not found", mi.now_iso(), mi.now_iso()))
+        f = [x for x in rc.run(self.con, self.root, vault=None)
+             if x["check"] == "работы-в-dlq"]
+        self.assertEqual(len(f), 1, "сверка обязана звать dlq() сама")
+        self.assertEqual(f[0]["count"], 1)
+        self.assertEqual(f[0]["level"], "warn",
+                         "вставшая работа — в сводку, иначе её не увидит "
+                         "никто")
+        self.assertIn("chat not found", f[0]["detail"],
+                      "владельцу нужна причина, а не только число")
+
+    def test_образец_это_первые_пять_по_времени(self):
+        """Фикстура выше симметрична по событию — все пять строк об одном
+        `event_id` и с одним `sent_at`, поэтому на ней не видны ни порядок,
+        ни обрезка: `order by sent_at desc` и `rows[:5]` → `rows` проходили
+        весь гейт (перегнано: оба выживают). Здесь событий шесть, и время у
+        каждого своё."""
+        eids = [self.событие("phone", i) for i in range(6)]
+        for i, eid in enumerate(eids):
+            self.con.execute(
+                "insert into digests(id,event_id,chat_id,text,items_json,"
+                "sent_at,state) values(?,?,?,?,?,?,?)",
+                ("d%d" % i, eid, "123456789", "текст", "[]",
+                 "2026-09-06T0%d:00:00+03:00" % i, "no-transport"))
+        f = rc.дайджест_не_доставлен(self.con)
+        self.assertEqual(f[0]["count"], 6, "в счёт идут все шесть")
+        self.assertEqual(f[0]["sample"], eids[:5],
+                         "образец — пять самых ранних, по возрастанию sent_at")
 
     def test_сводка_владельцу_только_о_проблемах(self):
         self.assertIsNone(rc.текст([]))
