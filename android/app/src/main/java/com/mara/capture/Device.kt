@@ -74,7 +74,11 @@ object Device {
         val dir = DocumentFile.fromTreeUri(ctx, Uri.parse(uri)) ?: return emptyList()
         return Дерево.записи(dir, { it.isDirectory }, { it.listFiles().toList() },
             { it.name ?: "" }, { it.length() })
-            .map { Recording(it.uri.toString(), it.name ?: "?", it.length(), it.lastModified()) }
+            // имя и размер берём из отбора, он их уже спросил: у SAF это два
+            // сэкономленных запроса к провайдеру на каждую запись
+            .map { (док, имя, байт) ->
+                Recording(док.uri.toString(), имя, байт, док.lastModified())
+            }
     }
 
     /** Всё, что видно обоими способами. Один и тот же файл через MediaStore и
