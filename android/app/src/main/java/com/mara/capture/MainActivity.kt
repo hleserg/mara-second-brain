@@ -157,8 +157,10 @@ class MainActivity : AppCompatActivity() {
     private fun расписание(): String = SyncWorker.расписаниеСловами(
         runCatching {
             WorkManager.getInstance(this)
-                .getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get().map { it.state }
-        }.getOrNull()
+                .getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
+                .map { it.state to it.nextScheduleTimeMillis }
+        }.getOrNull(),
+        System.currentTimeMillis()
     )
 
     /** Доступ к уведомлениям — не runtime-разрешение, а системный список. */
