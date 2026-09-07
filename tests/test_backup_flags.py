@@ -254,20 +254,52 @@ class Флаги(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "work")),
                         "--work не доехал: работа шла мимо каталога теста")
 
-    def test_no_audio_в_одиночку_роняет_ночь_со_звонком(self):
-        """Не поведение, которое хочется, а поведение, которое есть, — и
-        которое поэтому названо в «Запуске» `docs/backup-core.md`. Учение
-        сверяет аудио по зеркалу, а зеркала при `--no-audio` нет."""
-        r = subprocess.run(
+    def test_no_audio_в_одиночку_ночь_со_звонком_не_роняет(self):
+        """Прежде это была ловушка: `--no-audio` в одиночку ронял любую ночь
+        со звонком, потому что учение требовало аудио из зеркала, которого
+        при этом флаге нет. По #63 учение сверяет то, что зеркалили.
+
+        Зелёного молчания при этом быть не должно: ноль сверенных записей и
+        «не сверяли вовсе» — разные вещи, и в отчёте они разными и остаются.
+        Поэтому проверяется не только код возврата, но и то, что причина
+        названа и в итоге, и в `stderr`."""
+        r, п = self.запуск("--no-audio")
+        self.assertIn("проверка", r, "учение не прошло вопреки #63")
+        self.assertNotIn("аудио_сверено", r["проверка"],
+                         "ноль сверенных выдан за проверку, которой не было")
+        self.assertEqual(r["проверка"]["аудио_не_сверялось"],
+                         "зеркала не делали (--no-audio)", r)
+        self.assertEqual(self.зеркало(), [],
+                         "аудио зеркалилось вопреки --no-audio")
+        self.assertIn("аудио не сверялось", п.stderr)
+        self.assertIn("--no-audio", п.stderr)
+
+    def test_drill_only_после_ночи_без_зеркала(self):
+        """Третий вход в ту же ловушку (#63): ночь прошла с `--no-audio`,
+        а учение владелец гоняет руками потом. Зеркала на носителе нет, и
+        `--drill-only` в одиночку падает — это правильно, он не знает, что
+        зеркала не делали намеренно. Сказать ему об этом можно тем же
+        флагом."""
+        self.запуск("--no-audio", "--no-drill")
+        self.assertEqual(self.зеркало(), [], "зеркало появилось вопреки флагу")
+
+        падение = subprocess.run(
             [sys.executable, СКРИПТ, "--root", self.root,
              "--targets", self.цель, "--pass-file", self.пароль,
-             "--work", os.path.join(self.tmp, "work"), "--no-audio"],
+             "--drill-only"],
             capture_output=True, text=True,
             env={**os.environ,
                  "MARA_BACKUP_ALLOW_SAME_DEV": "1",
                  "MARA_STATE": os.path.join(self.tmp, "state")})
-        self.assertNotEqual(r.returncode, 0, r.stdout)
-        self.assertIn("нет в зеркале", r.stderr)
+        self.assertNotEqual(падение.returncode, 0, падение.stdout)
+        self.assertIn("нет в зеркале", падение.stderr)
+
+        r, _ = self.запуск("--drill-only", "--no-audio")
+        self.assertNotIn("аудио_сверено", r,
+                         "ноль сверенных выдан за проверку, которой не было")
+        self.assertEqual(r["аудио_не_сверялось"],
+                         "зеркала не делали (--no-audio)", r)
+        self.assertGreater(r["файлов"], 0, "архив не разворачивали")
 
     def test_keep_доезжает_до_ротации(self):
         """`--keep` меняет только то, сколько архивов остаётся на носителе, —
