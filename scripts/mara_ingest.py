@@ -521,6 +521,16 @@ def self_check():
     # так что заметить можно только здесь.
     assert all(о.startswith("create ") and sqlite3.complete_statement(о + ";")
                for о in _операторы()), "SCHEMA разъехалась по `;`"
+    # Целость по `;` — не весь инвариант. `create table if not exists
+    # commitments (` с лишним пробелом оставляет SCHEMA целой, а перестройка
+    # ищет свой оператор по префиксу с открывающей скобкой вплотную — и не
+    # находит: `StopIteration` из `connect`, то есть встают все, кто открывает
+    # базу. Тесты это ловят, но на машине без тестов заметить можно только
+    # здесь.
+    for таблица, _ in ЛЕДЖЕР:
+        assert sum(о.startswith("create table if not exists %s(" % таблица)
+                   for о in _операторы()) == 1, \
+            "перестройка не найдёт `create table %s`" % таблица
     print("mara_ingest self-check: ок")
     return 0
 

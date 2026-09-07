@@ -279,14 +279,20 @@ class СхемаЛеджера(unittest.TestCase):
     def test_срыв_посреди_перестройки_откатывает_всё(self):
         """Перестройка идёт одной транзакцией. Оборвись она на середине —
         база обязана остаться в прежней форме и со строками, а не с новой
-        таблицей, хвостом `_old` и данными в двух местах сразу."""
+        таблицей, хвостом `_old` и данными в двух местах сразу.
+
+        Рвём на последней таблице `ЛЕДЖЕР`, а не на первой: срыв на первой
+        оставляет тест зелёным и тогда, когда транзакция разбита на три — по
+        коммиту на таблицу. Проверять надо, что откат уносит и уже
+        перестроенных предшественников, а утверждения ниже про
+        `commitments` — как раз про такого предшественника."""
         self.старая_база()
         con = sqlite3.connect(os.path.join(self.dir, "contextd.db"),
                               isolation_level=None)
         con.row_factory = sqlite3.Row
 
         class Срыв:
-            """Соединение, роняющее последний шаг перестройки."""
+            """Соединение, роняющее последнюю таблицу."""
 
             def __init__(self, con):
                 self.con = con
@@ -295,7 +301,7 @@ class СхемаЛеджера(unittest.TestCase):
                 return getattr(self.con, имя)   # чтобы подмена ловилась
 
             def execute(self, sql, args=()):
-                if sql.startswith("drop table commitments_old"):
+                if sql.startswith("drop table projections_old"):
                     raise sqlite3.OperationalError("место на диске кончилось")
                 return self.con.execute(sql, args)
 
@@ -325,7 +331,7 @@ class СхемаЛеджера(unittest.TestCase):
                 self.con, self.было = con, []
 
             def __getattr__(self, имя):
-                return getattr(self.con, имя)   # чтобы подмена ловилась
+                return getattr(self.con, имя)
 
             def execute(self, sql, args=()):
                 self.было.append(sql)
@@ -334,7 +340,8 @@ class СхемаЛеджера(unittest.TestCase):
         счёт = Счётчик(con)
         mi._ужать_ledger(счёт)
         self.assertEqual(
-            [с for с in счёт.было if not с.startswith("pragma")], [],
+            [с for с in счёт.было
+             if not с.startswith("pragma table_info(")], [],
             "перестройка на уже перестроенной базе полезла в запись")
 
     def test_второе_открытие_ничего_не_перестраивает(self):
