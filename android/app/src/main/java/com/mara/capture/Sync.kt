@@ -138,12 +138,18 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         const val ПЕРИОД = "mara-sync"
         const val РАЗОВЫЙ = "mara-sync-once"
 
+        /** Период сверки: пятнадцать минут — минимум, который разрешает WorkManager. */
+        const val ПЕРИОД_МИН = 15L
+
         /**
-         * Пятнадцать минут — сам период сверки. Опоздание внутри него
-         * WorkManager допускает сам (doze, батчинг, flex периодической
-         * работы), и кричать о нём значит кричать всегда, то есть никогда.
+         * Запас опоздания — тот же период, и это не совпадение. Опоздание
+         * внутри периода WorkManager допускает сам (doze, батчинг, flex
+         * периодической работы), и кричать о нём значит кричать всегда, то
+         * есть никогда. Выведен из `ПЕРИОД_МИН`, а не написан вторым
+         * числом: два числа разъехались бы молча, и гейт этого не заметил
+         * бы — тесты стоят на литералах, а не на константе.
          */
-        const val ЗАПАС_МС = 15 * 60_000L
+        const val ЗАПАС_МС = ПЕРИОД_МИН * 60_000L
 
         /**
          * Периодическая работа одной строкой для экрана здоровья: на вход
@@ -178,10 +184,13 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         }
 
         /**
-         * Срок известен не всегда: незапланированной работе WorkManager
-         * ставит `Long.MAX_VALUE`. Считать по нему разность — получить
-         * «через 4085 дн» вместо честного молчания, поэтому такой срок
-         * отбрасывается до вычитания.
+         * Срок известен не всегда, и обозначается это двумя разными
+         * значениями. `Long.MAX_VALUE` приходит от работы, которую
+         * WorkManager не планирует; минус единица — от работы, которая ещё
+         * ни разу не ставилась в очередь (`lastEnqueueTime == -1`). Считать
+         * разность по первому — получить «через 4085 дн», по второму —
+         * «просрочена на 19849 дн»; и то и другое вместо честного
+         * молчания. Оба отбрасываются до вычитания.
          */
         private fun ожидание(срок: Long, сейчас: Long): String {
             if (срок <= 0L || срок == Long.MAX_VALUE) return "ждёт своего часа"
@@ -200,12 +209,12 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             else -> "${мс / (24 * 3600_000L)} дн"
         }
 
-        /** Сверка раз в 15 минут — минимум, который разрешает WorkManager. */
+        /** Сверка раз в `ПЕРИОД_МИН` минут; из него же растёт запас опоздания. */
         fun schedule(ctx: Context) {
             val сеть = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
             WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
                 ПЕРИОД, ExistingPeriodicWorkPolicy.UPDATE,
-                PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
+                PeriodicWorkRequestBuilder<SyncWorker>(ПЕРИОД_МИН, TimeUnit.MINUTES)
                     .setConstraints(сеть)
                     .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
                     .build()
