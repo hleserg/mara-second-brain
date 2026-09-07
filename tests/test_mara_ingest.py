@@ -291,6 +291,9 @@ class СхемаЛеджера(unittest.TestCase):
             def __init__(self, con):
                 self.con = con
 
+            def __getattr__(self, имя):
+                return getattr(self.con, имя)   # чтобы подмена ловилась
+
             def execute(self, sql, args=()):
                 if sql.startswith("drop table commitments_old"):
                     raise sqlite3.OperationalError("место на диске кончилось")
@@ -320,6 +323,9 @@ class СхемаЛеджера(unittest.TestCase):
 
             def __init__(self, con):
                 self.con, self.было = con, []
+
+            def __getattr__(self, имя):
+                return getattr(self.con, имя)   # чтобы подмена ловилась
 
             def execute(self, sql, args=()):
                 self.было.append(sql)
