@@ -6,6 +6,7 @@ import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.WorkInfo
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.Worker
@@ -136,6 +137,29 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     companion object {
         const val ПЕРИОД = "mara-sync"
         const val РАЗОВЫЙ = "mara-sync-once"
+
+        /**
+         * Состояния периодической работы одной строкой для экрана здоровья.
+         * `null` — WorkManager не ответил; это не то же самое, что «работы
+         * нет», и путать их нельзя: в первом случае виноваты мы, во втором
+         * система.
+         *
+         * Завершённые прогоны WorkManager помнит, и принять их за живую
+         * работу значит написать «всё хорошо» ровно там, где всё плохо.
+         */
+        fun расписаниеСловами(состояния: List<WorkInfo.State>?): String {
+            if (состояния == null) return "спросить не вышло"
+            val живые = состояния.filterNot { it.isFinished }
+            if (живые.isEmpty()) return "не поставлена"
+            return живые.joinToString(", ") {
+                when (it) {
+                    WorkInfo.State.ENQUEUED -> "ждёт своего часа"
+                    WorkInfo.State.RUNNING -> "идёт сейчас"
+                    WorkInfo.State.BLOCKED -> "ждёт условий"
+                    else -> it.name
+                }
+            }
+        }
 
         /** Сверка раз в 15 минут — минимум, который разрешает WorkManager. */
         fun schedule(ctx: Context) {

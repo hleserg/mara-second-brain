@@ -14,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
+import androidx.work.WorkManager
 import com.mara.capture.databinding.ActivityMainBinding
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -58,6 +59,17 @@ class MainActivity : AppCompatActivity() {
             покажи("Keystore не завёлся — пришли эту строку:\n${e.javaClass.name}: ${e.message}")
             return
         }
+
+        // Периодическую работу ставят ровно два места: загрузка телефона
+        // (`Receivers.kt:11`) и кнопка «сохранить» ниже. Толчки `kick` из
+        // `Receivers.kt:26` и `Messages.kt:52` — одноразовые, расписание они
+        // не восстанавливают. Значит, если WorkManager потерял работу (EMUI
+        // прибил, «очистить данные», отмена), сверка не идёт вовсе — и до
+        // следующей перезагрузки не пойдёт. По экрану это неотличимо от
+        // «система душит фоном». Открытие приложения — единственный частый
+        // момент, когда владелец рядом; политика UPDATE делает повтор
+        // безвредным.
+        if (s.paired) SyncWorker.schedule(this)
 
         b.url.setText(s.baseUrl)
         b.token.setText(s.token)
@@ -111,6 +123,7 @@ class MainActivity : AppCompatActivity() {
                 ?: "не вижу ни одной"),
             "в очереди: ${q.depth()}, отправлено: ${q.count(JobState.DONE)}, " +
                 "сдалось: ${q.count(JobState.FAILED)}",
+            "сверка по расписанию: " + расписание(),
             "последняя отправка: " + когда(s.lastUploadMs),
             // пишется при любой попытке, и неудачной тоже: удачные видно на сервере
             "последняя попытка связи: " + когда(s.lastContactMs),
@@ -131,6 +144,22 @@ class MainActivity : AppCompatActivity() {
                 "${q.countMessages(JobState.DONE)}, сдалось: ${q.countMessages(JobState.FAILED)}",
         ).joinToString("\n")
     }
+
+    /**
+     * Стоит ли периодическая сверка. Без этой строки «последняя попытка
+     * связи: никогда» читается двояко: расписания нет вовсе или Huawei душит
+     * приложение (ТЗ §5.1F), — а чинится это по-разному.
+     *
+     * Своя ловушка, хотя весь сбор уже обёрнут в `фоном`: там она съела бы
+     * весь экран целиком, а здесь стоит одной строки. `get()` блокирующий,
+     * но `здоровье` и так считается не на главном потоке.
+     */
+    private fun расписание(): String = SyncWorker.расписаниеСловами(
+        runCatching {
+            WorkManager.getInstance(this)
+                .getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get().map { it.state }
+        }.getOrNull()
+    )
 
     /** Доступ к уведомлениям — не runtime-разрешение, а системный список. */
     private fun слушаем(): Boolean =
