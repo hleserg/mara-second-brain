@@ -138,35 +138,83 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         const val ПЕРИОД = "mara-sync"
         const val РАЗОВЫЙ = "mara-sync-once"
 
+        /** Период сверки: пятнадцать минут — минимум, который разрешает WorkManager. */
+        const val ПЕРИОД_МИН = 15L
+
         /**
-         * Состояния периодической работы одной строкой для экрана здоровья.
+         * Запас опоздания — тот же период, и это не совпадение. Опоздание
+         * внутри периода WorkManager допускает сам (doze, батчинг, flex
+         * периодической работы), и кричать о нём значит кричать всегда, то
+         * есть никогда. Выведен из `ПЕРИОД_МИН`, а не написан вторым
+         * числом: два числа разъехались бы молча, и гейт этого не заметил
+         * бы — тесты стоят на литералах, а не на константе.
+         */
+        const val ЗАПАС_МС = ПЕРИОД_МИН * 60_000L
+
+        /**
+         * Периодическая работа одной строкой для экрана здоровья: на вход
+         * пары «состояние, время следующего запуска» (`WorkInfo.state` и
+         * `WorkInfo.nextScheduleTimeMillis`).
+         *
          * `null` — WorkManager не ответил; это не то же самое, что «работы
          * нет», и путать их нельзя: в первом случае виноваты мы, во втором
          * система.
          *
          * Завершённые прогоны WorkManager помнит, и принять их за живую
          * работу значит написать «всё хорошо» ровно там, где всё плохо.
+         *
+         * Одного состояния мало. `ENQUEUED` стоит и у «запустится через семь
+         * минут», и у «должна была запуститься три дня назад, но прошивка
+         * душит» — а это ровно те две гипотезы, которые строка и заводилась
+         * различать (ТЗ §5.1F про выживание в фоне на Huawei). Их разводит
+         * только срок.
          */
-        fun расписаниеСловами(состояния: List<WorkInfo.State>?): String {
-            if (состояния == null) return "спросить не вышло"
-            val живые = состояния.filterNot { it.isFinished }
+        fun расписаниеСловами(работы: List<Pair<WorkInfo.State, Long>>?, сейчас: Long): String {
+            if (работы == null) return "спросить не вышло"
+            val живые = работы.filterNot { it.first.isFinished }
             if (живые.isEmpty()) return "не поставлена"
-            return живые.joinToString(", ") {
-                when (it) {
-                    WorkInfo.State.ENQUEUED -> "ждёт своего часа"
+            return живые.joinToString(", ") { (состояние, срок) ->
+                when (состояние) {
+                    WorkInfo.State.ENQUEUED -> ожидание(срок, сейчас)
                     WorkInfo.State.RUNNING -> "идёт сейчас"
                     WorkInfo.State.BLOCKED -> "ждёт условий"
-                    else -> it.name
+                    else -> состояние.name
                 }
             }
         }
 
-        /** Сверка раз в 15 минут — минимум, который разрешает WorkManager. */
+        /**
+         * Срок известен не всегда, и обозначается это двумя разными
+         * значениями. `Long.MAX_VALUE` приходит от работы, которую
+         * WorkManager не планирует; минус единица — от работы, которая ещё
+         * ни разу не ставилась в очередь (`lastEnqueueTime == -1`). Считать
+         * разность по первому — получить «через 4085 дн», по второму —
+         * «просрочена на 19849 дн»; и то и другое вместо честного
+         * молчания. Оба отбрасываются до вычитания.
+         */
+        private fun ожидание(срок: Long, сейчас: Long): String {
+            if (срок <= 0L || срок == Long.MAX_VALUE) return "ждёт своего часа"
+            val осталось = срок - сейчас
+            return when {
+                осталось >= 60_000L -> "ждёт своего часа (через ${промежуток(осталось)})"
+                осталось >= -ЗАПАС_МС -> "ждёт своего часа"
+                else -> "просрочена на ${промежуток(-осталось)}"
+            }
+        }
+
+        /** Единица покрупнее там, где мелкая теряет смысл: «на 4320 мин» не читается. */
+        private fun промежуток(мс: Long): String = when {
+            мс < 90 * 60_000L -> "${мс / 60_000L} мин"
+            мс < 48 * 3600_000L -> "${мс / 3600_000L} ч"
+            else -> "${мс / (24 * 3600_000L)} дн"
+        }
+
+        /** Сверка раз в `ПЕРИОД_МИН` минут; из него же растёт запас опоздания. */
         fun schedule(ctx: Context) {
             val сеть = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
             WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
                 ПЕРИОД, ExistingPeriodicWorkPolicy.UPDATE,
-                PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
+                PeriodicWorkRequestBuilder<SyncWorker>(ПЕРИОД_МИН, TimeUnit.MINUTES)
                     .setConstraints(сеть)
                     .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
                     .build()

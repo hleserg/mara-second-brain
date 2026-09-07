@@ -8,12 +8,20 @@ import org.junit.Test
  * Строка «сверка по расписанию» на экране здоровья. Смысл её один: отличить
  * «работа стоит, но система её душит» от «работы нет вовсе». Пока эти два
  * случая выглядели одинаково, диагноз ставился гаданием.
+ *
+ * Состояния мало: `ENQUEUED` стоит и у «через семь минут», и у «должна была
+ * три дня назад». Поэтому на вход идут пары «состояние, срок», а время
+ * подаётся снаружи — иначе тест мерил бы часы, а не функцию.
  */
 class ScheduleWordsTest {
 
+    private val сейчас = 1_700_000_000_000L
+    private val МИНУТА = 60_000L
+    private val ЧАС = 3_600_000L
+
     @Test
     fun `пустой список значит расписания нет`() {
-        assertEquals("не поставлена", SyncWorker.расписаниеСловами(emptyList()))
+        assertEquals("не поставлена", SyncWorker.расписаниеСловами(emptyList(), сейчас))
     }
 
     @Test
@@ -25,19 +33,23 @@ class ScheduleWordsTest {
             "не поставлена",
             SyncWorker.расписаниеСловами(
                 listOf(
-                    WorkInfo.State.SUCCEEDED,
-                    WorkInfo.State.FAILED,
-                    WorkInfo.State.CANCELLED,
-                )
+                    WorkInfo.State.SUCCEEDED to Long.MAX_VALUE,
+                    WorkInfo.State.FAILED to Long.MAX_VALUE,
+                    WorkInfo.State.CANCELLED to Long.MAX_VALUE,
+                ),
+                сейчас,
             )
         )
     }
 
     @Test
-    fun `ожидающая работа названа по-человечески`() {
+    fun `ожидающая работа названа по-человечески и со сроком`() {
         assertEquals(
-            "ждёт своего часа",
-            SyncWorker.расписаниеСловами(listOf(WorkInfo.State.ENQUEUED))
+            "ждёт своего часа (через 7 мин)",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас + 7 * МИНУТА),
+                сейчас,
+            )
         )
     }
 
@@ -46,7 +58,11 @@ class ScheduleWordsTest {
         assertEquals(
             "идёт сейчас",
             SyncWorker.расписаниеСловами(
-                listOf(WorkInfo.State.SUCCEEDED, WorkInfo.State.RUNNING)
+                listOf(
+                    WorkInfo.State.SUCCEEDED to Long.MAX_VALUE,
+                    WorkInfo.State.RUNNING to Long.MAX_VALUE,
+                ),
+                сейчас,
             )
         )
     }
@@ -54,9 +70,13 @@ class ScheduleWordsTest {
     @Test
     fun `две живые перечисляются обе`() {
         assertEquals(
-            "ждёт своего часа, ждёт условий",
+            "ждёт своего часа (через 2 ч), ждёт условий",
             SyncWorker.расписаниеСловами(
-                listOf(WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED)
+                listOf(
+                    WorkInfo.State.ENQUEUED to сейчас + 2 * ЧАС,
+                    WorkInfo.State.BLOCKED to Long.MAX_VALUE,
+                ),
+                сейчас,
             )
         )
     }
@@ -65,6 +85,167 @@ class ScheduleWordsTest {
     fun `не спросили - так и сказано, а не молчаливое отсутствие`() {
         // `null` приходит, когда WorkManager не поднялся. Ответить «не
         // поставлена» значило бы обвинить систему вместо себя.
-        assertEquals("спросить не вышло", SyncWorker.расписаниеСловами(null))
+        assertEquals("спросить не вышло", SyncWorker.расписаниеСловами(null, сейчас))
+    }
+
+    @Test
+    fun `просроченная на сутки названа просроченной, а не ждущей`() {
+        // Та самая вторая гипотеза: работа стоит в очереди, но прошивка её не
+        // пускает. До этой правки строка была неотличима от здоровой.
+        assertEquals(
+            "просрочена на 3 дн",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 3 * 24 * ЧАС),
+                сейчас,
+            )
+        )
+    }
+
+    @Test
+    fun `просрочка в несколько часов считается часами`() {
+        assertEquals(
+            "просрочена на 3 ч",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 3 * ЧАС),
+                сейчас,
+            )
+        )
+    }
+
+    @Test
+    fun `опоздание внутри периода тревогой не считается`() {
+        // Пятнадцать минут WorkManager вправе задержать сам. Кричать о них
+        // значит кричать всегда, и тогда крик перестают слышать.
+        assertEquals(
+            "ждёт своего часа",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 10 * МИНУТА),
+                сейчас,
+            )
+        )
+        // А сразу за порогом — уже тревога, иначе порог можно было бы снять.
+        assertEquals(
+            "просрочена на 20 мин",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 20 * МИНУТА),
+                сейчас,
+            )
+        )
+    }
+
+    @Test
+    fun `неизвестный срок не превращается в тысячи лет`() {
+        // Незапланированной работе WorkManager ставит `Long.MAX_VALUE`.
+        // Вычесть из него «сейчас» — получить «через 4085 дн» на экране.
+        assertEquals(
+            "ждёт своего часа",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to Long.MAX_VALUE),
+                сейчас,
+            )
+        )
+    }
+
+    @Test
+    fun `ни разу не ставившаяся работа - не полвека просрочки`() {
+        // Вторая половина той же заставы. «Не ставилась» WorkManager
+        // помечает минус единицей (`lastEnqueueTime == -1`), а не нулём;
+        // ноль тут за компанию, чтобы застава стерегла оба края, а не
+        // одно значение. Разность по любому дала бы «просрочена на
+        // 19849 дн».
+        for (срок in listOf(-1L, 0L)) {
+            assertEquals(
+                "ждёт своего часа",
+                SyncWorker.расписаниеСловами(listOf(WorkInfo.State.ENQUEUED to срок), сейчас)
+            )
+        }
+    }
+
+    @Test
+    fun `до запуска меньше минуты - хвоста нет`() {
+        // «через 0 мин» — не строка, а опечатка на экране.
+        assertEquals(
+            "ждёт своего часа",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас + 30_000L),
+                сейчас,
+            )
+        )
+    }
+
+    // Ниже — четыре границы, каждая парой «до» и «после». Числа в них
+    // литеральные нарочно: сошлись бы они на `SyncWorker.ЗАПАС_МС`, тест
+    // переезжал бы вместе с константой и не стерёг бы ничего.
+
+    @Test
+    fun `порог опоздания - ровно период сверки`() {
+        assertEquals(
+            "ждёт своего часа",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 15 * МИНУТА),
+                сейчас,
+            )
+        )
+        assertEquals(
+            "просрочена на 15 мин",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 15 * МИНУТА - 1),
+                сейчас,
+            )
+        )
+    }
+
+    @Test
+    fun `хвост появляется ровно с минуты`() {
+        assertEquals(
+            "ждёт своего часа",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас + МИНУТА - 1),
+                сейчас,
+            )
+        )
+        assertEquals(
+            "ждёт своего часа (через 1 мин)",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас + МИНУТА),
+                сейчас,
+            )
+        )
+    }
+
+    @Test
+    fun `минуты кончаются на полутора часах`() {
+        assertEquals(
+            "просрочена на 89 мин",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - (90 * МИНУТА - 1)),
+                сейчас,
+            )
+        )
+        assertEquals(
+            "просрочена на 1 ч",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 90 * МИНУТА),
+                сейчас,
+            )
+        )
+    }
+
+    @Test
+    fun `часы кончаются на двух сутках`() {
+        assertEquals(
+            "просрочена на 47 ч",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - (48 * ЧАС - 1)),
+                сейчас,
+            )
+        )
+        assertEquals(
+            "просрочена на 2 дн",
+            SyncWorker.расписаниеСловами(
+                listOf(WorkInfo.State.ENQUEUED to сейчас - 48 * ЧАС),
+                сейчас,
+            )
+        )
     }
 }
