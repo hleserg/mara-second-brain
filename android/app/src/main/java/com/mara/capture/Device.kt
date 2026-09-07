@@ -63,12 +63,22 @@ object Device {
     /**
      * Способ 2 — папка, выбранная владельцем один раз через SAF. За SAF-деревом
      * FileObserver следить не умеет, поэтому здесь только обход.
+     *
+     * Обход именно в глубину: ACR кладёт записи не в выбранную папку, а в
+     * `[гггг]/[ММ]/[дд]/[номер телефона]/` внутри неё, и плоский список
+     * находил там ровно ноль. Потолки, порядок и отбор — в `Дерево.записи`;
+     * здесь только переходники к `DocumentFile`.
      */
     fun folder(ctx: Context, uri: String): List<Recording> {
         if (uri.isEmpty()) return emptyList()
         val dir = DocumentFile.fromTreeUri(ctx, Uri.parse(uri)) ?: return emptyList()
-        return dir.listFiles().filter { it.isFile && (it.length() > 0) }
-            .map { Recording(it.uri.toString(), it.name ?: "?", it.length(), it.lastModified()) }
+        return Дерево.записи(dir, { it.isDirectory }, { it.listFiles().toList() },
+            { it.name ?: "" }, { it.length() })
+            // имя и размер берём из отбора, он их уже спросил: у SAF это два
+            // сэкономленных запроса к провайдеру на каждую запись
+            .map { (док, имя, байт) ->
+                Recording(док.uri.toString(), имя, байт, док.lastModified())
+            }
     }
 
     /** Всё, что видно обоими способами. Один и тот же файл через MediaStore и
