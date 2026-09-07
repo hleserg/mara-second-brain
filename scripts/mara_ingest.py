@@ -152,18 +152,20 @@ def _обязателен(con, таблица, поле):
 
 
 def _ужать_ledger(con):
-    """Дотянуть ключи ledger до `not null`. Возвращает, была ли перестройка.
+    """Дотянуть ключи ledger до `not null`.
 
     Аддитивной миграцией это не делается: `alter table add column` заводит
     новую колонку, а уже созданную не трогает. В SQLite ужесточение колонки —
     только перестройка таблицы целиком.
     """
     if all(_обязателен(con, т, к) for т, к in ЛЕДЖЕР):
-        return False
+        return
     # `begin immediate` берёт запись сразу: второй процесс, открывшийся в ту
-    # же секунду, ждёт здесь до 30 с (timeout соединения), а дождавшись видит
-    # перестроенное и уходит ни с чем. Без этого он снёс бы чужую новую
-    # таблицу, приняв её за старую.
+    # же секунду, ждёт здесь до 30 с (timeout соединения) и входит только
+    # после чужого commit — две перестройки не переплетаются. Пере-проверка
+    # ниже не про сохранность: дождавшийся перестроил бы новую таблицу в
+    # такую же новую и ничего не потерял. Она про то, чтобы не делать этого
+    # зря.
     con.execute("begin immediate")
     try:
         for таблица, ключ in ЛЕДЖЕР:
@@ -172,19 +174,15 @@ def _ужать_ledger(con):
             поля = ",".join(r["name"] for r in
                             con.execute("pragma table_info(%s)" % таблица))
             con.execute("alter table %s rename to %s_old" % (таблица, таблица))
-            # индекс уезжает за таблицей, сохраняя имя, и `create index if not
-            # exists` ниже увидел бы имя занятым и промолчал — проекции
-            # остались бы без индекса, и никто бы не заметил
-            свои = con.execute("pragma index_list(%s_old)"
-                               % таблица).fetchall()
-            for i in свои:
-                if i["origin"] == "c":     # свой, а не служебный от unique
-                    con.execute("drop index %s" % i["name"])
             con.execute(next(о for о in _операторы() if о.startswith(
                 "create table if not exists %s(" % таблица)))
             con.execute("insert into %s(%s) select %s from %s_old"
                         % (таблица, поля, поля, таблица))
             con.execute("drop table %s_old" % таблица)
+        # только теперь, когда `_old` снесены вместе со своими индексами:
+        # индекс уезжает за переименованной таблицей, сохраняя имя, и
+        # `create index if not exists` увидел бы имя занятым и промолчал —
+        # проекции остались бы без индекса, и никто бы не заметил
         for о in _операторы():
             if о.startswith("create index"):
                 con.execute(о)
@@ -192,7 +190,6 @@ def _ужать_ledger(con):
     except Exception:
         con.execute("rollback")
         raise
-    return True
 
 
 def connect(root=None):
@@ -517,6 +514,13 @@ def self_check():
         raise AssertionError("пробел в пути прошёл молча")
     except ValueError as e:
         assert "не абсолютный" in str(e), str(e)
+    # `_операторы()` режет SCHEMA по `;`. Точка с запятой в комментарии или
+    # в литерале разрежет её посреди оператора, и перестройка не найдёт
+    # `create table` — упадёт `StopIteration` из `connect`, то есть встанет
+    # всё, что открывает базу. `executescript` такую SCHEMA проглотит молча,
+    # так что заметить можно только здесь.
+    assert all(о.startswith("create ") and sqlite3.complete_statement(о + ";")
+               for о in _операторы()), "SCHEMA разъехалась по `;`"
     print("mara_ingest self-check: ок")
     return 0
 

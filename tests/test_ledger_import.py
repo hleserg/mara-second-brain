@@ -535,10 +535,6 @@ class Идентификатор(unittest.TestCase):
         self.assertLess(ms - до, 5000)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class Запуск(unittest.TestCase):
     """`main()`: коды возврата и цена пробы. До этого класса он не звался."""
 
@@ -593,3 +589,7 @@ class Запуск(unittest.TestCase):
         self.assertIn("self-check: ок", вывод)
         self.assertNotIn("обязательств", вывод,
                           "это не самопроверка, а перенос")
+
+
+if __name__ == "__main__":
+    unittest.main()

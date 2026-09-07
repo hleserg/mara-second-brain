@@ -276,6 +276,61 @@ class СхемаЛеджера(unittest.TestCase):
                  con.execute("pragma index_list(projections)")}
         self.assertIn("projections_object", имена)
 
+    def test_срыв_посреди_перестройки_откатывает_всё(self):
+        """Перестройка идёт одной транзакцией. Оборвись она на середине —
+        база обязана остаться в прежней форме и со строками, а не с новой
+        таблицей, хвостом `_old` и данными в двух местах сразу."""
+        self.старая_база()
+        con = sqlite3.connect(os.path.join(self.dir, "contextd.db"),
+                              isolation_level=None)
+        con.row_factory = sqlite3.Row
+
+        class Срыв:
+            """Соединение, роняющее последний шаг перестройки."""
+
+            def __init__(self, con):
+                self.con = con
+
+            def execute(self, sql, args=()):
+                if sql.startswith("drop table commitments_old"):
+                    raise sqlite3.OperationalError("место на диске кончилось")
+                return self.con.execute(sql, args)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            mi._ужать_ledger(Срыв(con))
+        флаги = {r["name"]: r["notnull"] for r in
+                 con.execute("pragma table_info(commitments)")}
+        self.assertEqual(флаги["id"], 0, "форма не вернулась к прежней")
+        self.assertEqual(
+            con.execute("select count(*) from commitments").fetchone()[0], 1)
+        self.assertEqual([r["name"] for r in con.execute(
+            "select name from sqlite_master where name like '%_old'")], [])
+
+    def test_второе_открытие_не_лезет_в_запись(self):
+        """Ранний выход — не украшение. Без него каждое открытие базы брало
+        бы `begin immediate`, то есть блокировку на запись, ради трёх
+        `pragma`; а открывают базу демон на каждый HTTP-поток, бэкап, ретеншн
+        и весь крон."""
+        self.старая_база()
+        mi.connect(self.dir).close()
+        con = mi.connect(self.dir)
+
+        class Счётчик:
+            """Соединение, запоминающее, о чём его просили."""
+
+            def __init__(self, con):
+                self.con, self.было = con, []
+
+            def execute(self, sql, args=()):
+                self.было.append(sql)
+                return self.con.execute(sql, args)
+
+        счёт = Счётчик(con)
+        mi._ужать_ledger(счёт)
+        self.assertEqual(
+            [с for с in счёт.было if not с.startswith("pragma")], [],
+            "перестройка на уже перестроенной базе полезла в запись")
+
     def test_второе_открытие_ничего_не_перестраивает(self):
         self.старая_база()
         mi.connect(self.dir).close()
