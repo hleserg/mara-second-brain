@@ -61,19 +61,23 @@ create index if not exists events_state on events(state);
 -- Ревизий и version тут нет намеренно: это §4.5 и свой ADR, а колонку
 -- добавить потом — одна строка alter table. Пишет в эти таблицы пока только
 -- разовый перенос (ledger_import.py), проектор на них ещё не переключён.
+-- `text primary key` в SQLite null не запрещает: это признанная ошибка,
+-- которую там не чинят ради совместимости. Отсюда явные `not null` — без
+-- них объект без ключа ложится в базу и всплывает уже дублем.
 create table if not exists commitments(
-  id text primary key, title text, status text, owner text, promised_to text,
-  due text, due_explicit text, origin_event text, source_native_id text unique,
+  id text primary key not null, title text, status text, owner text,
+  promised_to text, due text, due_explicit text, origin_event text,
+  source_native_id text unique not null,
   created text, occurred text, valid_from text, confidence real,
   supersedes text, classification text);
 create table if not exists conversations(
-  id text primary key, title text, occurred text, valid_from text,
-  origin_event text, source_native_id text unique, created text,
+  id text primary key not null, title text, occurred text, valid_from text,
+  origin_event text, source_native_id text unique not null, created text,
   classification text);
 -- отпечаток того, что проектор записал в файл: по нему будущая пересборка
 -- отличит свой файл от поправленного руками и не затрёт правку молча
 create table if not exists projections(
-  path text primary key, object_kind text, object_id text,
+  path text primary key not null, object_kind text, object_id text,
   content_sha256 text, written text);
 create index if not exists projections_object on projections(object_id);
 """
@@ -122,6 +126,75 @@ def uuid7():
     return str(uuid.UUID(int=n))
 
 
+# Ключи ledger и колонка, по которой их узнают в старой базе. Хватит одного
+# ключа на таблицу: `not null` на обоих ставится разом, одной перестройкой.
+ЛЕДЖЕР = (("commitments", "id"), ("conversations", "id"),
+          ("projections", "path"))
+
+
+def _операторы():
+    """SCHEMA по одному оператору, без комментариев.
+
+    Нужно потому, что `executescript` перед запуском делает commit: подай он
+    DDL внутри перестройки — и она перестанет быть одной транзакцией, а
+    оборвавшись на середине, оставит базу без таблицы.
+    """
+    for кусок in SCHEMA.split(";"):
+        сжато = "\n".join(с for с in кусок.splitlines()
+                          if not с.lstrip().startswith("--")).strip()
+        if сжато:
+            yield сжато
+
+
+def _обязателен(con, таблица, поле):
+    return any(r["name"] == поле and r["notnull"]
+               for r in con.execute("pragma table_info(%s)" % таблица))
+
+
+def _ужать_ledger(con):
+    """Дотянуть ключи ledger до `not null`. Возвращает, была ли перестройка.
+
+    Аддитивной миграцией это не делается: `alter table add column` заводит
+    новую колонку, а уже созданную не трогает. В SQLite ужесточение колонки —
+    только перестройка таблицы целиком.
+    """
+    if all(_обязателен(con, т, к) for т, к in ЛЕДЖЕР):
+        return False
+    # `begin immediate` берёт запись сразу: второй процесс, открывшийся в ту
+    # же секунду, ждёт здесь до 30 с (timeout соединения), а дождавшись видит
+    # перестроенное и уходит ни с чем. Без этого он снёс бы чужую новую
+    # таблицу, приняв её за старую.
+    con.execute("begin immediate")
+    try:
+        for таблица, ключ in ЛЕДЖЕР:
+            if _обязателен(con, таблица, ключ):
+                continue           # успел сосед, пока мы стояли за замком
+            поля = ",".join(r["name"] for r in
+                            con.execute("pragma table_info(%s)" % таблица))
+            con.execute("alter table %s rename to %s_old" % (таблица, таблица))
+            # индекс уезжает за таблицей, сохраняя имя, и `create index if not
+            # exists` ниже увидел бы имя занятым и промолчал — проекции
+            # остались бы без индекса, и никто бы не заметил
+            свои = con.execute("pragma index_list(%s_old)"
+                               % таблица).fetchall()
+            for i in свои:
+                if i["origin"] == "c":     # свой, а не служебный от unique
+                    con.execute("drop index %s" % i["name"])
+            con.execute(next(о for о in _операторы() if о.startswith(
+                "create table if not exists %s(" % таблица)))
+            con.execute("insert into %s(%s) select %s from %s_old"
+                        % (таблица, поля, поля, таблица))
+            con.execute("drop table %s_old" % таблица)
+        for о in _операторы():
+            if о.startswith("create index"):
+                con.execute(о)
+        con.execute("commit")
+    except Exception:
+        con.execute("rollback")
+        raise
+    return True
+
+
 def connect(root=None):
     """Открыть базу, создав схему. Каталог 0700: в нём лежат личные разговоры."""
     root = root or ROOT
@@ -146,6 +219,7 @@ def connect(root=None):
             # это не ошибка, а ровно тот результат, которого он и хотел.
             if "duplicate column" not in str(e).lower():
                 raise
+    _ужать_ledger(con)                             # НБ12 из #39
     return con
 
 

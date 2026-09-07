@@ -1,5 +1,5 @@
 """Приём: дедуп, аренда работ, расписание ретраев (ТЗ §17, §20)."""
-import os, sys, tempfile, unittest
+import os, sys, sqlite3, tempfile, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -183,6 +183,108 @@ class Работы(unittest.TestCase):
         self.con.execute("update jobs set state='dlq' where id=?", (jid,))
         self.assertNotEqual(jid, mi.add_job(self.con, self.eid, "asr"),
                             "сверка чинит именно dlq — ей нельзя мешать")
+
+
+# Ровно то, что стоит на doctor: ключи ledger без `not null` (НБ12 из #39).
+# Списано с mara_ingest.py на 31de30e — миграцию проверяем на настоящей
+# старой форме, а не на её пересказе.
+СТАРАЯ_СХЕМА = """
+create table if not exists commitments(
+  id text primary key, title text, status text, owner text, promised_to text,
+  due text, due_explicit text, origin_event text, source_native_id text unique,
+  created text, occurred text, valid_from text, confidence real,
+  supersedes text, classification text);
+create table if not exists conversations(
+  id text primary key, title text, occurred text, valid_from text,
+  origin_event text, source_native_id text unique, created text,
+  classification text);
+create table if not exists projections(
+  path text primary key, object_kind text, object_id text,
+  content_sha256 text, written text);
+create index if not exists projections_object on projections(object_id);
+"""
+
+КЛЮЧИ = (("commitments", "id"), ("commitments", "source_native_id"),
+         ("conversations", "id"), ("conversations", "source_native_id"),
+         ("projections", "path"))
+
+
+class СхемаЛеджера(unittest.TestCase):
+    """НБ12: ключи ledger обязаны быть `not null`.
+
+    `text primary key` в SQLite null не запрещает — наследие, которое там
+    признали ошибкой и не чинят ради совместимости. Без явного `not null`
+    объект без ключа ложится в базу и всплывает уже дублем.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def старая_база(self):
+        """База в форме, которая сейчас лежит на doctor, с данными внутри."""
+        os.makedirs(self.dir, exist_ok=True)
+        con = sqlite3.connect(os.path.join(self.dir, "contextd.db"),
+                              isolation_level=None)
+        con.row_factory = sqlite3.Row
+        con.executescript(СТАРАЯ_СХЕМА)
+        con.execute("insert into commitments(id,title,source_native_id) "
+                    "values('c1','смета','vault:kb/commitments/a.md')")
+        con.execute("insert into conversations(id,title,source_native_id) "
+                    "values('v1','звонок','call/2026-09-01')")
+        con.execute("insert into projections(path,object_kind,object_id) "
+                    "values('kb/commitments/a.md','commitment','c1')")
+        con.close()
+
+    def test_пустой_ключ_в_ledger_не_принимается(self):
+        con = mi.connect(self.dir)
+        for таблица, поле in КЛЮЧИ:
+            with self.subTest(таблица=таблица, поле=поле):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    con.execute("insert into %s(%s) values(null)"
+                                % (таблица, поле))
+
+    def test_старая_база_доезжает_сама(self):
+        """Аддитивная миграция такое не умеет: `add column` уже созданную
+        колонку не меняет. Значит перестройка — и она обязана случиться при
+        первом же открытии, как и добавление `scopes`."""
+        self.старая_база()
+        con = mi.connect(self.dir)
+        for таблица, поле in КЛЮЧИ:
+            флаги = {r["name"]: r["notnull"] for r in
+                     con.execute("pragma table_info(%s)" % таблица)}
+            self.assertEqual(флаги[поле], 1,
+                             "%s.%s осталась необязательной" % (таблица, поле))
+
+    def test_перестройка_не_теряет_строки(self):
+        self.старая_база()
+        con = mi.connect(self.dir)
+
+        def одно(sql):
+            return con.execute(sql).fetchone()[0]
+
+        self.assertEqual(одно("select title from commitments"), "смета")
+        self.assertEqual(одно("select title from conversations"), "звонок")
+        self.assertEqual(одно("select object_id from projections"), "c1")
+
+    def test_перестройка_возвращает_индекс(self):
+        """`alter table rename` уводит индекс за таблицей, а `create index if
+        not exists` потом видит занятое имя и молча ничего не делает. Тогда
+        сверка проекций теряет свой индекс и никто об этом не узнаёт."""
+        self.старая_база()
+        con = mi.connect(self.dir)
+        имена = {r["name"] for r in
+                 con.execute("pragma index_list(projections)")}
+        self.assertIn("projections_object", имена)
+
+    def test_второе_открытие_ничего_не_перестраивает(self):
+        self.старая_база()
+        mi.connect(self.dir).close()
+        con = mi.connect(self.dir)
+        остатки = [r["name"] for r in con.execute(
+            "select name from sqlite_master where name like '%_old'")]
+        self.assertEqual(остатки, [], "хвосты перестройки остались в базе")
+        self.assertEqual(
+            con.execute("select count(*) from commitments").fetchone()[0], 1)
 
 
 if __name__ == "__main__":
