@@ -1967,19 +1967,61 @@ class ТестОбрывНеТрейсбек(unittest.TestCase):
         # timeout — тот самый поток, что висит 60 секунд.
         self.assertIn("ConnectionResetError", вывод.getvalue())
 
-    def test_молчание_клиента_тоже_обрыв(self):
-        """`timeout = 60` (`contextd.py:470`) бросает в `слить` так же.
+    def молча(self, срв, заголовки, ждать):
+        """Отправить заголовки, замолчать и вернуть напечатанное демоном.
 
-        Вызов прямой: ждать в тесте настоящую минуту незачем.
+        Через настоящий сокет, а не вызовом `handle_error`: первая редакция
+        этого теста звала его напрямую и была зелёной на коде, который в бою
+        не печатал ни строки. Нашёл Codex, ревью PR #82.
+        """
+        было = contextd.Handler.timeout
+        contextd.Handler.timeout = 0.5         # вместо боевых шестидесяти
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(вывод), \
+                 contextlib.redirect_stderr(ошибки):
+                гость = socket.create_connection(
+                    ("127.0.0.1", срв.server_address[1]), timeout=10)
+                try:
+                    if заголовки:
+                        гость.sendall(заголовки)
+                    time.sleep(ждать)
+                finally:
+                    гость.close()
+        finally:
+            contextd.Handler.timeout = было
+        self.assertNotIn("Traceback", ошибки.getvalue())
+        return вывод.getvalue()
+
+    def test_зависшая_заливка_даёт_строку(self):
+        """Молчащий клиент не печатал ничего вовсе, и это хуже трейсбека.
+
+        Базовый `handle_one_request` ловит таймаут чтения сам и уносит его в
+        `log_message`, у нас пустой (`contextd.py:472`), — до `handle_error`
+        он не доходит. Поток при этом честно висит `timeout` секунд, и в логе
+        об этом не было ни слова.
+        """
+        срв, токен = self.поднять()
+        печать = self.молча(срв, (
+            "POST /v1/ingest/audio?event=1 HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Authorization: Bearer %s\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            "Content-Length: 1000000\r\n\r\n" % токен
+        ).encode("utf-8") + b"x" * 64, 1.5)
+        self.assertEqual(печать.count("обрыв"), 1, печать)
+        self.assertIn("TimeoutError", печать)
+
+    def test_молчание_на_пустом_соединении_строки_не_родит(self):
+        """Ради этого таймаут ловится вокруг тела, а не на весь запрос.
+
+        Телефон держит соединение в пуле, и оно упирается в тот же `timeout`
+        после каждой удачной заливки. Лови мы таймаут общим местом — каждая
+        успешная запись через минуту рожала бы «обрыв» на здоровой связи, то
+        есть ровно тот ложный сигнал, от которого этот PR и лечит.
         """
         срв, _ = self.поднять()
-        вывод = io.StringIO()
-        with contextlib.redirect_stdout(вывод):
-            try:
-                raise socket.timeout("timed out")
-            except socket.timeout:
-                срв.handle_error(None, ("127.0.0.1", 1))
-        self.assertIn("обрыв", вывод.getvalue())
+        self.assertEqual(self.молча(срв, None, 1.5), "")
 
     def test_чужая_беда_трейсбек_сохраняет(self):
         """Без этого `handle_error` с голым `return` проходит гейт.

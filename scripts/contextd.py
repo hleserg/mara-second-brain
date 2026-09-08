@@ -633,6 +633,15 @@ class Handler(BaseHTTPRequestHandler):
                                   % ЗАЛИВОК, {"Retry-After": "60"})
             try:
                 return self.аудио(con, p, n, dev)
+            except (TimeoutError, socket.timeout) as беда:
+                # Единственное место, где зависшая заливка ещё видна: выше по
+                # стеку `handle_one_request` поймает таймаут сам и молча
+                # закроет соединение. Ловим вокруг тела, а не на весь запрос:
+                # таймаут на пустом keep-alive соединении штатен и строки не
+                # заслуживает — иначе каждая успешная заливка через минуту
+                # рожала бы «обрыв» на здоровой связи.
+                print(обрыв(беда, self.client_address[0]), flush=True)
+                raise                        # соединение закрывает базовый класс
             finally:
                 # finally, а не возврат по месту: глобального `try` вокруг
                 # `do_POST` нет, необработанное исключение уходит в
@@ -641,7 +650,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if n > MAX_JSON:
             return self.отлуп(413, "тело больше %d МиБ" % (MAX_JSON >> 20))
-        raw = self.rfile.read(n) if n else b""
+        try:
+            raw = self.rfile.read(n) if n else b""
+        except (TimeoutError, socket.timeout) as беда:
+            print(обрыв(беда, self.client_address[0]), flush=True)
+            raise
         try:
             data = json.loads(raw or b"{}")
         except ValueError:
@@ -990,29 +1003,35 @@ def bind_default():
     return os.environ.get("MARA_BIND") or "127.0.0.1"
 
 
+def обрыв(беда, адрес):
+    """Строка про ушедшего клиента. Одна на оба места, где его ловят."""
+    return "%s обрыв %s from=%s" % (mi.now_iso(), type(беда).__name__, адрес)
+
+
 class Сервер(ThreadingHTTPServer):
-    """Тот же сервер, но обрыв связи для него не поломка.
+    """Тот же сервер, но разрыв связи для него не поломка.
 
     Телефон льёт запись минутами, и потерянный по дороге wi-fi штатен: клиент
-    исчезает посреди тела, `слить` упирается в RST или в `timeout` (`:470`), и
-    базовый `handle_error` печатает на это тридцать пять строк трейсбека.
-    Читается такой лог как «демон сломался», а приходит он на каждый разрыв —
-    то есть настоящую поломку в нём уже не найти.
+    исчезает посреди тела, `слить` упирается в RST, и базовый `handle_error`
+    печатает на это тридцать пять строк трейсбека. Читается такой лог как
+    «демон сломался», а приходит он на каждый разрыв — то есть настоящую
+    поломку в нём уже не найти.
 
-    Ловим `ConnectionError` и `socket.timeout` поимённо, не `OSError`: под
-    `OSError` попадает и `ENOSPC` при записи блоба, а вот он-то как раз
-    поломка, и трейсбек ему положен. Всё незнакомое уходит наверх нетронутым.
+    Ловим `ConnectionError` поимённо, а не `OSError`: под `OSError` попадает
+    и `ENOSPC` при записи блоба, а вот он-то как раз поломка, и трейсбек ему
+    положен. Всё незнакомое уходит наверх нетронутым.
+
+    Таймаут чтения сюда не приходит вовсе, и это не догадка: базовый
+    `BaseHTTPRequestHandler.handle_one_request` ловит его сам и уносит в
+    `log_message`, у нас пустой. Ловят его поэтому в `do_POST`, по месту.
     """
 
     def handle_error(self, request, client_address):
         беда = sys.exc_info()[1]
-        if isinstance(беда, (ConnectionError, socket.timeout)):
-            # Имя класса и есть диагноз: reset — телефон потерял сеть,
-            # timeout — тот самый поток, что ждал тело и висел минуту.
+        if isinstance(беда, ConnectionError):
             # Адрес сокетный: заголовков в `handle_error` уже нет, так что
             # за прокси здесь будет адрес прокси, а не телефона.
-            print("%s обрыв %s from=%s" % (mi.now_iso(), type(беда).__name__,
-                                           client_address[0]), flush=True)
+            print(обрыв(беда, client_address[0]), flush=True)
             return
         super().handle_error(request, client_address)
 
