@@ -2023,6 +2023,77 @@ class ТестОбрывНеТрейсбек(unittest.TestCase):
         срв, _ = self.поднять()
         self.assertEqual(self.молча(срв, None, 1.5), "")
 
+    def test_обрыв_на_json_теле_тоже_виден(self):
+        """Сосед по коду молчал бы ровно так же, и мутант это показал.
+
+        Снятый перехват на json-пути пережил весь гейт, пока этого теста не
+        было: аудио стерегли, а событие рядом — нет.
+        """
+        срв, токен = self.поднять()
+        печать = self.молча(срв, (
+            "POST /v1/ingest/event HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Authorization: Bearer %s\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 100000\r\n\r\n" % токен
+        ).encode("utf-8") + b'{"kind":', 1.5)
+        self.assertEqual(печать.count("обрыв"), 1, печать)
+        self.assertIn("TimeoutError", печать)
+
+    def test_таймаут_склада_не_выдаётся_за_обрыв(self):
+        """Молчащий склад — поломка сервера, а не ушедший клиент.
+
+        Первая редакция ловила всякий `TimeoutError` из `аудио` и печатала на
+        него «обрыв»: запись блоба на сетевой диск, отвалившаяся по таймауту,
+        выглядела бы в логе как телефон, потерявший сеть. Нашёл Codex, круг 2
+        ревью PR #82. Ловим теперь только рождённый на чтении тела.
+        """
+        срв, токен = self.поднять()
+        con = mi.connect(mi.ROOT)
+        сырьё = os.urandom(4096)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": sha,
+                                    "blob": {"sha256": sha, "ext": "m4a",
+                                             "bytes": len(сырьё)}})
+        было = contextd.ingest_audio
+
+        def склад_молчит(*a, **kw):
+            raise TimeoutError("склад не ответил")
+
+        contextd.ingest_audio = склад_молчит
+        self.addCleanup(setattr, contextd, "ingest_audio", было)
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(вывод), contextlib.redirect_stderr(ошибки):
+            адрес = "http://127.0.0.1:%d/v1/ingest/audio?event=%s" % (
+                срв.server_address[1], eid)
+            req = urllib.request.Request(адрес, data=сырьё, method="POST")
+            req.add_header("Authorization", "Bearer " + токен)
+            req.add_header("Content-Type", "application/octet-stream")
+            try:
+                urllib.request.urlopen(req, timeout=10).read()
+            except Exception:
+                pass                          # ответа не будет, он тут и не нужен
+            time.sleep(0.3)
+        self.assertNotIn("обрыв", вывод.getvalue())
+
+    def test_чужой_oserror_трейсбек_сохраняет(self):
+        """Мутант `isinstance(беда, OSError)` пережил весь гейт без этого.
+
+        `ConnectionError` — наследник `OSError`, и фильтр, расширенный до
+        родителя, накрыл бы `ENOSPC` при записи блоба: диск кончился, а в
+        логе «обрыв связи» и ни строки трейсбека.
+        """
+        срв, _ = self.поднять()
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(вывод), contextlib.redirect_stderr(ошибки):
+            try:
+                raise OSError(28, "No space left on device")
+            except OSError:
+                срв.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("Traceback", ошибки.getvalue())
+        self.assertNotIn("обрыв", вывод.getvalue())
+
     def test_чужая_беда_трейсбек_сохраняет(self):
         """Без этого `handle_error` с голым `return` проходит гейт.
 
