@@ -1,5 +1,6 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
-import os, sys, io, json, hashlib, socket, tempfile, threading, time, unittest
+import contextlib, os, sys, io, json, hashlib, socket, struct
+import tempfile, threading, time, unittest
 import urllib.request, urllib.error
 from datetime import datetime, timedelta
 
@@ -1908,6 +1909,94 @@ class ТестПределЗаливок(unittest.TestCase):
             contextd.ЗАЛИВОК = было
             держим.close()
 
+
+class ТестОбрывНеТрейсбек(unittest.TestCase):
+    """#39: телефон уронил связь — в логе доктора 35 строк трейсбека.
+
+    Запись льётся минутами по домашнему wi-fi, и обрыв на середине — быт, а
+    не поломка. Трейсбек читается как «демон сломался»; приходя на каждый
+    разрыв, он ровно тем и вреден, что настоящая поломка в логе среди них уже
+    не видна.
+    """
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        срв = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=срв.serve_forever, daemon=True).start()
+        _, токен = contextd.pair(mi.connect(каталог), "телефон")
+        self.addCleanup(срв.server_close)
+        self.addCleanup(срв.shutdown)
+        return срв, токен
+
+    def дождаться(self, буфер, чего):
+        """Опрос, а не sleep: строку печатает поток сервера, момент не наш."""
+        предел = time.monotonic() + 10
+        while time.monotonic() < предел:
+            if чего in буфер.getvalue():
+                return
+            time.sleep(0.02)
+        self.fail("не дождались %r, было: %r" % (чего, буфер.getvalue()))
+
+    def test_обрыв_загрузки_даёт_строку_вместо_трейсбека(self):
+        срв, токен = self.поднять()
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(вывод), contextlib.redirect_stderr(ошибки):
+            гость = socket.create_connection(
+                ("127.0.0.1", срв.server_address[1]), timeout=10)
+            try:
+                гость.sendall((
+                    "POST /v1/ingest/audio?event=1 HTTP/1.1\r\n"
+                    "Host: 127.0.0.1\r\n"
+                    "Authorization: Bearer %s\r\n"
+                    "Content-Type: application/octet-stream\r\n"
+                    "Content-Length: 1000000\r\n\r\n" % токен
+                ).encode("utf-8"))
+                гость.sendall(b"x" * 64)
+                # RST, а не FIN: пропавшая сеть рвёт соединение именно так.
+                # Голый `close()` шлёт FIN, и `слить` видит спокойный EOF —
+                # тот путь тих и без правки (`contextd.py:756`).
+                гость.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                 struct.pack("ii", 1, 0))
+            finally:
+                гость.close()
+            self.дождаться(вывод, "обрыв")
+        self.assertNotIn("Traceback", ошибки.getvalue())
+        self.assertEqual(вывод.getvalue().count("обрыв"), 1, вывод.getvalue())
+        # Имя класса и есть весь диагноз: reset — телефон потерял сеть,
+        # timeout — тот самый поток, что висит 60 секунд.
+        self.assertIn("ConnectionResetError", вывод.getvalue())
+
+    def test_молчание_клиента_тоже_обрыв(self):
+        """`timeout = 60` (`contextd.py:470`) бросает в `слить` так же.
+
+        Вызов прямой: ждать в тесте настоящую минуту незачем.
+        """
+        срв, _ = self.поднять()
+        вывод = io.StringIO()
+        with contextlib.redirect_stdout(вывод):
+            try:
+                raise socket.timeout("timed out")
+            except socket.timeout:
+                срв.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("обрыв", вывод.getvalue())
+
+    def test_чужая_беда_трейсбек_сохраняет(self):
+        """Без этого `handle_error` с голым `return` проходит гейт.
+
+        Заглушить всё — не тише, а слепее: место под заливку освобождает
+        `finally` (`contextd.py:640`), а вот почему упала запись на диск, без
+        трейсбека не узнать ни из чего.
+        """
+        срв, _ = self.поднять()
+        ошибки = io.StringIO()
+        with contextlib.redirect_stderr(ошибки):
+            try:
+                raise RuntimeError("проба")
+            except RuntimeError:
+                срв.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("Traceback", ошибки.getvalue())
+        self.assertIn("проба", ошибки.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

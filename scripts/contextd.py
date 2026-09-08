@@ -47,7 +47,8 @@ bind. Но из локалки он виден, и это осознанный �
 это не вид, а дозагрузка к уже принятому событию, и телефону в список пишется
 `call`.
 """
-import os, sys, io, re, json, time, hashlib, secrets, argparse, threading, subprocess
+import os, sys, io, re, json, time, socket, hashlib, secrets, argparse
+import threading, subprocess
 from datetime import datetime, timedelta
 import tempfile
 import urllib.parse
@@ -989,8 +990,35 @@ def bind_default():
     return os.environ.get("MARA_BIND") or "127.0.0.1"
 
 
+class Сервер(ThreadingHTTPServer):
+    """Тот же сервер, но обрыв связи для него не поломка.
+
+    Телефон льёт запись минутами, и потерянный по дороге wi-fi штатен: клиент
+    исчезает посреди тела, `слить` упирается в RST или в `timeout` (`:470`), и
+    базовый `handle_error` печатает на это тридцать пять строк трейсбека.
+    Читается такой лог как «демон сломался», а приходит он на каждый разрыв —
+    то есть настоящую поломку в нём уже не найти.
+
+    Ловим `ConnectionError` и `socket.timeout` поимённо, не `OSError`: под
+    `OSError` попадает и `ENOSPC` при записи блоба, а вот он-то как раз
+    поломка, и трейсбек ему положен. Всё незнакомое уходит наверх нетронутым.
+    """
+
+    def handle_error(self, request, client_address):
+        беда = sys.exc_info()[1]
+        if isinstance(беда, (ConnectionError, socket.timeout)):
+            # Имя класса и есть диагноз: reset — телефон потерял сеть,
+            # timeout — тот самый поток, что ждал тело и висел минуту.
+            # Адрес сокетный: заголовков в `handle_error` уже нет, так что
+            # за прокси здесь будет адрес прокси, а не телефона.
+            print("%s обрыв %s from=%s" % (mi.now_iso(), type(беда).__name__,
+                                           client_address[0]), flush=True)
+            return
+        super().handle_error(request, client_address)
+
+
 def make_server(root, port=8788, vault=None, host="127.0.0.1"):
-    srv = ThreadingHTTPServer((host, port), Handler)
+    srv = Сервер((host, port), Handler)
     srv.root = root
     srv.vault = vault or VAULT
     srv.daemon_threads = True
