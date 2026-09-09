@@ -235,7 +235,20 @@ def emit(data, vault):
     paths['Tools & MCP.md'] = note('Codex: инструменты',
         claude.table(['Инструмент','Вызовы'], [[cell(k),v] for k,v in sorted(tools.items())]) +
         '\nУчитываются только явные события вызова. Вложенные инструменты functions.exec и применение skills не угадываются.\n')
-    return sum(claude.write(str(root/name), text) for name, text in paths.items())
+    updated = 0
+    for name, text in paths.items():
+        path = root/name
+        if path.suffix == '.md':
+            try: previous = path.read_text(encoding='utf-8')
+            except FileNotFoundError: previous = ''
+            if previous.startswith('---\n') and '\n---\n' in previous:
+                header, _, body = previous.partition('\n---\n')
+                new_body = text.partition('\n---\n')[2]
+                # Basic Memory owns frontmatter (including permalink); we own the report body.
+                if body.strip() == new_body.strip(): continue
+                text = header + '\n---\n' + new_body
+        updated += claude.write(str(path), text)
+    return updated
 
 
 def main():

@@ -66,6 +66,17 @@ class CodexUsageTest(unittest.TestCase):
             for path in (root / "Codex Usage").rglob("*"):
                 if path.is_file(): self.assertNotIn("PRIVATE_", path.read_text())
             self.assertTrue((root / "Codex Usage/_data/derived/sessions.csv").exists())
+            # Basic Memory reformats YAML and adds its own permalink after ingest.
+            dashboard = root / "Codex Usage/Dashboard.md"
+            header, _, body = dashboard.read_text().partition("\n---\n")
+            header = header.replace('title: "Codex: расход и квоты"', "title: 'Codex: расход и квоты'")
+            header += "\npermalink: vault/codex-usage/dashboard"
+            dashboard.write_text(header + "\n---\n" + body.rstrip() + "\n")
+            self.assertEqual(codex.emit(data, root), 0)
+            data["records"][0]["epoch"] += 86400
+            self.assertGreater(codex.emit(data, root), 0)
+            self.assertTrue(dashboard.read_text().startswith(header + "\n---\n"))
+            self.assertEqual(codex.emit(data, root), 0)
 
     def test_quota_resets_out_of_order_and_forecast(self):
         def tick(at, pct, reset=700000):
