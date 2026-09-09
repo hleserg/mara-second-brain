@@ -219,3 +219,31 @@ tail ~/.local/state/mara/claude-usage.log
 
 `--dry-run` считает всё и говорит, сколько файлов изменилось бы, ничего не
 записывая.
+
+### Identity export for Agent OS (additive, not deployed)
+
+`claude-usage.py scan` additionally writes `derived/turns.jsonl`, preserving
+`provider`, `message_id`, transcript `record_id`, timestamp and present usage
+field names. Existing session/interval/quota reports remain the same.
+`scripts/usage_events.py` exports metadata from explicit Claude transcripts or
+Codex `token_usage_record` rows. Codex `response_id` is the call identity;
+`token_count` cumulative rows are excluded from call sums. It exports no message
+or tool bodies. Missing token fields remain unknown. Cache semantics differ:
+OpenAI input includes cached input; Claude input excludes cache categories.
+
+`reconcile` uses provider+response ID, keeps native transcript authority over
+provisional stream observations, ignores delivery order and rejects conflicting
+same-version records and run/session reassignment. `reconcile_run` replaces a
+native run aggregate with its complete fresh-session call set; incomplete or
+resumed sessions retain native totals and do not count provider detail again.
+A complete Codex snapshot requires completion markers for every exported turn,
+read in the same pass. Late transcript corrections replace the selected history
+snapshot; they are not new current-spend deltas. API-equivalent, actual billed
+spend and subscription quota remain separate; unavailable values are null.
+
+The Agent OS adapter must prove native company/issue/workspace/repository/run
+binding and explicitly enroll the managed transcript source. Project aliases
+continue to use `vault_common.canon_map`; there is no new cwd map. No new database,
+cron, delivery worker, pricing table or changes to existing quota aggregation are
+introduced by this export seam. Existing subscriptions expose no invoice-level
+per-call spend, so the exporter does not infer one.

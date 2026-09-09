@@ -121,6 +121,8 @@ def parse(path):
             s["tokens_cache_write"] += got[2]; s["tokens_cache_read"] += got[3]
             s["tokens_thinking"] += (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0
             turns.append({"epoch": epoch_of(ts), "session_id": s["session_id"],
+                          "provider": "anthropic", "message_id": mid, "record_id": d.get("uuid"),
+                          "timestamp": ts, "usage_fields": sorted(u),
                           "model": m["model"], "sidechain": bool(d.get("isSidechain")),
                           "in": got[0], "out": got[1], "cw": got[2], "cr": got[3]})
             # §4А: первый ответ — это системный промпт, описания инструментов и
@@ -198,6 +200,7 @@ def scan(roots, out):
         d = os.path.join(out, "derived")
         if not os.path.isdir(d): os.makedirs(d)
         dump(os.path.join(d, "sessions.jsonl"), sessions)
+        dump(os.path.join(d, "turns.jsonl"), turns)
         dump(os.path.join(d, "heavy-results.jsonl"), heavy)
     return sessions, heavy, turns
 
