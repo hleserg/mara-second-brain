@@ -5,6 +5,7 @@
 однозначно, и только докладывает про то, где нужен человек.
 """
 import os, sys, io, json, glob, time, subprocess, tempfile, unittest
+from unittest import mock
 from datetime import datetime, timedelta
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -184,6 +185,10 @@ class СверкаИсточников(unittest.TestCase):
                              "sent_at,state) values(?,?,?,?,?,?,?)",
                              (did, eid, "123456789", "текст", "[]",
                               mi.now_iso(), state))
+        self.con.execute("insert into digests(id,event_id,chat_id,text,items_json,"
+                         "sent_at,state) values(?,?,?,?,?,?,?)",
+                         ("d6", eid, "123456789", "текст", "[]",
+                          mi.now_iso(), "stale"))
         f = rc.дайджест_не_доставлен(self.con)
         self.assertEqual(f[0]["count"], 3,
                          "доставленный дайджест — не находка, "
@@ -785,6 +790,89 @@ class Сверка(unittest.TestCase):
         находки = rc.run(con, root, vault=None)
         self.assertEqual([f for f in находки if f["level"] == "error"], [])
         self.assertEqual(rc.код(находки), 0, "на здоровой системе крон молчит")
+
+
+class Догрузка(unittest.TestCase):
+    """Погашенная пачка обязана быть названной. `stale` не попадал ни в
+    сверку (`дайджест_не_доставлен` фильтрует два других состояния), ни в
+    bootstrap Мары (`where state='sent'`), а `print` уходил в stdout, который
+    `contextd` выбрасывает. Находка была, действия по ней — ни одного."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.con = mi.connect(self.root)
+        self.eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "x1",
+            "occurred_at": mi.now_iso(), "ended_at": mi.now_iso()})
+
+    def строка(self, did, state, часов_назад=0):
+        import datetime as dt
+        t = (dt.datetime.now().astimezone()
+             - dt.timedelta(hours=часов_назад)).isoformat()
+        self.con.execute("insert into digests(id,event_id,chat_id,text,"
+                         "items_json,sent_at,state) values(?,?,?,?,?,?,?)",
+                         (did, self.eid, "123456789", "текст", "[]", t, state))
+
+    def test_свежая_догрузка_названа(self):
+        self.строка("s1", "stale")
+        self.строка("s2", "stale")
+        self.строка("ok", "sent")
+        f = rc.дайджест_догрузка(self.con)
+        self.assertEqual(f[0]["count"], 2, "доставленный — не догрузка")
+        self.assertIn("MARA_DIGEST_MAX_AGE_H", f[0]["detail"],
+                      "находка обязана назвать действие, которое её гасит")
+        self.assertEqual(f[0]["level"], "warn")
+
+    def test_боевое_окно_накрывает_вчерашнюю_пачку(self):
+        """Зовём без аргумента: свидетелем обязано быть боевое значение.
+        Мутант `окно_ч=24` → `окно_ч=1` набор проходил, а находка при нём
+        попадала бы в сводку, только если пачка легла в интервал
+        [07:00, 08:00) — то есть практически никогда."""
+        self.строка("s1", "stale", часов_назад=23)
+        self.строка("s2", "stale", часов_назад=47)
+        self.assertEqual(rc.дайджест_догрузка(self.con)[0]["count"], 2)
+
+    def test_окно_называет_боевой_порог_а_не_литерал(self):
+        """Порог `call_digest` переопределяется средой. Мутант, вернувший в
+        текст литерал, соврал бы владельцу ровно тогда, когда тот порог и
+        менял."""
+        import call_digest as cd
+        self.строка("s1", "stale")
+        with mock.patch.object(cd, "СВЕЖЕСТЬ_Ч", 6):
+            detail = rc.дайджест_догрузка(self.con)[0]["detail"]
+        self.assertIn("старше 6 ч", detail)
+
+    def test_ремедия_называет_конкретные_id(self):
+        """`текст()` печатает владельцу только `detail`; `sample` в телеграм
+        не уходит вовсе. Команда, единственная переменная часть которой нигде
+        не названа, — это находка без действия."""
+        self.строка("s1", "stale")
+        self.assertIn(self.eid, rc.дайджест_догрузка(self.con)[0]["detail"])
+
+    def test_число_в_тексте_считает_все_а_не_показанные(self):
+        """`ids` обрезан до пяти, а число в тексте — про все. Мутант
+        `len(rows)` → `len(ids)` проходил весь набор и на пачке из 69 звонков
+        сказал бы владельцу «звонков: 5». Число и есть то единственное, ради
+        чего находка заведена."""
+        for i in range(6):
+            self.строка("s%d" % i, "stale")
+        f = rc.дайджест_догрузка(self.con)[0]
+        self.assertIn("звонков: 6", f["detail"])
+        self.assertEqual(f["count"], 6)
+        self.assertEqual(len(f["sample"]), 5, "в примерах по-прежнему пятеро")
+
+    def test_старая_догрузка_не_шумит_вечно(self):
+        """Строки `stale` лежат в базе вечно. Вечная находка про них научила
+        бы владельца не читать находки вовсе — окно ровно сутки."""
+        self.строка("s1", "stale", часов_назад=50)
+        self.assertEqual(rc.дайджест_догрузка(self.con), [])
+
+    def test_догрузка_доходит_до_сверки(self):
+        """Мутант «убрать `out += дайджест_догрузка(con)` из `run()`»
+        проходит оба теста выше, а сверка при нём молчит."""
+        self.строка("s1", "stale")
+        имена = [x["check"] for x in rc.run(self.con, self.root, vault=None)]
+        self.assertIn("дайджест-догрузка", имена)
 
 
 if __name__ == "__main__":

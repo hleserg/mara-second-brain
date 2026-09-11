@@ -173,6 +173,13 @@ class Доставка(unittest.TestCase):
         self.addCleanup(снято.stop)
         for k in cd.КЛЮЧИ:
             os.environ.pop(k, None)
+        # Событие класса — от 2026-09-02, то есть к любому реальному «сейчас»
+        # оно старое. Без этой поблажки все тесты доставки уехали бы в «stale»
+        # и перестали бы проверять доставку: застава отключила бы своих же
+        # свидетелей. Свежесть проверяется отдельно, ниже.
+        свежесть = mock.patch.object(cd, "СВЕЖЕСТЬ_Ч", 10 ** 6)
+        свежесть.start()
+        self.addCleanup(свежесть.stop)
         self.dir = tempfile.mkdtemp()
         self.con = mi.connect(self.dir)
         self.eid, _ = mi.put_event(self.con, {
@@ -246,6 +253,160 @@ class Доставка(unittest.TestCase):
             cd.deliver = было
         self.assertEqual(self.состояние(), "projected",
                          "до ретрая звонок обработанным не считается")
+
+
+class Свежесть(unittest.TestCase):
+    """Разовая догрузка отдаёт неделю молчания одной пачкой: 69 звонков —
+    69 сообщений подряд. Старьё в телеграм не идёт, но и не теряется."""
+
+    def setUp(self):
+        снято = mock.patch.dict(os.environ, clear=False)
+        снято.start()
+        self.addCleanup(снято.stop)
+        for k in cd.КЛЮЧИ:
+            os.environ.pop(k, None)
+        self.dir = tempfile.mkdtemp()
+        self.con = mi.connect(self.dir)
+        self.eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "d1",
+            "occurred_at": EVENT["occurred"], "ended_at": EVENT["ended"],
+            "payload": EVENT["payload"]})
+        self.con.execute("update events set state='projected' where id=?",
+                         (self.eid,))
+        mi.write_json(mi.extraction_path(self.dir, self.eid), ПУСТО)
+        self.env = os.path.join(self.dir, "есть.env")
+        with open(self.env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
+
+    def прогон(self):
+        """Возвращает, звали ли `deliver`. Настоящий `deliver` до сети не
+        дошёл бы, но проверять надо не исход отправки, а сам факт похода."""
+        звали = []
+        было = cd.deliver
+        cd.deliver = lambda text, token, chat: звали.append(1) or "sent"
+        try:
+            cd.run(self.eid, root=self.dir, env_file=self.env)
+        finally:
+            cd.deliver = было
+        row = self.con.execute(
+            "select state,text from digests where event_id=?",
+            (self.eid,)).fetchone()
+        сост = self.con.execute("select state from events where id=?",
+                                (self.eid,)).fetchone()["state"]
+        return bool(звали), row, сост
+
+    def test_старый_звонок_в_телеграм_не_уходит(self):
+        with mock.patch.object(cd, "СВЕЖЕСТЬ_Ч", 24):
+            звали, row, сост = self.прогон()
+        self.assertFalse(звали, "догрузка недельной давности не выкрикивается")
+        self.assertEqual(row["state"], "stale")
+        self.assertTrue(row["text"], "текст дайджеста всё равно сохранён")
+        self.assertEqual(сост, "done",
+                         "иначе работа осталась бы в вечном ретрае ради "
+                         "сообщения, которого мы намеренно не шлём")
+
+    def test_свежий_звонок_уходит(self):
+        """Застава, которая глушит всё, — не застава. Тот же звонок при
+        достаточном пороге обязан дойти."""
+        with mock.patch.object(cd, "СВЕЖЕСТЬ_Ч", 10 ** 6):
+            звали, row, сост = self.прогон()
+        self.assertTrue(звали)
+        self.assertEqual(row["state"], "sent")
+        self.assertEqual(сост, "done")
+
+    def test_время_без_смысла_считается_свежим(self):
+        """Промолчать из-за неразобранной строки хуже, чем написать лишний
+        раз: пустое и кривое время не имеют права глушить дайджест."""
+        self.assertTrue(cd.свежий(None))
+        self.assertTrue(cd.свежий(""))
+        self.assertTrue(cd.свежий("вчера днём"))
+
+    def test_порог_считается_по_занятому_времени(self):
+        """Сутки ровно — ещё свежий, сутки и секунда — уже нет. Мутант
+        `<=` → `<` и мутант в множителе 3600 ловятся здесь."""
+        import datetime as dt
+        t = dt.datetime.fromisoformat("2026-09-02T14:05:00+03:00")
+        self.assertTrue(cd.свежий(t.isoformat(),
+                                  now=t + dt.timedelta(hours=24), часов=24))
+        self.assertFalse(cd.свежий(t.isoformat(),
+                                   now=t + dt.timedelta(hours=24, seconds=1),
+                                   часов=24))
+
+
+class БоевойПорог(unittest.TestCase):
+    """Каждый прогон `run()` выше заставу отключает — патчем `СВЕЖЕСТЬ_Ч` или
+    переменной среды, а прямые тесты `свежий()` передают `часов=` аргументом.
+    Значит боевое значение константы не держал ни один свидетель: мутант
+    `"24"` → `"0"` проходил и юниты, и self-check, и сквозной тест, а в бою
+    при нём ни один дайджест не доходил бы до телеграма никогда.
+
+    Здесь заставу не трогают вовсе. Событие двигают, а не порог."""
+
+    def setUp(self):
+        снято = mock.patch.dict(os.environ, clear=False)
+        снято.start()
+        self.addCleanup(снято.stop)
+        for k in cd.КЛЮЧИ:
+            os.environ.pop(k, None)
+        self.dir = tempfile.mkdtemp()
+        self.con = mi.connect(self.dir)
+        self.env = os.path.join(self.dir, "есть.env")
+        with open(self.env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
+        # Константа читается из среды на импорте. `run-tests.sh` пиннит
+        # `MARA_ENV_FILE` и `MARA_CONTEXTD_ENV` ровно от этой болезни, а эту
+        # переменную — нет: с ней в шелле гейт краснел бы «True is not false»
+        # вместо внятной причины. Заодно это прямой свидетель того, что
+        # проверяется боевое значение, а не чьё-то чужое.
+        self.assertEqual(cd.СВЕЖЕСТЬ_Ч, 24,
+                         "в среде торчит MARA_DIGEST_MAX_AGE_H")
+
+    def прогон(self, часов_назад):
+        import datetime as dt
+        t = dt.datetime.now().astimezone() - dt.timedelta(hours=часов_назад)
+        eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone",
+            "source_id": "s%g" % часов_назад,
+            "occurred_at": t.isoformat(),
+            "ended_at": (t + dt.timedelta(minutes=1)).isoformat(),
+            "payload": EVENT["payload"]})
+        self.con.execute("update events set state='projected' where id=?", (eid,))
+        mi.write_json(mi.extraction_path(self.dir, eid), ПУСТО)
+        звали = []
+        было = cd.deliver
+        cd.deliver = lambda text, token, chat: звали.append(1) or "sent"
+        try:
+            cd.run(eid, root=self.dir, env_file=self.env)
+        finally:
+            cd.deliver = было
+        state = self.con.execute("select state from digests where event_id=?",
+                                 (eid,)).fetchone()["state"]
+        return bool(звали), state
+
+    def test_часовой_давности_звонок_доходит(self):
+        """Держит мутанта `СВЕЖЕСТЬ_Ч = 0`: при нём молчит вообще всё."""
+        звали, state = self.прогон(1)
+        self.assertTrue(звали, "живой звонок обязан дойти при боевом пороге")
+        self.assertEqual(state, "sent")
+
+    def test_догрузка_объясняется_в_stderr(self):
+        """`contextd` зовёт шаг через `subprocess.run(capture_output=True)` и
+        возвращает только stderr. Мутант «убрать `file=sys.stderr`» набор
+        проходил, а урок ветки `not-private` терялся молча."""
+        import io as _io, contextlib
+        out, err = _io.StringIO(), _io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.прогон(25)
+        self.assertIn("дайджест-догрузка", err.getvalue())
+        self.assertNotIn("дайджест-догрузка", out.getvalue())
+
+    def test_вчерашняя_догрузка_не_доходит(self):
+        """Держит мутанта `СВЕЖЕСТЬ_Ч = 10**6` и мутанта
+        `ev["occurred"]` → `ev["received"]`: второй считает возраст от
+        приёма, а приём у догрузки — сию секунду."""
+        звали, state = self.прогон(25)
+        self.assertFalse(звали)
+        self.assertEqual(state, "stale")
 
 
 if __name__ == "__main__":

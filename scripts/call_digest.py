@@ -16,7 +16,7 @@
     python3 scripts/call_digest.py --event call_<uuid>
     python3 scripts/call_digest.py --self-check
 """
-import os, sys, json, uuid, argparse, urllib.parse, urllib.request
+import os, sys, json, uuid, argparse, datetime, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -34,6 +34,39 @@ ENV_FILE = os.environ.get("MARA_CONTEXTD_ENV", "/etc/mara/contextd.env")
 # доставку вовсе
 API = os.environ.get("MARA_TELEGRAM_API",
                      "https://api.telegram.org/bot%s/sendMessage")
+
+# Разовая догрузка отдаёт неделю молчания одной пачкой: телефон стоял, потом
+# отдал всё разом — 69 звонков, 69 сообщений подряд. Живой звонок доходит до
+# дайджеста за минуты, поэтому всё, что к этому моменту старше суток, — это
+# догрузка, а не разговор. Текст всё равно ложится в `digests`: находка не
+# пропадает, её просто не выкрикивают владельцу в час ночи.
+# Порог переопределяем средой по той же причине, что и `MARA_TELEGRAM_API`
+# выше: шаг дайджеста запускается отдельным процессом, и сквозной тест иначе
+# не может ни отключить заставу, ни проверить её.
+try:
+    СВЕЖЕСТЬ_Ч = float(os.environ.get("MARA_DIGEST_MAX_AGE_H", "24"))
+except ValueError:
+    raise SystemExit("MARA_DIGEST_MAX_AGE_H — не число: %r"
+                     % os.environ.get("MARA_DIGEST_MAX_AGE_H"))
+
+
+def свежий(occurred, now=None, часов=None):
+    """Пустое и неразобранное время считаем свежим: промолчать из-за строки,
+    которую не смогли прочитать, хуже, чем написать лишний раз."""
+    if not occurred:
+        return True
+    # `occurred` от телефона приходит с офсетом (`Sync.kt` шлёт через
+    # `ZoneId.systemDefault()`), и сравнение идёт по абсолютным моментам.
+    # Наивная строка сравнится в зоне сервера — путь маловероятный, но
+    # молчать об этом нельзя.
+    try:
+        t = datetime.datetime.fromisoformat(occurred)
+    except (ValueError, TypeError):
+        return True
+    now = now or datetime.datetime.now(t.tzinfo)
+    часов = СВЕЖЕСТЬ_Ч if часов is None else часов
+    return (now - t).total_seconds() <= часов * 3600
+
 
 # Порядок и названия разделов — из ТЗ §16 и совпадают с карточкой разговора.
 SECTIONS = [("requests", "Попросили"), ("commitments", "Ты обещал"),
@@ -156,7 +189,9 @@ def run(event_id, root=None, env_file=None):
     created = len(cp.commitment_cards(ev, extraction, {}))
     text, items = render(ev, extraction, created)
     e = env(env_file)
-    state = deliver(text, e.get("TELEGRAM_BOT_TOKEN"), e.get("TELEGRAM_HOME_CHANNEL"))
+    state = ("stale" if not свежий(ev["occurred"]) else
+             deliver(text, e.get("TELEGRAM_BOT_TOKEN"),
+                     e.get("TELEGRAM_HOME_CHANNEL")))
     did = str(uuid.uuid4())
     # один дайджест на событие: сбой отправки уводит работу в ретрай, и вторая
     # попытка должна заменить строку, а не положить рядом ещё одну
@@ -166,6 +201,18 @@ def run(event_id, root=None, env_file=None):
                 (did, event_id, e.get("TELEGRAM_HOME_CHANNEL"), text,
                  json.dumps(items, ensure_ascii=False), mi.now_iso(), state))
     print("call_digest: %s — %s, пунктов %d" % (event_id, state, len(items)))
+    if state == "stale":
+        # Звонок обработан: дайджест собран и лежит в `digests`. Не закрыть
+        # его здесь значило бы держать работу в вечном ретрае ради сообщения,
+        # которое мы намеренно не шлём.
+        # в stderr, а не в stdout: `contextd` зовёт шаг через
+        # `subprocess.run(capture_output=True)` и возвращает только stderr —
+        # ветка `not-private` этот урок уже выучила, эта чуть не повторила
+        print("call_digest: %s старше %g ч — в телеграм не шлём, текст в "
+              "digests; сверка назовёт его находкой «дайджест-догрузка»"
+              % (event_id, СВЕЖЕСТЬ_Ч), file=sys.stderr)
+        con.execute("update events set state='done' where id=?", (event_id,))
+        return did
     if state == "failed":
         raise RuntimeError("телеграм не принял дайджест")
     if state != "sent":
@@ -214,6 +261,15 @@ def self_check():
     assert not приватный_чат("-1001234567890") and not приватный_чат("-99")
     assert not приватный_чат("@канал") and not приватный_чат("١٢٣")
     assert deliver("x", None, None) == "no-transport"
+    # застава свежести: сутки ровно ещё проходят, сутки и секунда — уже нет,
+    # а нечитаемое время не имеет права глушить дайджест
+    _t = datetime.datetime.fromisoformat(event["occurred"])
+    assert свежий(event["occurred"], now=_t + datetime.timedelta(hours=24),
+                  часов=24)
+    assert not свежий(event["occurred"],
+                      now=_t + datetime.timedelta(hours=24, seconds=1),
+                      часов=24)
+    assert свежий(None) and свежий("") and свежий("вчера днём")
     print("call_digest self-check: ок")
     return 0
 
