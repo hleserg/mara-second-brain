@@ -792,10 +792,6 @@ class Сверка(unittest.TestCase):
         self.assertEqual(rc.код(находки), 0, "на здоровой системе крон молчит")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class Догрузка(unittest.TestCase):
     """Погашенная пачка обязана быть названной. `stale` не попадал ни в
     сверку (`дайджест_не_доставлен` фильтрует два других состояния), ни в
@@ -853,6 +849,18 @@ class Догрузка(unittest.TestCase):
         self.строка("s1", "stale")
         self.assertIn(self.eid, rc.дайджест_догрузка(self.con)[0]["detail"])
 
+    def test_число_в_тексте_считает_все_а_не_показанные(self):
+        """`ids` обрезан до пяти, а число в тексте — про все. Мутант
+        `len(rows)` → `len(ids)` проходил весь набор и на пачке из 69 звонков
+        сказал бы владельцу «звонков: 5». Число и есть то единственное, ради
+        чего находка заведена."""
+        for i in range(6):
+            self.строка("s%d" % i, "stale")
+        f = rc.дайджест_догрузка(self.con)[0]
+        self.assertIn("звонков: 6", f["detail"])
+        self.assertEqual(f["count"], 6)
+        self.assertEqual(len(f["sample"]), 5, "в примерах по-прежнему пятеро")
+
     def test_старая_догрузка_не_шумит_вечно(self):
         """Строки `stale` лежат в базе вечно. Вечная находка про них научила
         бы владельца не читать находки вовсе — окно ровно сутки."""
@@ -865,3 +873,7 @@ class Догрузка(unittest.TestCase):
         self.строка("s1", "stale")
         имена = [x["check"] for x in rc.run(self.con, self.root, vault=None)]
         self.assertIn("дайджест-догрузка", имена)
+
+
+if __name__ == "__main__":
+    unittest.main()
