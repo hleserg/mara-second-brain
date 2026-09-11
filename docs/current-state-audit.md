@@ -207,7 +207,7 @@ retention в 04:40, `context_pack` в 04:25, `gmail_ingest --sync` каждые
 
 | № | Утверждение §2.1 | Статус | Где | Тесты |
 |---|---|---|---|---|
-| 1 | `contextd` как локальный сервис ядра | confirmed | `scripts/contextd.py`, `install/contextd.service`; на doctor активен | `tests/test_contextd.py` |
+| 1 | `contextd` как локальный сервис ядра | confirmed | `scripts/contextd.py`, `install/contextd.service.in`; на doctor активен | `tests/test_contextd.py` |
 | 2 | Durable queue с lease, retry и DLQ | confirmed | схема `scripts/mara_ingest.py:28-49`, аренда `:108-123`, ретраи `:25`, DLQ `:136-154` | 5 тестов в `tests/test_mara_ingest.py` |
 | 3 | Blob-хранилище вне Markdown-волта | confirmed конфигурацией | `MARA_BLOBS` по умолчанию `/srv/mara-blobs` (`mara_ingest.py:23`) против `VAULT=/srv/vault` | `test_путь_блоба_раскладывает_по_годам` |
 | 4 | Ingestion аудио с проверкой SHA-256 | confirmed | `scripts/contextd.py:285-315`: хеш до `os.replace` и до постановки работы | `test_битый_хеш_не_успех` |

@@ -157,7 +157,7 @@ def _now():
 # Домашний каталог и временные — не проект, а «запустил откуда попало».
 # По шаблону, а не через expanduser: подбор карточек крутится на doctor, а
 # сессии приезжают с чужих машин, где домашний каталог другой. На doctor
-# expanduser давал /home/sergey и пропускал beta-pi'шный /home/hleserg.
+# expanduser давал домашний каталог машины-хозяина и пропускал чужие.
 JUNK_CWD = re.compile(r"""\A(?: /tmp | /var/tmp | /private/var/folders/.*
                             | (?:/home|/Users)/[^/]+
                             | /root )\Z""", re.X)

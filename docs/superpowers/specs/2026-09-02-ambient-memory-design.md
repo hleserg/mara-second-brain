@@ -130,7 +130,7 @@ ASR и извлечение нельзя гонять параллельно (VR
 
 ## 3. contextd: процесс и поверхность
 
-Один systemd-юнит `contextd.service` на doctor, `User=sergey`, `Restart=always`. Внутри
+Один systemd-юнит `contextd.service` на doctor, `User=<логин юнита>`, `Restart=always`. Внутри
 `http.server.ThreadingHTTPServer` из стандартной библиотеки и `sqlite3`. Ни одной новой
 зависимости: ни fastapi, ни redis, ни postgres (ТЗ §4, §23).
 
@@ -181,7 +181,7 @@ digests  (id, event_id, chat_id, text, items_json, sent_at, state)
 
 ```text
 /srv/mara-blobs/
-  calls/2026/09/<sha256>.m4a          # аудио, права 0600, владелец sergey
+  calls/2026/09/<sha256>.m4a          # аудио, права 0600, владелец — логин юнита
   manifests/<event_id>.json           # неизменяемый манифест
   transcripts/<event_id>.jsonl        # сегменты со спанами
   contextd.db

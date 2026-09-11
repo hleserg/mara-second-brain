@@ -10,11 +10,11 @@
 | Срез | Что появилось | Где |
 |---|---|---|
 | 1 | Тесты инвариантов: приватное не уезжает в облако, старые скрипты видят новые типы карточек | `tests/test_cloud_boundary.py`, `tests/test_existing_scripts.py` |
-| 2 | Контракт событий, дедуп по содержимому, аренда работ и ретраи из §17, blob store вне волта; демон `contextd` без единой зависимости; сервис на doctor, релей на маке | `scripts/mara_ingest.py`, `scripts/contextd.py`, `install/contextd.service`, `install/com.mara.relay.plist` |
+| 2 | Контракт событий, дедуп по содержимому, аренда работ и ретраи из §17, blob store вне волта; демон `contextd` без единой зависимости; сервис на doctor, релей на маке | `scripts/mara_ingest.py`, `scripts/contextd.py`, `install/contextd.service.in`, `install/com.mara.relay.plist` |
 | 3 | Звонки: ASR кусками по 25 с, извлечение «модель предлагает — правила решают», карточки разговора и обязательств в волте, дайджест по шаблону в Telegram, ретеншен аудио и часовая сверка | `scripts/call_asr.py`, `call_extract.py`, `call_project.py`, `call_digest.py`, `blob_retention.py`, `contextd_reconcile.py` |
 | 4 | Контекст-брокер: пакет открытых обязательств в каждый ход Мары через `pre_llm`, правки словами владельца (`mara_correction`) | `scripts/context_pack.py`, `install/mara-context`, спека `context-broker-design.md` |
 | 5 | Android `Mara Capture`: забор OEM-записей, корреляция с журналом звонков, шифрованная очередь, спаривание по QR/коду, мастер здоровья | `android/`, спека `mara-capture-design.md` |
-| 6 | Личный Telegram через TDLib как пользователь: демон, ревизии и надгробия вместо перезаписи, боты и каналы отсеяны | `scripts/tdlib_ingest.py`, `install/tdlib-ingest.service` |
+| 6 | Личный Telegram через TDLib как пользователь: демон, ревизии и надгробия вместо перезаписи, боты и каналы отсеяны | `scripts/tdlib_ingest.py`, `install/tdlib-ingest.service.in` |
 | 7 | Личный Gmail: синк по `historyId`, ревизии корзины, тела остаются на doctor; скрипт сам читает `/etc/mara/gmail.env` | `scripts/gmail_ingest.py` |
 | 8–9 | WhatsApp из уведомлений и SMS из провайдера (с запасным путём через уведомления) в том же приложении; импортёр официального экспорта с тем же ключом сообщения | `android/.../Messages.kt`, `scripts/whatsapp_import.py`, `tests/fixtures/whatsapp-message-id.json` |
 | 10 | Сверка: «источник замолчал при живом телефоне», «запись обещана, не долита»; дневная сводка о проблемах в Telegram; уборка `raw/` источников; метрики по источникам и пакету контекста | `contextd_reconcile.py --telegram`, `blob_retention.py`, `/metrics` |
