@@ -2629,9 +2629,6 @@ class ТестНюхСодержимого(unittest.TestCase):
                          ["%s.m4a" % sha])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ТестОтказДоТела(unittest.TestCase):
     """Отказ приходит до тела, если клиент спросил разрешения (#73, Т3.3).
@@ -2657,67 +2654,106 @@ class ТестОтказДоТела(unittest.TestCase):
         self.srv.shutdown()
         self.srv.server_close()
 
-    def спросить(self, длина, expect=True, тело=b""):
-        """Шлёт заголовки (и, если велено, тело) и возвращает (код, отдано).
+    def шапка(self, длина, expect=True):
+        h = ("POST /v1/ingest/audio?event=none HTTP/1.1\r\n"
+             "Host: 127.0.0.1\r\n"
+             "Authorization: Bearer %s\r\n"
+             "Content-Type: application/octet-stream\r\n"
+             "Content-Length: %d\r\n" % (self.токен, длина))
+        if expect:
+            h += "Expect: 100-continue\r\n"
+        return (h + "\r\n").encode()
 
-        `отдано` — сколько байт тела мы успели отдать: в этом и вопрос.
+    @staticmethod
+    def код(s):
+        """Код следующего ответа; 0 — соединение закрылось, не ответив."""
+        буфер = b""
+        while b"\r\n" not in буфер:
+            try:
+                кусок = s.recv(256)
+            except OSError:      # RST: ответ потерян вместе с буфером приёма
+                return 0
+            if not кусок:
+                break
+            буфер += кусок
+        части = буфер.split()
+        return int(части[1]) if len(части) > 1 else 0
+
+    def спросить(self, длина, expect=True, тело=b""):
+        """Шлёт заголовки (и, если велено, тело) и возвращает код ответа.
+
+        Что телефон не заплатил трафиком, доказывает порядок, а не счётчик:
+        при `expect=True` мы ждём ответа, не отправив ни байта тела, и
+        клиентский таймаут (5 с) короче серверного (`timeout = 60`). Пришёл
+        код — значит сервер ответил, не дожидаясь тела.
         """
         s = socket.create_connection(self.srv.server_address, timeout=5)
         s.settimeout(5)
-        шапка = ("POST /v1/ingest/audio?event=none HTTP/1.1\r\n"
-                 "Host: 127.0.0.1\r\n"
-                 "Authorization: Bearer %s\r\n"
-                 "Content-Type: application/octet-stream\r\n"
-                 "Content-Length: %d\r\n" % (self.токен, длина))
-        if expect:
-            шапка += "Expect: 100-continue\r\n"
-        s.sendall((шапка + "\r\n").encode())
-        отдано = 0
+        s.sendall(self.шапка(длина, expect))
         if not expect:
             s.sendall(тело)
-            отдано = len(тело)
-        первая = b""
-        while b"\r\n" not in первая:
-            кусок = s.recv(256)
-            if not кусок:
-                break
-            первая += кусок
-        s.close()
-        код = int(первая.split()[1]) if len(первая.split()) > 1 else 0
-        return код, отдано
+        try:
+            return self.код(s)
+        finally:
+            s.close()
+
+    def ждать_освобождения(self, срок=2.0):
+        """Место освобождает поток сервера — его надо дождаться, а не угадать."""
+        предел = time.monotonic() + срок
+        while self.dev in contextd._заливки and time.monotonic() < предел:
+            time.sleep(0.01)
+        return self.dev not in contextd._заливки
 
     def test_занятое_устройство_отказывает_до_тела(self):
         contextd._заливки[self.dev] = contextd.ЗАЛИВОК
-        код, отдано = self.спросить(64 << 20)
-        self.assertEqual(код, 503, "отказ пришёл не 503")
-        self.assertEqual(отдано, 0, "телефон всё-таки заплатил трафиком")
+        self.assertEqual(self.спросить(64 << 20), 503, "отказ пришёл не 503")
         # место чужое, и проверка его не заняла: иначе четвёртая попытка
         # сдвинула бы счётчик и место не вернулось бы никогда
         self.assertEqual(contextd._заливки[self.dev], contextd.ЗАЛИВОК)
 
     def test_слишком_большое_тело_отказывает_до_тела(self):
-        код, отдано = self.спросить(contextd.MAX_BODY + 1)
-        self.assertEqual((код, отдано), (413, 0))
+        self.assertEqual(self.спросить(contextd.MAX_BODY + 1), 413)
 
-    def test_свободное_устройство_получает_сто(self):
-        """Счастливый путь не сломан: сервер разрешает слать."""
+    def test_не_дождавшийся_ста_всё_равно_получает_код(self):
+        """Заголовок спрашивает разрешения, но ждать его клиент не обязан.
+
+        Транспорт вправе полить тело сразу за заголовками. Закрыть тогда
+        соединение с непрочитанным телом значит показать клиенту broken pipe
+        вместо кода — ровно #30. Поэтому отказ сливает и здесь, только по
+        короткому таймауту.
+        """
+        contextd._заливки[self.dev] = contextd.ЗАЛИВОК
         s = socket.create_connection(self.srv.server_address, timeout=5)
         s.settimeout(5)
-        s.sendall(("POST /v1/ingest/audio?event=none HTTP/1.1\r\n"
-                   "Host: 127.0.0.1\r\nAuthorization: Bearer %s\r\n"
-                   "Content-Type: application/octet-stream\r\n"
-                   "Content-Length: 3\r\nExpect: 100-continue\r\n\r\n"
-                   % self.токен).encode())
+        # 32 КиБ, а не горсть байт: тело меньше буфера чтения уезжает в него
+        # вместе с заголовками, и очередь сокета при закрытии пуста — такое
+        # тело проходит и без слива, то есть ничего не проверяет.
+        s.sendall(self.шапка(32 << 10) + b"a" * (32 << 10))   # не ждём `100`
+        try:
+            self.assertEqual(self.код(s), 503, "отказ потерялся вместе с телом")
+        finally:
+            s.close()
+
+    def test_свободное_устройство_получает_сто(self):
+        """Счастливый путь не сломан, и место за устройством не залипает."""
+        s = socket.create_connection(self.srv.server_address, timeout=5)
+        s.settimeout(5)
+        s.sendall(self.шапка(3))
         первая = s.recv(64)
         self.assertIn(b"100", первая.split(b"\r\n")[0], первая)
         s.sendall(b"abc")
+        # Дочитать окончательный ответ обязательно: без него проверка места
+        # ниже успевала бы раньше, чем сервер до места вообще дошёл, и
+        # проходила бы при любой утечке.
+        self.assertNotEqual(self.код(s), 0, "окончательного ответа не пришло")
         s.close()
-        # место вернулось: спросивший и уехавший не запирает устройство
-        self.assertNotIn(self.dev, contextd._заливки)
+        self.assertTrue(self.ждать_освобождения(), "место за устройством залипло")
 
     def test_без_expect_поведение_прежнее(self):
         """Кто не спрашивал — платит как раньше, и код тот же."""
         contextd._заливки[self.dev] = contextd.ЗАЛИВОК
-        код, отдано = self.спросить(64, expect=False, тело=b"a" * 64)
-        self.assertEqual(код, 503)
-        self.assertEqual(отдано, 64)
+        self.assertEqual(self.спросить(64, expect=False, тело=b"a" * 64), 503)
+
+
+if __name__ == "__main__":
+    unittest.main()
