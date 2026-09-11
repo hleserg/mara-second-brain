@@ -218,6 +218,43 @@ class КарточкиПропали(unittest.TestCase):
         c.close()
         self.assertNotIn("карточки-пропали", self.находки())
 
+    def база(self, *строки):
+        c = sqlite3.connect(self.bm)
+        c.execute("delete from entity")
+        c.executemany("insert into entity values(?)", [(x,) for x in строки])
+        c.commit()
+        c.close()
+
+    def test_карточка_в_подкаталоге_не_числится_пропавшей(self):
+        """Проектор кладёт плоско, но обход волта всё равно рекурсивный:
+        пока сравнение шло в одну сторону, нерекурсивный `glob` прятал
+        находку, а с обратной стороной он бы её выдумывал — и вечно."""
+        os.makedirs(os.path.join(self.vault, "kb/conversations/2026/09"))
+        путь = "kb/conversations/2026/09/анна.md"
+        open(os.path.join(self.vault, путь), "w").close()
+        self.база(путь)
+        self.assertNotIn("карточки-пропали", self.находки())
+
+    def test_не_markdown_в_каталоге_карточек_не_находка(self):
+        """Перечисляем `*.md` — значит и спрашиваем только про них.
+        Иначе любой индексируемый `.canvas` или вложение станет вечной
+        находкой, которую нечем закрыть."""
+        self.карточка("a.md")
+        self.база("kb/conversations/a.md", "kb/conversations/схема.canvas")
+        self.assertNotIn("карточки-пропали", self.находки())
+
+    def test_пустой_путь_в_базе_не_роняет_проверку(self):
+        """`file_path is null` до появления обратной стороны был безвреден:
+        `None` только вычитался. Теперь он идёт в `startswith` и роняет
+        `лаг_индекса` целиком — вместе с уже посчитанной находкой
+        `лаг-индекса`, которую застава не спасает."""
+        self.база(None, "kb/conversations/b.md")
+        self.карточка("живая.md")
+        f = self.находки()
+        self.assertNotIn("индекс-упала", f)
+        self.assertEqual(f["карточки-пропали"]["count"], 1)
+        self.assertEqual(f["лаг-индекса"]["count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
