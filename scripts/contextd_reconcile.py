@@ -189,7 +189,13 @@ def запись_без_расшифровки(con, root):
     for r in con.execute(
             "select e.id, b.path from events e "
             "join blobs b on b.sha256=e.blob_sha256 "
-            "where b.purged_at is null and e.state in ('stored','new','stale') "
+            "where b.purged_at is null "
+            # `quarantined` — четвёртое до-`stored` состояние, и его ввёл этот
+            # же PR. Без него проверка слепа ровно к той паре, для которой
+            # написана: оба названных в докстринге повода («демон умер между
+            # `insert into blobs` и переводом состояния», «после выката
+            # откатили один только демон») теперь дают `quarantined`.
+            "and e.state in ('stored','new','stale','quarantined') "
             "order by e.id").fetchall():
         eid = r["id"]
         if not os.path.exists(mi.manifest_path(root, eid)):

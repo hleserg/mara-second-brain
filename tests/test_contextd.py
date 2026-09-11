@@ -1,6 +1,6 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
 import contextlib, os, sys, io, json, hashlib, socket, struct
-import tempfile, threading, time, unittest
+import tempfile, threading, time, unittest, unittest.mock
 import urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timedelta
 
@@ -2349,6 +2349,104 @@ class ТестНюхСодержимого(unittest.TestCase):
         self.assertEqual(своя["level"], "error")
         self.assertEqual((своя["count"], своя["events"]), (2, 2))
         self.assertIn("ACR", своя["detail"], "находка обязана сказать, что чинить")
+
+    def test_сверка_видит_карантинную_пару_блоб_есть_событие_не_сдвинулось(self):
+        """`quarantined` — четвёртое до-`stored` состояние, и его ввёл этот PR.
+
+        `запись_без_расшифровки` написана ровно для пары «блоб принят, событие
+        не сдвинулось»: демон умер между `insert into blobs` и переводом
+        состояния, либо после выката откатили один только демон. Оба повода
+        теперь дают `quarantined`, и без него в кортеже состояний проверка была
+        бы слепа именно к тому, для чего существует (круг 2 ревью PR #91, P1).
+        """
+        import contextd_reconcile as rc
+        каталог, con = self.стенд()
+        тело = звук(b"audio tail", "m4a")
+        eid, sha = self.событие(con, тело)
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело), len(тело))
+        # откручиваем состояние назад: так выглядит дерево, если демон умер
+        # сразу после `insert into blobs` (автокоммит, ADR-0005 — строка уже
+        # durable) или если откатили один только демон
+        # так выглядит дерево, если демон умер сразу после `insert into blobs`
+        # (автокоммит, ADR-0005 — строка уже durable): блоб в реестре есть,
+        # манифеста нет, работа ASR не заведена, состояние не сдвинулось
+        os.unlink(mi.manifest_path(каталог, eid))
+        con.execute("delete from jobs where event_id=?", (eid,))
+        con.execute("update events set state='quarantined' where id=?", (eid,))
+        con.commit()
+        self.assertEqual(
+            con.execute("select count(*) from blobs where sha256=?",
+                        (sha,)).fetchone()[0], 1, "блоб в реестре обязан быть")
+        имена = [f["check"] for f in rc.запись_без_расшифровки(con, каталог)]
+        self.assertIn("манифест-не-дописан", имена)
+        self.assertIn("расшифровка-поставлена", имена)
+
+    def карантинить(self, con, каталог, тело=b"<html>ne zvuk</html>"):
+        """Событие с содержимым, которое нюх сегодня не узнаёт."""
+        eid, sha = self.событие(con, тело)
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                       len(тело))
+        self.assertEqual(код, 415)
+        return eid, sha, тело
+
+    def test_повтор_чистит_карантинную_копию(self):
+        """Тот же хеш когда-то не узнали, а теперь узнали.
+
+        Достижимо это ровно одним способом — список видов расширили между
+        попытками: байты те же, `want` тот же, значит и нюх тот же, пока не
+        сменился код. Поэтому нюх здесь и подменяется: это модель выката, а не
+        обход проверки. Копия из карантина обязана уйти, иначе находка
+        `карантин` уровня `error` горит вечно — уборка, о которой она просит,
+        владельцу уже не нужна, а погасить её нечем.
+        """
+        каталог, con = self.стенд()
+        eid, sha, тело = self.карантинить(con, каталог)
+        q = os.path.join(каталог, "quarantine")
+        self.assertEqual(len(os.listdir(q)), 1)
+        with unittest.mock.patch.object(contextd, "нюх",
+                                        lambda г: ("m4a", "audio/mp4")):
+            код, _ = contextd.ingest_audio(con, каталог, eid,
+                                           io.BytesIO(тело), len(тело))
+        self.assertEqual(код, 200)
+        self.assertEqual(os.listdir(q), [], "карантинная копия обязана уйти")
+
+    def test_повтор_не_падает_если_копию_унесли_между_проверкой_и_удалением(self):
+        """Гонку взводит сама находка: она велит разобрать каталог.
+
+        Разбор во время долетающего повтора (или два повтора разом) уносит файл
+        ровно между `exists` и `unlink`. `FileNotFoundError` ушёл бы из
+        `ingest_audio` наружу — `аудио()` ловит только `ТаймаутТела`, — телефон
+        остался бы без ответа, а блоб уже опубликован в `calls/` без строки в
+        `blobs`: находка `блоб-без-манифеста` на пустом месте. Телефон лечится
+        повтором, сводка владельцу — нет. Круг 2 ревью PR #91, P2.
+
+        Гонка воспроизводится подменой `os.path.exists`, а не потоком: так
+        промежуток между проверкой и удалением задан точно, и тест не хлипкий.
+        Подмена ничего не утверждает — она **создаёт** состояние; свидетели
+        ниже: код 200 и строка в реестре.
+        """
+        каталог, con = self.стенд()
+        eid, sha, тело = self.карантинить(con, каталог)
+        q = contextd.карантин_путь(каталог, sha, "m4a")
+        self.assertTrue(os.path.exists(q), "карантинная копия должна быть")
+        настоящий = os.path.exists
+
+        def гонка(путь):
+            if путь == q and настоящий(путь):
+                os.unlink(путь)          # владелец разобрал каталог ровно сейчас
+                return True
+            return настоящий(путь)
+
+        with unittest.mock.patch.object(contextd, "нюх",
+                                        lambda г: ("m4a", "audio/mp4")), \
+             unittest.mock.patch.object(os.path, "exists", гонка):
+            код, _ = contextd.ingest_audio(con, каталог, eid,
+                                           io.BytesIO(тело), len(тело))
+        self.assertEqual(код, 200, "пропавшая карантинная копия — не отказ")
+        self.assertEqual(
+            con.execute("select count(*) from blobs where sha256=?",
+                        (sha,)).fetchone()[0], 1,
+            "блоб обязан быть в реестре, а не только выложен в calls/")
 
     def test_разобранный_каталог_гасит_находку(self):
         """Находка, которая не гаснет никогда, учит не читать `error`.
