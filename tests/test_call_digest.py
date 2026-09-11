@@ -255,10 +255,6 @@ class Доставка(unittest.TestCase):
                          "до ретрая звонок обработанным не считается")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class Свежесть(unittest.TestCase):
     """Разовая догрузка отдаёт неделю молчания одной пачкой: 69 звонков —
     69 сообщений подряд. Старьё в телеграм не идёт, но и не теряется."""
@@ -357,6 +353,13 @@ class БоевойПорог(unittest.TestCase):
         self.env = os.path.join(self.dir, "есть.env")
         with open(self.env, "w", encoding="utf-8") as fh:
             fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
+        # Константа читается из среды на импорте. `run-tests.sh` пиннит
+        # `MARA_ENV_FILE` и `MARA_CONTEXTD_ENV` ровно от этой болезни, а эту
+        # переменную — нет: с ней в шелле гейт краснел бы «True is not false»
+        # вместо внятной причины. Заодно это прямой свидетель того, что
+        # проверяется боевое значение, а не чьё-то чужое.
+        self.assertEqual(cd.СВЕЖЕСТЬ_Ч, 24,
+                         "в среде торчит MARA_DIGEST_MAX_AGE_H")
 
     def прогон(self, часов_назад):
         import datetime as dt
@@ -386,6 +389,17 @@ class БоевойПорог(unittest.TestCase):
         self.assertTrue(звали, "живой звонок обязан дойти при боевом пороге")
         self.assertEqual(state, "sent")
 
+    def test_догрузка_объясняется_в_stderr(self):
+        """`contextd` зовёт шаг через `subprocess.run(capture_output=True)` и
+        возвращает только stderr. Мутант «убрать `file=sys.stderr`» набор
+        проходил, а урок ветки `not-private` терялся молча."""
+        import io as _io, contextlib
+        out, err = _io.StringIO(), _io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.прогон(25)
+        self.assertIn("дайджест-догрузка", err.getvalue())
+        self.assertNotIn("дайджест-догрузка", out.getvalue())
+
     def test_вчерашняя_догрузка_не_доходит(self):
         """Держит мутанта `СВЕЖЕСТЬ_Ч = 10**6` и мутанта
         `ev["occurred"]` → `ev["received"]`: второй считает возраст от
@@ -393,3 +407,7 @@ class БоевойПорог(unittest.TestCase):
         звали, state = self.прогон(25)
         self.assertFalse(звали)
         self.assertEqual(state, "stale")
+
+
+if __name__ == "__main__":
+    unittest.main()
