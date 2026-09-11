@@ -2631,3 +2631,93 @@ class ТестНюхСодержимого(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ТестОтказДоТела(unittest.TestCase):
+    """Отказ приходит до тела, если клиент спросил разрешения (#73, Т3.3).
+
+    Предел заливок (#73) отвечал 503 **после** того, как телефон выложил
+    мегабайты: сервер обязан вычитать тело, иначе клиент увидит broken pipe
+    вместо кода. Платил за это телефон — трафиком, а сервер — потоком,
+    занятым на всё время слива. `Expect: 100-continue` снимает обе платы:
+    клиент шлёт заголовки и ждёт, сервер отказывает до первого байта тела.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.srv = contextd.make_server(self.dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        con = mi.connect(self.dir)
+        self.dev, self.токен = contextd.pair(con, "телефон")
+        contextd._заливки.clear()
+
+    def tearDown(self):
+        contextd._заливки.clear()
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def спросить(self, длина, expect=True, тело=b""):
+        """Шлёт заголовки (и, если велено, тело) и возвращает (код, отдано).
+
+        `отдано` — сколько байт тела мы успели отдать: в этом и вопрос.
+        """
+        s = socket.create_connection(self.srv.server_address, timeout=5)
+        s.settimeout(5)
+        шапка = ("POST /v1/ingest/audio?event=none HTTP/1.1\r\n"
+                 "Host: 127.0.0.1\r\n"
+                 "Authorization: Bearer %s\r\n"
+                 "Content-Type: application/octet-stream\r\n"
+                 "Content-Length: %d\r\n" % (self.токен, длина))
+        if expect:
+            шапка += "Expect: 100-continue\r\n"
+        s.sendall((шапка + "\r\n").encode())
+        отдано = 0
+        if not expect:
+            s.sendall(тело)
+            отдано = len(тело)
+        первая = b""
+        while b"\r\n" not in первая:
+            кусок = s.recv(256)
+            if not кусок:
+                break
+            первая += кусок
+        s.close()
+        код = int(первая.split()[1]) if len(первая.split()) > 1 else 0
+        return код, отдано
+
+    def test_занятое_устройство_отказывает_до_тела(self):
+        contextd._заливки[self.dev] = contextd.ЗАЛИВОК
+        код, отдано = self.спросить(64 << 20)
+        self.assertEqual(код, 503, "отказ пришёл не 503")
+        self.assertEqual(отдано, 0, "телефон всё-таки заплатил трафиком")
+        # место чужое, и проверка его не заняла: иначе четвёртая попытка
+        # сдвинула бы счётчик и место не вернулось бы никогда
+        self.assertEqual(contextd._заливки[self.dev], contextd.ЗАЛИВОК)
+
+    def test_слишком_большое_тело_отказывает_до_тела(self):
+        код, отдано = self.спросить(contextd.MAX_BODY + 1)
+        self.assertEqual((код, отдано), (413, 0))
+
+    def test_свободное_устройство_получает_сто(self):
+        """Счастливый путь не сломан: сервер разрешает слать."""
+        s = socket.create_connection(self.srv.server_address, timeout=5)
+        s.settimeout(5)
+        s.sendall(("POST /v1/ingest/audio?event=none HTTP/1.1\r\n"
+                   "Host: 127.0.0.1\r\nAuthorization: Bearer %s\r\n"
+                   "Content-Type: application/octet-stream\r\n"
+                   "Content-Length: 3\r\nExpect: 100-continue\r\n\r\n"
+                   % self.токен).encode())
+        первая = s.recv(64)
+        self.assertIn(b"100", первая.split(b"\r\n")[0], первая)
+        s.sendall(b"abc")
+        s.close()
+        # место вернулось: спросивший и уехавший не запирает устройство
+        self.assertNotIn(self.dev, contextd._заливки)
+
+    def test_без_expect_поведение_прежнее(self):
+        """Кто не спрашивал — платит как раньше, и код тот же."""
+        contextd._заливки[self.dev] = contextd.ЗАЛИВОК
+        код, отдано = self.спросить(64, expect=False, тело=b"a" * 64)
+        self.assertEqual(код, 503)
+        self.assertEqual(отдано, 64)

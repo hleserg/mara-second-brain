@@ -38,29 +38,37 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
         val api = Api(s.baseUrl, s.token)
         val журнал = Device.callLog(ctx, now - 7 * 24 * 3600_000L)
-        прогон(ctx, q, api, журнал, now)
+        var пауза = прогон(ctx, q, api, журнал, now)
 
         // Первый взгляд на файл готовым быть не может: сравнивать не с чем.
         // Без второго взгляда здесь запись после отбоя ждала бы четвертьчасовой
         // сверки, а руководство обещает минуту-две. Ждём тишину и смотрим ещё раз.
-        if (q.pending().any { it.state == JobState.NEW }) {
+        if (!пауза && q.pending().any { it.state == JobState.NEW }) {
             Thread.sleep(FileReady.QUIET_MS + 5_000)
             val потом = System.currentTimeMillis()
             Device.scan(ctx, s, потом - 7 * 24 * 3600_000L).forEach { q.seen(it, потом) }
-            прогон(ctx, q, api, журнал, потом)
+            пауза = прогон(ctx, q, api, журнал, потом)
         }
         сообщения(ctx, q, api, s, System.currentTimeMillis())
         s.lastContactMs = System.currentTimeMillis()
-        // Result.retry() тут не нужен: сетевые повторы уже размечены в очереди,
-        // а экспонента WorkManager на пустом прогоне только мешала бы.
-        return Result.success()
+        // Сетевые повторы размечены в очереди, и ради них Result.retry()
+        // не нужен. Нужен он ради 503: сервер просит подождать, а
+        // следующая сверка по расписанию — через четверть часа. Только
+        // этот возврат даёт ход экспоненте из `setBackoffCriteria` ниже:
+        // без него она была заведена, но не срабатывала ни разу.
+        return if (пауза) Result.retry() else Result.success()
     }
 
-    private fun прогон(ctx: Context, q: Queue, api: Api, журнал: List<CallLogEntry>, now: Long) {
+    /** true — сервер попросил подождать: прогон оборван, работу надо повторить. */
+    private fun прогон(ctx: Context, q: Queue, api: Api, журнал: List<CallLogEntry>,
+                       now: Long): Boolean {
         for (job in q.pending()) {
             if (!готов(q, job, now)) continue
-            if (!шаг(ctx, q, api, job, журнал, now)) break   // сеть легла — не долбим
+            val r = шаг(ctx, q, api, job, журнал, now) ?: continue
+            if (JobFlow.пауза(r)) return true
+            if (r.code == 0) break   // сеть легла — не долбим
         }
+        return false
     }
 
     /** Файл дописан? Решает Core, здесь только приметы из очереди. */
@@ -70,16 +78,16 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         return FileReady.ready(было, job.recording(), now - job.seenAtMs)
     }
 
-    /** Один шаг работы. false — сеть, дальше в этом прогоне идти незачем. */
+    /** Один шаг работы. null — в сервер не ходили, решать прогону нечего. */
     private fun шаг(ctx: Context, q: Queue, api: Api, job: Job,
-                    журнал: List<CallLogEntry>, now: Long): Boolean {
+                    журнал: List<CallLogEntry>, now: Long): ServerReply? {
         when (job.state) {
             JobState.NEW -> {
                 val sha = Device.sha256(ctx, job.recording())
-                    ?: return true.also { q.save(job.copy(state = JobState.FAILED,
+                    ?: return null.also { q.save(job.copy(state = JobState.FAILED,
                         error = "файл не читается"), now) }
                 q.save(job.copy(state = JobState.HASHED, sha256 = sha), now)
-                return true
+                return null
             }
             JobState.HASHED -> {
                 val звонок = CallLogMatcher.nearest(журнал, job.modifiedMs)
@@ -88,12 +96,12 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 val r = api.postEvent(body)
                 q.save(job.copy(state = JobFlow.next(job.state, r), eventId = r.eventId,
                     attempts = job.attempts + 1, error = ошибка(r)), now)
-                return r.code != 0
+                return r
             }
             JobState.POSTED -> {
                 // исчезнувший файл — это не «сети нет», повторять его бессмысленно
                 val поток = Device.open(ctx, job.recording())
-                    ?: return true.also { q.save(job.copy(state = JobState.FAILED,
+                    ?: return null.also { q.save(job.copy(state = JobState.FAILED,
                         error = "файл исчез"), now) }
                 val r = api.putAudio(job.eventId!!, job.sizeBytes) { поток }
                 val дальше = JobFlow.next(job.state, r)
@@ -103,9 +111,9 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                     sha256 = if (дальше == JobState.NEW) null else job.sha256,
                     error = ошибка(r)), now)
                 if (дальше == JobState.DONE) Settings(ctx).lastUploadMs = now
-                return r.code != 0
+                return r
             }
-            else -> return true
+            else -> return null
         }
     }
 

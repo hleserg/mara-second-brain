@@ -387,6 +387,31 @@ class CoreTest {
         assertEquals(JobState.FAILED, JobFlow.next(JobState.HASHED, ServerReply(415)))
     }
 
+    @Test
+    fun `503 останавливает прогон`() {
+        // Потолок потоков на устройство: следующая работа упрётся в тот же
+        // отказ, и перебор очереди до конца — это мегабайты трафика ради
+        // повторения одного и того же 503.
+        assertTrue(JobFlow.пауза(ServerReply(503)))
+    }
+
+    @Test
+    fun `ноль и прочие пятисотки прогон не останавливают`() {
+        // Ноль — «сети нет»: прогон обрывается и без паузы, а ждать сеть
+        // WorkManager умеет сам по условию сети. 500 — поломка на одной
+        // работе, из-за которой стоять всей очереди незачем.
+        assertFalse("сеть", JobFlow.пауза(ServerReply(0)))
+        assertFalse("поломка на одной работе", JobFlow.пауза(ServerReply(500)))
+        assertFalse(JobFlow.пауза(ServerReply(502)))
+    }
+
+    @Test
+    fun `успех и отказы паузой не считаются`() {
+        assertFalse(JobFlow.пауза(ServerReply(200, "call_1")))
+        assertFalse(JobFlow.пауза(ServerReply(413)))
+        assertFalse(JobFlow.пауза(ServerReply(401)))
+    }
+
     // ── сообщения: уведомления и SMS (спека 8–9) ──────────────────────────
 
     private val ув = NotificationParse.Seen(
