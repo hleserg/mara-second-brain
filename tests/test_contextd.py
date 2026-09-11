@@ -1,5 +1,5 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
-import contextlib, os, sys, io, json, hashlib, socket, struct
+import contextlib, os, sys, io, json, hashlib, socket, stat, struct
 import tempfile, threading, time, unittest, unittest.mock
 import urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timedelta
@@ -2283,6 +2283,15 @@ class ТестНюхСодержимого(unittest.TestCase):
         self.assertTrue(os.path.exists(карантин), os.listdir(каталог))
         with open(карантин, "rb") as fh:
             self.assertEqual(fh.read(), тело)
+        # Режим каталога, а не только файла. В карантине лежат записи, которые
+        # система не поняла, — то есть ровно то, что разбирать будет человек и
+        # больше никто. `chmod 0600` на самом файле стоит и покрыт, а каталог
+        # уезжал в мир одним символом (`0o700` → `0o755`) при зелёном гейте:
+        # круг 3 ревью PR #91, P2-1, мутация M9 не поймана ни одним из 127
+        # тестов.
+        self.assertEqual(
+            stat.S_IMODE(os.stat(os.path.dirname(карантин)).st_mode), 0o700,
+            "каталог карантина открыт шире владельца")
         self.assertEqual(oct(os.stat(карантин).st_mode & 0o777), "0o600")
         # в дерево звонков не попало ничего, и работы ASR не завелось
         self.assertFalse(os.path.exists(mi.blob_path(каталог, sha, "m4a")))
