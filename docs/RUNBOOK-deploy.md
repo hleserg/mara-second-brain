@@ -59,9 +59,14 @@ ssh doctor 'cd ~/mara-second-brain && git diff > ~/deploy-dirty-$(date +%s).patc
 
 ```bash
 ssh doctor 'cd ~/mara-second-brain
-  sha=$(git rev-parse origin/main); echo "цель: $sha"
-  git log --name-only --no-renames --pretty=format: $sha..HEAD | sort -u | sed "/^$/d"'
+  git rev-parse origin/main
+  git log --name-only --no-renames --pretty=format: origin/main..HEAD | sort -u | sed "/^$/d"'
 ```
+
+**Выписать sha в протокол и дальше подставлять его буквально.** Переменной
+shell тут не обойтись: каждый шаг — своя сессия `ssh`, и `sha=` из этой
+команды в следующей уже не существует. Пустая подстановка в `reset --hard`
+упадёт, но диагноз будет невнятный, а в `git diff` — соврёт молчанием.
 
 Второй вывод — **список путей, которые трогают локальные коммиты**, полученный
 командой, а не набранный руками. Он идёт в протокол: список из головы нельзя
@@ -73,7 +78,7 @@ ssh doctor 'cd ~/mara-second-brain
 
 ```bash
 ssh doctor 'cd ~/mara-second-brain
-  git diff --quiet $sha HEAD -- <пути из предыдущей команды>; echo rc=$?'
+  git diff --quiet <sha> HEAD -- <пути из предыдущей команды>; echo rc=$?'
 ```
 
 `rc=0` — расхождений нет, работа локальных коммитов уже в `main`. `rc=1` —
@@ -90,7 +95,8 @@ gh run list --commit <sha> --limit 5
 **Что несёт диапазон по схеме реестра:**
 
 ```bash
-ssh doctor 'cd ~/mara-second-brain && git diff <старый HEAD> '"'"'$sha'"'"' -- scripts/mara_ingest.py | grep -nE "^[+-].*(def connect|_ужать_ledger|alter table|create table|ЛЕДЖЕР)"'
+ssh doctor 'cd ~/mara-second-brain && git diff <старый HEAD> <sha> -- scripts/mara_ingest.py' \
+  | grep -nE '^[+-].*(def connect|_ужать_ledger|alter table|create table|ЛЕДЖЕР)'
 ```
 
 Непустой вывод значит, что выкат несёт миграцию реестра, и дальше идти
@@ -131,7 +137,7 @@ ssh doctor 'sudo systemctl stop contextd'
 ssh doctor 'cd ~/mara-second-brain
   git tag deploy-before-$(date +%Y%m%d-%H%M%S) $(git rev-parse HEAD) \
     && git checkout main -q \
-    && git reset --hard "$sha" \
+    && git reset --hard <sha> \
     && git rev-parse HEAD && date -Is'
 ```
 
