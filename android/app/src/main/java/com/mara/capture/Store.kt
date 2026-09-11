@@ -201,8 +201,6 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
             arrayOf(JobState.DONE.name, JobState.FAILED.name)
         ).use { if (it.moveToFirst()) it.getInt(0) else 0 }
 
-    fun latest(): Job? = pending().lastOrNull()
-
     /** Чужой токен вбили — все работы легли в FAILED. Поправили токен — поднимаем. */
     fun retryFailed(): Int {
         val db = writableDatabase

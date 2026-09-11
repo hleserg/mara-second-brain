@@ -100,7 +100,9 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 val sha = Device.sha256(ctx, job.recording())
                     ?: return null.also { q.save(job.copy(state = JobState.FAILED,
                         error = "файл не читается"), now) }
-                q.save(job.copy(state = JobState.HASHED, sha256 = sha), now)
+                // беду гасим здесь же: шаг удался, а несброшенная строка до
+                // четверти часа висела бы в «застряло» с чужой уже причиной
+                q.save(job.copy(state = JobState.HASHED, sha256 = sha, error = null), now)
                 return null
             }
             JobState.HASHED -> {
@@ -128,7 +130,12 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 // которое бросает **после** `q.save`, а строится оно через
                 // Keystore. Бросок откатил бы `DONE` в `POSTED` снимком,
                 // снятым до шага, и весь разговор уехал бы заново.
-                if (дальше == JobState.DONE) s.lastUploadMs = now
+                // `runCatching`, потому что сеттер шифрует значение синхронно
+                // (`EncryptedSharedPreferences`) и заворачивает беду Keystore в
+                // `SecurityException`. Метка времени для экрана не имеет права
+                // откатить `DONE` в `POSTED` снимком, снятым до шага, — иначе
+                // весь разговор уедет заново.
+                if (дальше == JobState.DONE) runCatching { s.lastUploadMs = now }
                 return r
             }
             else -> return null
