@@ -225,11 +225,26 @@ ssh doctor 'systemctl is-active contextd
 Рестарт рвёт заливки в полёте. Телефон повторит сам: 413 у него терминальный,
 а обрыв — нет.
 
-Расход после подъёма — числом:
+Расход **нового** процесса — числом:
 
 ```bash
-ssh doctor 'systemctl show contextd -p CPUUsageNSec -p MemoryPeak --value'
+ssh doctor 'systemctl show contextd -p CPUUsageNSec -p MemoryPeak'
 ```
+
+Прогон 2026-09-11, через час после подъёма: `CPUUsageNSec=1049349000` (1.05 с),
+`MemoryPeak=15429632` (14.7 МБ). На doctor `systemd 255 (255.4-1ubuntu8.17)`;
+`MemoryPeak` появился в systemd 254, и на более старой машине его в выводе
+просто не будет — это не ошибка выката.
+
+Расход **старого** процесса живёт в другом месте: systemd пишет его в журнал
+одной строкой в момент остановки, и `systemctl show` его уже не покажет.
+
+```bash
+ssh doctor 'journalctl -u contextd --no-pager | grep -E "Consumed .*CPU" | tail -3'
+```
+
+В прогоне: `Sep 11 04:19:26 … Consumed 1min 49.531s CPU time, 15.8M memory
+peak, 14.0M memory swap peak` — это итог процесса, который шёл с 05.09.
 
 ## 7. Чего этот ранбук НЕ делает
 
