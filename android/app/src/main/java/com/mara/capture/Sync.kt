@@ -38,7 +38,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
         val api = Api(s.baseUrl, s.token)
         val журнал = Device.callLog(ctx, now - 7 * 24 * 3600_000L)
-        var пауза = прогон(ctx, q, api, журнал, now)
+        var пауза = прогон(ctx, q, api, журнал, now, s)
 
         // Первый взгляд на файл готовым быть не может: сравнивать не с чем.
         // Без второго взгляда здесь запись после отбоя ждала бы четвертьчасовой
@@ -47,7 +47,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             Thread.sleep(FileReady.QUIET_MS + 5_000)
             val потом = System.currentTimeMillis()
             Device.scan(ctx, s, потом - 7 * 24 * 3600_000L).forEach { q.seen(it, потом) }
-            пауза = прогон(ctx, q, api, журнал, потом)
+            пауза = прогон(ctx, q, api, журнал, потом, s)
         }
         сообщения(ctx, q, api, s, System.currentTimeMillis())
         s.lastContactMs = System.currentTimeMillis()
@@ -63,7 +63,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
     /** true — сервер попросил подождать: прогон оборван, работу надо повторить. */
     private fun прогон(ctx: Context, q: Queue, api: Api, журнал: List<CallLogEntry>,
-                       now: Long): Boolean {
+                       now: Long, s: Settings): Boolean {
         for (job in q.pending()) {
             if (!готов(q, job, now)) continue
             // Одна работа не имеет права уронить весь прогон: из-за одной
@@ -71,7 +71,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             // здесь не выносится — это дело `JobFlow.послеСбоя`, и он же
             // объясняет, почему приговором тут был бы молчаливый `FAILED`.
             val r = try {
-                шаг(ctx, q, api, job, журнал, now)
+                шаг(ctx, q, api, job, журнал, now, s)
             } catch (e: Exception) {
                 // класс и начало сообщения, как в `Api.code`: без второго
                 // владелец придёт с «сдалось: 14» и без единой зацепки
@@ -94,7 +94,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
     /** Один шаг работы. null — в сервер не ходили, решать прогону нечего. */
     private fun шаг(ctx: Context, q: Queue, api: Api, job: Job,
-                    журнал: List<CallLogEntry>, now: Long): ServerReply? {
+                    журнал: List<CallLogEntry>, now: Long, s: Settings): ServerReply? {
         when (job.state) {
             JobState.NEW -> {
                 val sha = Device.sha256(ctx, job.recording())
@@ -124,7 +124,11 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 q.save(job.copy(state = дальше, attempts = job.attempts + 1,
                     sha256 = if (дальше == JobState.NEW) null else job.sha256,
                     error = ошибка(r)), now)
-                if (дальше == JobState.DONE) Settings(ctx).lastUploadMs = now
+                // `s`, а не `Settings(ctx)`: это единственное место в `шаг`,
+                // которое бросает **после** `q.save`, а строится оно через
+                // Keystore. Бросок откатил бы `DONE` в `POSTED` снимком,
+                // снятым до шага, и весь разговор уехал бы заново.
+                if (дальше == JobState.DONE) s.lastUploadMs = now
                 return r
             }
             else -> return null

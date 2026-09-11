@@ -40,8 +40,9 @@ class Api(private val base: String, private val token: String) {
      * утверждение «Api не бросает вовсе, оно отдаёт код 0» на нём не
      * держалось, а `SyncWorker` на это утверждение опирался.
      */
-    private fun соединение(path: String, method: String): HttpURLConnection? = try {
-        open(path, method, auth = true)
+    private fun соединение(path: String, method: String,
+                           auth: Boolean = true): HttpURLConnection? = try {
+        open(path, method, auth)
     } catch (e: Exception) {
         lastError = e.javaClass.simpleName + (e.message?.let { ": " + it.take(100) } ?: "")
         null
@@ -105,15 +106,15 @@ class Api(private val base: String, private val token: String) {
     }
 
     /** Самопроверка: сервер жив. Без токена — это единственный открытый путь. */
-    fun health(): Int = open("/healthz", "GET", auth = false).let { c ->
+    fun health(): Int = соединение("/healthz", "GET", auth = false)?.let { c ->
         try { code(c) } finally { c.disconnect() }
-    }
+    } ?: 0   // соединение не собралось — для зовущего это те же «сети нет»
 
     /**
      * Самопроверка: токен принят. 404 — принят (работы нет, и не должно быть),
      * 401 — не принят. Любое обращение двигает last_seen устройства на сервере.
      */
-    fun tokenOk(): Int = open("/v1/jobs/no-such-job", "GET", auth = true).let { c ->
+    fun tokenOk(): Int = соединение("/v1/jobs/no-such-job", "GET")?.let { c ->
         try { code(c) } finally { c.disconnect() }
-    }
+    } ?: 0
 }
