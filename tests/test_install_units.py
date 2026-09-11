@@ -176,12 +176,23 @@ class Установщик(unittest.TestCase):
         bin_ = os.path.join(self.tmp, "bin")
         self.шим(bin_, "id",
                  'case "${1:-}" in -u) echo 0;; -un) echo root;; *) exit 1;; esac\n')
-        env = {k: v for k, v in self.env.items()
-               if k not in ("USER_NAME", "STATE", "VENV_TDLIB")}
+        ТРИ = ("USER_NAME", "STATE", "VENV_TDLIB")
+        env = {k: v for k, v in self.env.items() if k not in ТРИ}
         for режим in ("--check", "--apply"):
             with self.subTest(режим=режим):
                 r = subprocess.run(["bash", УСТАНОВЩИК, режим], env=env,
                                    capture_output=True, text=True)
+                self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+                self.assertIn("под root/sudo не запускать", r.stderr)
+        # Половина просьбы — не просьба. Склейка `"$A$B$C"` пуста только когда
+        # пусты все три, и одной заданной переменной хватало бы, чтобы проехать
+        # с двумя остальными из /root. Поэтому каждая по отдельности.
+        for задана in ТРИ:
+            with self.subTest(задана=задана):
+                частично = dict(env)
+                частично[задана] = self.env[задана]
+                r = subprocess.run(["bash", УСТАНОВЩИК, "--apply"],
+                                   env=частично, capture_output=True, text=True)
                 self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
                 self.assertIn("под root/sudo не запускать", r.stderr)
         self.assertEqual(os.listdir(self.dest), [], "юнит всё-таки поставлен")
