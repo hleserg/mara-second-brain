@@ -297,6 +297,26 @@ def безопасный_ключ(k):
     return чисто[:32]
 
 
+def читаемый(путь):
+    """Путь из строки запроса — обратно в UTF-8.
+
+    CPython разбирает строку запроса как `str(self.raw_requestline,
+    "iso-8859-1")` (`http.server.BaseHTTPRequestHandler.parse_request`),
+    поэтому каждый байт UTF-8 становится отдельным символом latin-1, и в логе
+    вместо `/v1/контекст` владелец видит `/v1/ÐºÐ¾Ð½Ñ‚ÐµÐºÑ‚`: ни найти
+    запрос, ни понять, кто его прислал (#39).
+
+    Путь, который уже настоящая строка — так зовут тесты и внутренние
+    вызовы, — в latin-1 не кодируется, отдаём как есть. Байты, которые не
+    UTF-8, декодировать нечем — тоже как есть: лог не то место, где можно
+    падать.
+    """
+    try:
+        return путь.encode("iso-8859-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return путь
+
+
 def log_line(method, path, code, payload=None, adr=None):
     """Строка лога без единого байта содержимого (ТЗ §18)."""
     extra = ""
@@ -309,7 +329,8 @@ def log_line(method, path, code, payload=None, adr=None):
         extra = " keys=%s" % ",".join(имена) if имена else ""
     if adr:
         extra += " from=%s" % adr
-    return "%s %s %s -> %s%s" % (mi.now_iso(), method, path, code, extra)
+    return "%s %s %s -> %s%s" % (mi.now_iso(), method, читаемый(path), code,
+                                 extra)
 
 
 def heartbeat_lag(root, name):
