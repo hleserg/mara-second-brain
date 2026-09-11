@@ -452,6 +452,15 @@ class CoreTest {
     }
 
     @Test
+    fun `повтор считается по нормализованному тексту, а не по сырому`() {
+        val got = NotificationParse.messages(ув.copy(lines = listOf(
+            NotificationParse.Line("Анна Петрова", "ок  ок", начало),
+            NotificationParse.Line("Анна Петрова", "ок ок", начало))))
+        assertNotEquals("оба текста дают один ключ — в счёт они обязаны идти как одно",
+            got[0].id, got[1].id)
+    }
+
+    @Test
     fun `разные сообщения в одном уведомлении суффикса не получают`() {
         val got = NotificationParse.messages(ув.copy(lines = listOf(
             NotificationParse.Line("Анна Петрова", "ок", начало),
