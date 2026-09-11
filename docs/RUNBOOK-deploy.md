@@ -80,6 +80,12 @@ ssh doctor 'cd ~/mara-second-brain
 ошибки»), так что кавычек достаточно. Без них незаполненная дырка даёт не
 ошибку, а **зелёный протокол над невыкаченным деревом**.
 
+**Два исключения, где кавычек мало.** Проверка миграции в конце этого шага
+отдаёт `git` в конвейер, и `rc` там принадлежит `grep`, а не `git` — поэтому в
+ней стоит отдельный `echo "git rc=$?" >&2`. Шаг 5 достаёт путь из `ExecStart`, и
+пустая переменная там не ломает `git -C` вовсе — поэтому там `exit 1`, а не
+`echo rc=$?`. Оба места отмечены на месте.
+
 Второй вывод — **список путей, которые трогают локальные коммиты**, полученный
 командой, а не набранный руками. Он идёт в протокол: список из головы нельзя
 проверить, а опечатку в пути `git diff` не заметит (`git diff --stat A B --
@@ -101,15 +107,27 @@ ssh doctor 'cd ~/mara-second-brain
 но красный коммит мог попасть в `main` и до этого):
 
 ```bash
-gh run list --commit <sha> --limit 5
+gh run list --commit "<sha>" --limit 5
 ```
 
 **Что несёт диапазон по схеме реестра:**
 
 ```bash
-ssh doctor 'cd ~/mara-second-brain && git diff "<старый HEAD>" "<sha>" -- scripts/' \
-  | grep -nE '^[+-].*(def connect|_ужать_ledger|alter table|create table|rename to|drop table|drop column|user_version|ЛЕДЖЕР)'
+ssh doctor 'cd ~/mara-second-brain && git diff "<старый HEAD>" "<sha>" -- scripts/; echo "git rc=$?" >&2' \
+  | grep -inE '^[+-].*(def connect|_ужать_ledger|alter table|create table|rename to|drop table|drop column|user_version|ЛЕДЖЕР)'
 ```
+
+`echo "git rc=$?" >&2` здесь обязателен, и это исключение из таблицы выше.
+Конвейер отдаёт код **последней** команды, то есть `grep`, а `grep` без
+совпадений даёт `1` — тот же `1`, что и при «диапазон чист». Сломанный `git` от
+пустой дырки съедается конвейером целиком: `git diff "" "" -- scripts/ | grep …`
+и `git diff HEAD HEAD -- scripts/ | grep …` дают одинаковый пустой stdout и
+одинаковый `rc=1`, отличаясь только текстом на stderr. Это **единственная точка
+решения Г4 в документе**, и снимать её с пустоты stdout нельзя. Нашёл круг 3.
+
+`grep -inE`, а не `-nE`: расширение шаблона обосновано будущим кодом, а будущий
+код может написать `CREATE TABLE` и `PRAGMA user_version` заглавными. Сегодня
+все 19 совпадений в `scripts/*.py` — в нижнем регистре, `-i` бесплатен.
 
 Смотрим весь `scripts/`, а не только `mara_ingest.py`, и шаблон шире имён из
 сегодняшнего кода: помощник миграции, дописанный в тело `connect()`, не изменит
@@ -237,12 +255,26 @@ BatchMode=yes doctor 'sudo -n true'` → `rc=0`, tty для sudo здесь не
 ```bash
 ssh doctor 'cd ~/mara-second-brain
   d=$(systemctl cat contextd | sed -n "s#^ExecStart=[^ ]* \(.*\)/scripts/contextd\.py.*#\1#p")
-  [ "$(realpath "$d")" = "$(realpath ~/mara-second-brain)" ]; echo "юнит смотрит в этот checkout rc=$?"
+  [ -n "$d" ] || { echo "путь из ExecStart не извлёкся — СТОП"; exit 1; }
+  [ "$(realpath "$d")" = "$(realpath ~/mara-second-brain)" ] || { echo "юнит смотрит не в этот checkout — СТОП"; exit 1; }
+  echo "юнит смотрит в этот checkout"
   git -C "$d" rev-parse HEAD
-  python3 -c "import sys; sys.path.insert(0,\"scripts\")
+  python3 -c "import sys; sys.path.insert(0,\"$d/scripts\")
 import contextd, mara_ingest, contextd_reconcile
 print(\"импорт ок\", sys.version.split()[0])"'
 ```
+
+Три `exit 1` вместо трёх `echo rc=$?` — не стиль, а необходимость. `git -C ""
+rev-parse HEAD` **не ошибка**: пустой `-C` это no-op, git остаётся в текущем
+каталоге и печатает HEAD того дерева, куда сделан `cd`, то есть ровно то число,
+которое строка ниже требует сверить с `<sha>`. Проверено: `git -C "" rev-parse
+HEAD` → `rc=0` и валидный sha. Единственный вероятный отказ `sed` — пустой
+вывод, и он же единственный, которого `git -C` не замечает. Нашёл круг 3 ревью
+PR #88: правка круга 2 закрыла «зелёное число над невыкаченным деревом» в
+`reset` и завела его же в доказательстве нового кода.
+
+`sys.path` тоже берёт `$d`, а не `scripts` от текущего каталога: разойдись
+пути — импорт проверял бы не то дерево, чей HEAD только что доказывали.
 
 Первые две строки замыкают связку **числом, а не глазами**: путь берётся из
 `ExecStart` самого юнита, сравнивается с checkout, и `git -C` печатает HEAD
@@ -274,14 +306,20 @@ ssh doctor 'systemctl is-active contextd
   curl -s --retry 5 --retry-connrefused --retry-delay 1 \
        -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8788/metrics
   tr "\0" "\n" < /proc/$(systemctl show contextd -p MainPID --value)/cmdline \
-    | sed -n 2p | sed "s#^$HOME#~#"
+    | grep -m1 contextd.py | sed "s#^$HOME#~#"
   journalctl -u contextd -n 12 --no-pager | tail -8'
 ```
 
 `--retry-connrefused` — не перестраховка: `serve()` зовёт `mi.connect(root)`
-(`scripts/contextd.py:1103`) **до** `make_server`, а юнит `Type=simple`
+(`scripts/contextd.py:1103` на `5fe51de`; на `dca824f` та же строка) **до**
+`make_server`, а юнит `Type=simple`
 возвращает управление сразу на exec. curl из следующей сессии `ssh` успевает
 застать порт закрытым и печатает `000`, что слепой оператор прочтёт как отказ.
+
+Путь скрипта берётся `grep -m1 contextd.py`, а не `sed -n 2p`: второй аргумент
+интерпретатора — это скрипт только пока у `python3` нет флагов. Допишут в юнит
+`-u`, и вторая строка станет флагом. `MainPID=0` (сервис лежит) отказывает
+громко: `/proc/0/cmdline: No such file or directory`.
 
 Путь скрипта из `/proc/<pid>/cmdline` — последнее звено доказательства: живой
 процесс запущен из того дерева, чей HEAD напечатал шаг 5. `sed` заменяет
