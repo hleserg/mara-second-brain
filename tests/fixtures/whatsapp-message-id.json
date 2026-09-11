@@ -5,5 +5,6 @@
   "text": "  Купи   хлеб\nи молоко ",
   "at_ms": 1788347100000,
   "source_id": "035dddf64d7dd2d065cfb6c164188681d433fe6daad27b662ccba72e2696ec80",
-  "_note": "ключ = sha256(package|chat|sender|text'|floor(at_ms/60000)); text' — trim и схлопнутые ASCII-пробелы, NBSP не трогаем. Сверяют CoreTest (Kotlin) и tests/test_whatsapp_import.py"
+  "source_id_repeat": "aa7447ad8f45f6fb91f29393559d48d5c680b0227054d832975b278d05680bcb",
+  "_note": "ключ = sha256(package|chat|sender|text'|floor(at_ms/60000)); text' — trim и схлопнутые ASCII-пробелы, NBSP не трогаем. Повтор того же сообщения в ту же минуту внутри одной пачки берёт source_id_repeat = sha256(та же строка|#N), N с единицы; у первого суффикса нет, поэтому уже разосланные ключи не меняются. Сверяют CoreTest (Kotlin) и tests/test_whatsapp_import.py"
 }

@@ -14,12 +14,24 @@ import whatsapp_import as w  # noqa: E402
 МСК = datetime.timezone(datetime.timedelta(hours=3))
 
 
+def ев_ms(e):
+    """at_ms события — из его же iso: пересчёт руками разошёлся бы с разбором."""
+    return int(datetime.datetime.fromisoformat(e["occurred_at"]).timestamp()) * 1000
+
+
 class Ключ(unittest.TestCase):
     def test_совпадает_с_фиксом_который_проверяет_kotlin(self):
         with open(os.path.join(ROOT, "tests", "fixtures", "whatsapp-message-id.json"), encoding="utf-8") as fh:
             f = json.load(fh)
         self.assertEqual(f["source_id"],
                          w.message_id(f["package"], f["chat"], f["sender"], f["text"], f["at_ms"]))
+
+    def test_повтор_в_ту_же_минуту_берёт_свой_ключ(self):
+        with open(os.path.join(ROOT, "tests", "fixtures", "whatsapp-message-id.json"), encoding="utf-8") as fh:
+            f = json.load(fh)
+        а = [f["package"], f["chat"], f["sender"], f["text"], f["at_ms"]]
+        self.assertEqual(f["source_id"], w.message_id(*а, n=0), "нулевой повтор — старый ключ")
+        self.assertEqual(f["source_id_repeat"], w.message_id(*а, n=1))
 
     def test_пробелы_схлопываются_nbsp_нет(self):
         a = w.message_id("p", "c", "s", " a \n\t b ", 0)
@@ -74,6 +86,18 @@ class События(unittest.TestCase):
         self.assertTrue(ev[1]["payload"]["outgoing"])
         self.assertEqual(ev[1]["payload"]["sender_name"], "", "своё — без имени, как ответ из шторки на телефоне")
         self.assertEqual(len(ev[0]["source_id"]), 64)
+
+    def test_два_одинаковых_подряд_дают_два_события(self):
+        msgs = w.parse(["02.09.26, 14:05 - Анна: ок", "02.09.26, 14:05 - Анна: ок"], tz=МСК)
+        ев = list(w.events(msgs, "Анна"))
+        self.assertEqual(2, len(ев))
+        self.assertNotEqual(ев[0]["source_id"], ев[1]["source_id"])
+        self.assertEqual(w.message_id(w.ПАКЕТ, "Анна", "Анна", "ок", ев_ms(ев[0])), ев[0]["source_id"],
+                         "первому суффикс не приписан — иначе переедут уже разосланные ключи")
+
+    def test_одиночное_сообщение_суффикса_не_получает(self):
+        ев = list(w.events(w.parse(["02.09.26, 14:05 - Анна: ок"], tz=МСК), "Анна"))
+        self.assertEqual(w.message_id(w.ПАКЕТ, "Анна", "Анна", "ок", ев_ms(ев[0])), ев[0]["source_id"])
 
     def test_личный_чат_когда_кроме_меня_один(self):
         ev = list(w.events(self.msgs[:2], "Анна", me="Сергей"))

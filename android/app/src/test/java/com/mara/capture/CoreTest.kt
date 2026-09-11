@@ -431,6 +431,35 @@ class CoreTest {
     }
 
     @Test
+    fun `повтор в ту же минуту берёт свой ключ, первый — прежний`() {
+        val f = JSONObject(fixture("whatsapp-message-id.json").readText())
+        val а = arrayOf(f.getString("package"), f.getString("chat"), f.getString("sender"))
+        assertEquals(f.getString("source_id"),
+            MessageId.of(а[0], а[1], а[2], f.getString("text"), f.getLong("at_ms"), 0))
+        assertEquals("суффикс повтора разошёлся с scripts/whatsapp_import.py",
+            f.getString("source_id_repeat"),
+            MessageId.of(а[0], а[1], а[2], f.getString("text"), f.getLong("at_ms"), 1))
+    }
+
+    @Test
+    fun `два одинаковых сообщения в одном уведомлении — два события`() {
+        val строка = NotificationParse.Line("Анна Петрова", "ок", начало)
+        val got = NotificationParse.messages(ув.copy(lines = listOf(строка, строка)))
+        assertEquals(2, got.size)
+        assertNotEquals(got[0].id, got[1].id)
+        assertEquals("первому суффикс не приписан — иначе переедут разосланные ключи",
+            MessageId.of("com.whatsapp", "Анна Петрова", "Анна Петрова", "ок", начало), got[0].id)
+    }
+
+    @Test
+    fun `разные сообщения в одном уведомлении суффикса не получают`() {
+        val got = NotificationParse.messages(ув.copy(lines = listOf(
+            NotificationParse.Line("Анна Петрова", "ок", начало),
+            NotificationParse.Line("Анна Петрова", "два", начало))))
+        assertEquals(MessageId.of("com.whatsapp", "Анна Петрова", "Анна Петрова", "два", начало), got[1].id)
+    }
+
+    @Test
     fun `сводка группы и постоянное уведомление — не сообщения`() {
         assertTrue(NotificationParse.messages(ув.copy(summary = true)).isEmpty())
         assertTrue(NotificationParse.messages(ув.copy(ongoing = true)).isEmpty())

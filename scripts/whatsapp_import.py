@@ -44,9 +44,19 @@ def normalize(text):
     return ПРОБЕЛЫ.sub(" ", text.strip(КРАЯ))
 
 
-def message_id(pkg, chat, sender, text, at_ms):
-    return hashlib.sha256(("%s|%s|%s|%s|%d" % (
-        pkg, chat, sender, normalize(text), at_ms // 60000)).encode("utf-8")).hexdigest()
+def _основа(pkg, chat, sender, text, at_ms):
+    """Строка под хеш. Повторы считаются по ней же, а не по сырому тексту:
+    «a  b» и «a b» дают один ключ, значит и в счёт должны идти как одно."""
+    return "%s|%s|%s|%s|%d" % (pkg, chat, sender, normalize(text), at_ms // 60000)
+
+
+def message_id(pkg, chat, sender, text, at_ms, n=0):
+    """`n` — какой это по счёту повтор в пачке. У первого суффикса нет: иначе
+    сменились бы все уже разосланные ключи и вся история переехала бы заново.
+    Пятиполевая строка кончается цифрами минуты, шестиполевая — на `#N`,
+    так что столкнуться они не могут даже при `|` внутри имени чата."""
+    о = _основа(pkg, chat, sender, text, at_ms)
+    return hashlib.sha256((о if n == 0 else "%s|#%d" % (о, n)).encode("utf-8")).hexdigest()
 
 
 # ── разбор экспорта ────────────────────────────────────────────────────────
@@ -132,11 +142,15 @@ def events(msgs, chat, me=None):
     но ответов из шторки и так единицы."""
     другие = {m["sender"] for m in msgs if m["sender"] != me}
     группа = len(другие) > (1 if me else 2)
+    счёт = {}
     for m in msgs:
         own = me is not None and m["sender"] == me
         sender = "" if own else m["sender"]
+        о = _основа(ПАКЕТ, chat, sender, m["text"], m["at_ms"])
+        n = счёт.get(о, 0)
+        счёт[о] = n + 1
         yield {"source": "whatsapp",
-               "source_id": message_id(ПАКЕТ, chat, sender, m["text"], m["at_ms"]),
+               "source_id": message_id(ПАКЕТ, chat, sender, m["text"], m["at_ms"], n),
                "occurred_at": m["iso"], "classification": "personal",
                "payload": {"package": ПАКЕТ, "chat_title": chat,
                            "chat_type": "group" if группа else "private",
@@ -179,6 +193,8 @@ def self_check():
     f = json.load(open(os.path.join(root, "tests", "fixtures", "whatsapp-message-id.json"), encoding="utf-8"))
     assert message_id(f["package"], f["chat"], f["sender"], f["text"], f["at_ms"]) == f["source_id"], \
         "ключ разошёлся с фиксом — Core.kt перестанет сходиться"
+    assert message_id(f["package"], f["chat"], f["sender"], f["text"], f["at_ms"], 1) \
+        == f["source_id_repeat"], "суффикс повтора разошёлся с фиксом — Core.kt не сойдётся"
     assert normalize("  a \n\t b ") == "a b" and normalize("a b") == "a b"
 
     tz = datetime.timezone(datetime.timedelta(hours=3))
@@ -210,6 +226,12 @@ def self_check():
     двое = list(events(parse(ru[:3], tz=tz), "Анна Петрова"))
     assert двое[0]["payload"]["chat_type"] == "private", "без --me двое пишущих — это личный чат"
     assert list(events(parse(ru, tz=tz), "Семья"))[0]["payload"]["chat_type"] == "group"
+
+    два = list(events(parse(["02.09.26, 14:05 - Анна: ок",
+                             "02.09.26, 14:05 - Анна: ок"], tz=tz), "Анна"))
+    assert два[0]["source_id"] != два[1]["source_id"], "повтор — второе событие, а не дубль"
+    assert два[0]["source_id"] == message_id(ПАКЕТ, "Анна", "Анна", "ок", 1788347100000), \
+        "первому суффикс не приписан"
 
     assert chat_name("/x/Чат WhatsApp с Анна Петрова.txt") == "Анна Петрова"
     assert chat_name("WhatsApp Chat with Anna.zip") == "Anna"
