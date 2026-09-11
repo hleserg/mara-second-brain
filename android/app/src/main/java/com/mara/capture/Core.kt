@@ -336,8 +336,13 @@ object MessageId {
      * contextd не отсеет дубль. Минута — целым числом эпохи, чтобы зона и
      * формат не могли разойтись. Пин — tests/fixtures/whatsapp-message-id.json.
      */
-    fun of(pkg: String, chat: String, sender: String, text: String, atMs: Long): String =
-        Sha.hex("$pkg|$chat|$sender|${normalize(text)}|${Math.floorDiv(atMs, 60_000L)}")
+    fun of(pkg: String, chat: String, sender: String, text: String, atMs: Long, n: Int = 0): String =
+        основа(pkg, chat, sender, text, atMs).let { Sha.hex(if (n == 0) it else "$it|#$n") }
+
+    /** Строка под хеш. Повторы считаются по ней же, а не по сырому тексту:
+     *  «a  b» и «a b» дают один ключ, значит и в счёт идут как одно. */
+    fun основа(pkg: String, chat: String, sender: String, text: String, atMs: Long): String =
+        "$pkg|$chat|$sender|${normalize(text)}|${Math.floorDiv(atMs, 60_000L)}"
 
     /** Не `_id` провайдера: dedupe_key на сервере без устройства, и `_id=5`
      *  нового телефона столкнулся бы с `_id=5` старого. */
@@ -382,10 +387,15 @@ object NotificationParse {
             else -> emptyList()
         }
         val keyHash = Sha.hex(n.key)
+        val счёт = HashMap<String, Int>()
         return lines.filter { !it.text.isNullOrBlank() }.map { l ->
             val own = l.sender == null
             val sender = if (own) "" else l.sender!!.trim()
-            Message(source, MessageId.of(n.pkg, chat, sender, l.text!!, l.atMs), chat, sender,
+            // Два одинаковых сообщения в одну минуту — два события, а не дубль (P0-7).
+            // Суффикс получает только второе и дальше: у первого ключ обязан остаться
+            // прежним, иначе вся уже разосланная история переедет заново.
+            val повтор = счёт.merge(MessageId.основа(n.pkg, chat, sender, l.text!!, l.atMs), 1, Int::plus)!! - 1
+            Message(source, MessageId.of(n.pkg, chat, sender, l.text, l.atMs, повтор), chat, sender,
                 l.text.trim(), l.atMs, group = n.group, outgoing = own,
                 via = "notification", pkg = n.pkg, keyHash = keyHash)
         }
