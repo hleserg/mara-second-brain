@@ -215,7 +215,7 @@ retention в 04:40, `context_pack` в 04:25, `gmail_ingest --sync` каждые
 | 6 | Локальное извлечение через Ollama | confirmed | `scripts/call_extract.py:26-27`, `qwen3.5:9b`, схема отдаётся как `format` | 6 тестов + живой (пропускается) |
 | 7 | Карточки conversations и commitments | confirmed | `scripts/call_project.py:100-196` | 19 тестов `tests/test_call_project.py` |
 | 8 | Post-call digest | confirmed | `scripts/call_digest.py`, шаблон без модели, Telegram Bot API + строка в `digests` | 10 тестов |
-| 9 | Retention и reconciliation | confirmed | `scripts/contextd_reconcile.py` (девять проверок в `run()`), `scripts/blob_retention.py` (аудио живёт `MARA_AUDIO_DAYS`, по умолчанию 90 дней) | 21 тест `tests/test_retention.py` |
+| 9 | Retention и reconciliation | confirmed | `scripts/contextd_reconcile.py` (14 проверок в `run()`, каждая под заставой), `scripts/blob_retention.py` (аудио живёт `MARA_AUDIO_DAYS`, по умолчанию 90 дней) | 21 тест `tests/test_retention.py` |
 | 10 | Android-приложение Mara Capture | confirmed | `android/app/src/main/**`: activity, `BootReceiver`, `PhoneStateReceiver`, `MessageListener`, `SyncWorker` каждые 15 мин | 32 JVM-теста `CoreTest.kt` |
 | 11 | Личный Telegram через TDLib | confirmed | `scripts/tdlib_ingest.py`: как пользователь, боты и каналы пропускаются, состояние в `$MARA_BLOBS/tdlib`, демон не запрашивает код входа | 7 тестов |
 | 12 | Личный Gmail | confirmed | `scripts/gmail_ingest.py`: loopback + PKCE, `gmail.readonly`, в токен-файле только `refresh_token` и адрес, режим 0600 | 13 тестов |

@@ -1,7 +1,7 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
 import contextlib, os, sys, io, json, hashlib, socket, struct
 import tempfile, threading, time, unittest
-import urllib.request, urllib.error
+import urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
@@ -1621,6 +1621,59 @@ class ТестЛогОтказов(unittest.TestCase):
         self.assertEqual(код, 400)
         self.assertEqual(len(строки), 1, строки)
         self.assertNotIn("секретная фраза", строки[0])
+
+    def test_кириллица_в_пути_читается_в_логе(self):
+        """#39: путь с кириллицей уезжал в лог мохнатой абракадаброй.
+
+        `BaseHTTPRequestHandler.parse_request` делает
+        `str(self.raw_requestline, "iso-8859-1")`, то есть каждый байт UTF-8
+        становится отдельным символом latin-1. Владелец видит в логе
+        `/v1/ÐºÐ¾Ð½Ñ‚ÐµÐºÑ‚` и не может ни найти запрос, ни понять, кто его
+        прислал. Строку лога чиним в одном месте — в `log_line`.
+        """
+        _, срв, _ = self.поднять()
+        # urllib сам процентно кодирует путь, и мохнатости не выходит. Мохнатит
+        # именно сырой байт UTF-8 в строке запроса — так шлёт curl и любой
+        # клиент, который не кодирует путь. Поэтому здесь голый сокет.
+        лог = io.StringIO()
+        запрос = ("GET /v1/контекст HTTP/1.1\r\nHost: x\r\n"
+                  "Connection: close\r\n\r\n").encode("utf-8")
+        with contextlib.redirect_stdout(лог):
+            с = socket.create_connection(("127.0.0.1", срв.server_address[1]), 10)
+            try:
+                с.sendall(запрос)
+                ответ = с.recv(64)
+            finally:
+                с.close()
+            time.sleep(0.2)
+        self.assertIn(b"401", ответ, ответ)     # без токена, но строка уже есть
+        строки = [l for l in лог.getvalue().splitlines() if "-> 401" in l]
+        self.assertEqual(len(строки), 1, лог.getvalue())
+        self.assertIn("/v1/контекст", строки[0])
+
+    def test_log_line_возвращает_кириллицу_из_latin1(self):
+        """Тот же дефект без сервера: единица работы — сама `log_line`."""
+        битый = "/v1/контекст".encode("utf-8").decode("iso-8859-1")
+        строка = contextd.log_line("GET", битый, 404)
+        self.assertIn("/v1/контекст", строка)
+        self.assertNotIn(битый, строка)
+
+    def test_log_line_не_ломает_путь_без_кириллицы(self):
+        """Латиница и проценты остаются собой, а не проходят через декодер."""
+        for путь in ("/v1/ingest/event", "/v1/blob/%20a", "/v1/a?b=c"):
+            with self.subTest(путь=путь):
+                self.assertIn(путь, contextd.log_line("GET", путь, 200))
+
+    def test_log_line_держит_непереводимый_путь(self):
+        """Байты, которые не UTF-8, декодировать нечем — падать нельзя.
+
+        И не молчать: путь обязан доехать до строки как есть. Одного `-> 404`
+        мало — он проходил бы и на пустом пути, и на мусоре (круг 1 ревью
+        PR #90, п.10).
+        """
+        строка = contextd.log_line("GET", "/v1/\xff\xfe", 404)
+        self.assertIn("-> 404", строка)
+        self.assertIn("/v1/\xff\xfe", строка, "непереведённый путь — всё ещё путь")
 
     def test_403_пишет_имена_полей(self):
         """`keys=` — единственная подсказка, что именно прислало устройство."""
