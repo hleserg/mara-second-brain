@@ -133,7 +133,7 @@ class ИмяEnvФайла(unittest.TestCase):
     """MARA_ENV_FILE сюда не относится, и это надо держать проверенным.
 
     Раньше имя было одно на два разных файла: `~/.config/mara/env` (адреса и
-    ключ OpenRouter, владелец — sergey) и `/etc/mara/contextd.env` (токен
+    ключ OpenRouter, владелец — логин юнита) и `/etc/mara/contextd.env` (токен
     телеграма, читается ещё и systemd через EnvironmentFile=). Увести в сторону
     один значило увести оба, а увести только нужный было нельзя вовсе.
 

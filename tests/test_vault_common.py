@@ -281,7 +281,7 @@ class ТестАдресовВРепозитории(unittest.TestCase):
         # отдельной строкой: search() встал бы на первом совпадении и
         # ветка 172.16/12 осталась бы непроверенной (круг 5 ревью)
         self.assertTrue(self.СЕТЬ.search("ssh 172.20.0.9"))
-        self.assertTrue(self.СЕТЬ.search("scp sergey@203.0.113.9:/tmp"))
+        self.assertTrue(self.СЕТЬ.search("scp op@203.0.113.9:/tmp"))
         self.assertIsNone(self.СЕТЬ.search("сервис на 203.0.113.9"))
         self.assertTrue(self.СЕТЬ.search("привязка 100.127.9.9"))
         self.assertTrue(self.СЕТЬ.search("http://100.64.1.2:8788/healthz"))

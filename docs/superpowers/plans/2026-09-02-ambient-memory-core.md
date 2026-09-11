@@ -41,7 +41,7 @@
 | `scripts/contextd_reconcile.py` | Часовая сверка инвариантов, отчёт и постановка недостающих работ. |
 | `tests/` | `unittest`, фикстуры, включая приватную карточку для теста на утечку в облако. |
 | `scripts/run-tests.sh` | Гоняет `unittest` и все `--self-check`. |
-| `install/contextd.service` | systemd-юнит для doctor. |
+| `install/contextd.service.in` | шаблон systemd-юнита для doctor; собирается `install/install-units.sh` (issue #89). |
 | `install/com.mara.relay.plist` | launchd-агент релея на маке. |
 
 Правки существующих: `scripts/queue-worker.py` (защита `cloud_allowed`), `scripts/daily-page.py` и `scripts/daily-summary.py` (видеть новые папки), `scripts/entity-link.py` (человек из контакта), `.gitignore`, `README.md`.
@@ -465,7 +465,7 @@ git commit -m "приём: дедуп по содержимому, аренда 
 ### Задача 3: демон contextd
 
 **Файлы:**
-- Создать: `scripts/contextd.py`, `tests/test_contextd.py`, `install/contextd.service`
+- Создать: `scripts/contextd.py`, `tests/test_contextd.py`, `install/contextd.service.in`
 - Изменить: `.gitignore`
 
 **Интерфейсы:**
@@ -693,17 +693,17 @@ def metrics(con):
 - [x] **Шаг 5: юнит systemd и .gitignore**
 
 ```bash
-cat > install/contextd.service <<'EOF'
+cat > install/contextd.service.in <<'EOF'
 [Unit]
 Description=Mara contextd: приём звонков и сообщений
 After=network-online.target
 
 [Service]
 Type=simple
-User=sergey
+User=@USER@
 Environment=MARA_BLOBS=/srv/mara-blobs
 EnvironmentFile=-/etc/mara/contextd.env
-ExecStart=/usr/bin/python3 /home/sergey/mara-second-brain/scripts/contextd.py --serve
+ExecStart=/usr/bin/python3 @REPO@/scripts/contextd.py --serve
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -718,7 +718,7 @@ printf '%s\n' '' '# приёмник ambient memory: база и блобы жи
 - [x] **Шаг 6: коммит**
 
 ```bash
-git add scripts/contextd.py tests/test_contextd.py install/contextd.service .gitignore
+git add scripts/contextd.py tests/test_contextd.py install/contextd.service.in .gitignore
 git commit -m "contextd: приём, аренда работ, конвейер и метрики без единой зависимости"
 ```
 
@@ -1474,9 +1474,11 @@ class Сверка(unittest.TestCase):
 - [x] **Шаг 3: крон на doctor**
 
 ```bash
+# сегодня этим занят install/install-cron.sh (P0-5): он же собирает строки из
+# шаблона, делает копию и сверяет принятое. Исторически строки ставились руками:
 ( crontab -l; \
-  echo '7 * * * * /usr/bin/python3 /home/sergey/mara-second-brain/scripts/contextd_reconcile.py >> /home/sergey/.local/state/mara/reconcile.log 2>&1 # mara-second-brain'; \
-  echo '40 4 * * * /usr/bin/python3 /home/sergey/mara-second-brain/scripts/blob_retention.py >> /home/sergey/.local/state/mara/retention.log 2>&1 # mara-second-brain' \
+  echo '7 * * * * /usr/bin/python3 /home/<логин>/mara-second-brain/scripts/contextd_reconcile.py >> /home/<логин>/.local/state/mara/reconcile.log 2>&1 # mara-second-brain'; \
+  echo '40 4 * * * /usr/bin/python3 /home/<логин>/mara-second-brain/scripts/blob_retention.py >> /home/<логин>/.local/state/mara/retention.log 2>&1 # mara-second-brain' \
 ) | crontab -
 ```
 
@@ -1499,7 +1501,7 @@ git commit -m "ретеншен и сверка: удаление идемпот
 - [x] **Шаг 1: подготовка doctor**
 
 ```bash
-ssh doctor 'sudo apt-get install -y ffmpeg && sudo install -d -m 700 -o sergey -g sergey /srv/mara-blobs && sudo install -d -m 755 /etc/mara'
+ssh doctor 'sudo apt-get install -y ffmpeg && sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /srv/mara-blobs && sudo install -d -m 755 /etc/mara'
 ```
 
 - [x] **Шаг 2: секреты вне репозитория**
@@ -1509,7 +1511,9 @@ ssh doctor 'sudo apt-get install -y ffmpeg && sudo install -d -m 700 -o sergey -
 - [x] **Шаг 3: сервис**
 
 ```bash
-ssh doctor 'sudo cp ~/mara-second-brain/install/contextd.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now contextd && systemctl is-active contextd'
+# сегодня юнит собирается из шаблона: `install/install-units.sh --apply` (issue #89).
+# Исторически здесь копировался готовый файл из репозитория.
+ssh doctor 'cd ~/mara-second-brain && install/install-units.sh --apply && sudo systemctl enable --now contextd && systemctl is-active contextd'
 ```
 
 - [x] **Шаг 4: ключ и релей на маке**

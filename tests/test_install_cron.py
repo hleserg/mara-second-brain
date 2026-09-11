@@ -8,7 +8,7 @@ import os, sys, stat, shutil, tempfile, subprocess, unittest
 
 КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 УСТАНОВЩИК = os.path.join(КОРЕНЬ, "install", "install-cron.sh")
-ЧУЖОЕ = "*/2 * * * * /home/sergey/scripts/mc-healthcheck.sh"
+ЧУЖОЕ = "*/2 * * * * /home/op/scripts/mc-healthcheck.sh"
 РУКАМИ = "40 4 * * * /usr/bin/python3 %s/scripts/blob_retention.py" % КОРЕНЬ
 
 
@@ -123,7 +123,7 @@ class Установщик(unittest.TestCase):
         with open(os.path.join(self.tmp, "bin", "crontab"), "w") as fh:
             fh.write("#!/usr/bin/env bash\n"
                      'if [ "${1:-}" = "-l" ]; then\n'
-                     '  echo "You (sergey) are not allowed to use this program" >&2\n'
+                     '  echo "You (op) are not allowed to use this program" >&2\n'
                      "  exit 1\n"
                      "fi\n"
                      'cp "$1" "%s"\n' % self.таблица)
@@ -143,7 +143,7 @@ class Установщик(unittest.TestCase):
                      'f="%s"\n'
                      'if [ "${1:-}" = "-l" ]; then\n'
                      '  [ -s "$f" ] && { cat "$f"; exit 0; }\n'
-                     '  echo "no crontab for sergey" >&2; exit 1\n'
+                     '  echo "no crontab for op" >&2; exit 1\n'
                      "fi\n"
                      # приняли не то, что отправили: ровно тот случай, ради
                      # которого откат и написан

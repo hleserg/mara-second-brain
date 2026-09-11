@@ -5,11 +5,11 @@ Wants=contextd.service
 
 [Service]
 Type=simple
-User=sergey
+User=@USER@
 Environment=MARA_BLOBS=/srv/mara-blobs
 # api_id/api_hash с my.telegram.org и токен устройства tdlib — только здесь
 EnvironmentFile=/etc/mara/tdlib.env
-ExecStart=/home/sergey/.local/share/mara/venv-tdlib/bin/python /home/sergey/mara-second-brain/scripts/tdlib_ingest.py --serve
+ExecStart=@VENV_TDLIB@ @REPO@/scripts/tdlib_ingest.py --serve
 # без входа демон выходит с кодом 2; минута между попытками, чтобы это не был шторм
 Restart=always
 RestartSec=60

@@ -8,7 +8,7 @@ contextd тем же контрактом, что и звонки. Правки 
 source_id, и правка с тем же ключом просто пропала бы.
 
     tdlib_ingest.py --login        # один раз, в терминале: телефон, код, пароль
-    tdlib_ingest.py --serve        # демон (install/tdlib-ingest.service)
+    tdlib_ingest.py --serve        # демон (install/tdlib-ingest.service.in)
     tdlib_ingest.py --catch-up     # разовый догон по истории
     tdlib_ingest.py --self-check
 
