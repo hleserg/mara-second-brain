@@ -66,7 +66,17 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                        now: Long): Boolean {
         for (job in q.pending()) {
             if (!готов(q, job, now)) continue
-            val r = шаг(ctx, q, api, job, журнал, now) ?: continue
+            // Сетевое `Api` не бросает вовсе — оно отдаёт код 0. Значит сюда
+            // долетает только местная беда с одним файлом, и глушить ею весь
+            // прогон нельзя: из-за одной пропавшей записи не уезжала ни
+            // остальная очередь, ни сообщения.
+            val r = try {
+                шаг(ctx, q, api, job, журнал, now)
+            } catch (e: Exception) {
+                q.save(job.copy(state = JobState.FAILED,
+                    error = "сбой: " + e.javaClass.simpleName), now)
+                continue
+            } ?: continue
             if (JobFlow.пауза(r)) return true
             if (r.code == 0) break   // сеть легла — не долбим
         }

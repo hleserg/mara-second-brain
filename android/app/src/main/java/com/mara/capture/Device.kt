@@ -86,8 +86,15 @@ object Device {
     fun scan(ctx: Context, s: Settings, sinceMs: Long = 0): List<Recording> =
         (mediaStore(ctx, sinceMs) + folder(ctx, s.folderUri)).distinctBy { it.id }
 
-    fun open(ctx: Context, rec: Recording): InputStream? =
+    /** null — файла больше нет. `openInputStream` на исчезнувшей строке
+     *  MediaStore не возвращает null, а бросает: без этого перехвата
+     *  объявленный тут `InputStream?` был обещанием, которого никто не
+     *  выполнял, а обработка null у обоих зовущих — мёртвым кодом. */
+    fun open(ctx: Context, rec: Recording): InputStream? = try {
         ctx.contentResolver.openInputStream(Uri.parse(rec.id))
+    } catch (e: Exception) {
+        null
+    }
 
     fun sha256(ctx: Context, rec: Recording): String? {
         val md = MessageDigest.getInstance("SHA-256")
