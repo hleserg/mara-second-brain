@@ -34,13 +34,26 @@ class Api(private val base: String, private val token: String) {
         0
     }
 
+    /**
+     * null — соединение не собралось. `open()` звали вне `try`, и бросок
+     * `URL()`/`openConnection()`/`requestMethod` уходил мимо всех перехватов:
+     * утверждение «Api не бросает вовсе, оно отдаёт код 0» на нём не
+     * держалось, а `SyncWorker` на это утверждение опирался.
+     */
+    private fun соединение(path: String, method: String): HttpURLConnection? = try {
+        open(path, method, auth = true)
+    } catch (e: Exception) {
+        lastError = e.javaClass.simpleName + (e.message?.let { ": " + it.take(100) } ?: "")
+        null
+    }
+
     fun postEvent(body: JSONObject) = post("/v1/ingest/event", body)
 
     /** Сообщения — тем же путём, что Telegram с doctor'а. */
     fun postMessage(body: JSONObject) = post("/v1/ingest/message", body)
 
     private fun post(path: String, body: JSONObject): ServerReply {
-        val c = open(path, "POST", auth = true)
+        val c = соединение(path, "POST") ?: return ServerReply(0)
         return try {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
@@ -68,7 +81,8 @@ class Api(private val base: String, private val token: String) {
      * пишет тело как раньше.
      */
     fun putAudio(eventId: String, bytes: Long, body: () -> InputStream): ServerReply {
-        val c = open("/v1/ingest/audio?event=$eventId", "POST", auth = true)
+        val c = соединение("/v1/ingest/audio?event=$eventId", "POST")
+            ?: return ServerReply(0, eventId)
         return try {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/octet-stream")

@@ -370,6 +370,41 @@ class CoreTest {
         assertEquals(JobState.HASHED, JobFlow.next(JobState.HASHED, ServerReply(503)))
     }
 
+    private fun работа(state: JobState = JobState.POSTED, attempts: Int = 0) =
+        Job("j1", "2026-09-11 20-00 Аня.m4a", 1024L, 1_788_000_000_000L,
+            state, attempts)
+
+    @Test
+    fun `местный сбой не хоронит работу молча`() {
+        // `FAILED` тут почти терминален: `Store.pending()` его не отдаёт, а
+        // поднимает работу только `retryFailed()` при пересохранении токена.
+        // Отозванное на минуту разрешение не имеет права стоить разговора.
+        val было = работа(JobState.POSTED, attempts = 3)
+        val стало = JobFlow.послеСбоя(было, "SecurityException: нет доступа")
+        assertEquals(JobState.POSTED, стало.state)
+        assertEquals(4, стало.attempts)
+        assertEquals("SecurityException: нет доступа", стало.error)
+    }
+
+    @Test
+    fun `местный сбой не сбрасывает уже посчитанное`() {
+        // Мутант «вернуть job как есть» проходит первую проверку состояния,
+        // но теряет счёт попыток и беду; мутант «обнулить sha256» отправил бы
+        // запись считаться заново на каждой отозванной секунде разрешения.
+        val было = работа(JobState.POSTED).copy(sha256 = "abc", eventId = "call_1")
+        val стало = JobFlow.послеСбоя(было, "IOException")
+        assertEquals("abc", стало.sha256)
+        assertEquals("call_1", стало.eventId)
+        assertEquals(1, стало.attempts)
+    }
+
+    @Test
+    fun `местный сбой на любом состоянии оставляет его прежним`() {
+        for (s in listOf(JobState.NEW, JobState.HASHED, JobState.POSTED))
+            assertEquals("состояние $s не должно меняться от местного сбоя",
+                s, JobFlow.послеСбоя(работа(s), "беда").state)
+    }
+
     @Test
     fun `плохой токен повтором не лечится`() {
         assertEquals(JobState.FAILED, JobFlow.next(JobState.HASHED, ServerReply(401)))

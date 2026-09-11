@@ -66,15 +66,17 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                        now: Long): Boolean {
         for (job in q.pending()) {
             if (!готов(q, job, now)) continue
-            // Сетевое `Api` не бросает вовсе — оно отдаёт код 0. Значит сюда
-            // долетает только местная беда с одним файлом, и глушить ею весь
-            // прогон нельзя: из-за одной пропавшей записи не уезжала ни
-            // остальная очередь, ни сообщения.
+            // Одна работа не имеет права уронить весь прогон: из-за одной
+            // записи не уезжала ни остальная очередь, ни сообщения. Приговор
+            // здесь не выносится — это дело `JobFlow.послеСбоя`, и он же
+            // объясняет, почему приговором тут был бы молчаливый `FAILED`.
             val r = try {
                 шаг(ctx, q, api, job, журнал, now)
             } catch (e: Exception) {
-                q.save(job.copy(state = JobState.FAILED,
-                    error = "сбой: " + e.javaClass.simpleName), now)
+                // класс и начало сообщения, как в `Api.code`: без второго
+                // владелец придёт с «сдалось: 14» и без единой зацепки
+                q.save(JobFlow.послеСбоя(job, e.javaClass.simpleName +
+                    (e.message?.let { ": " + it.take(100) } ?: "")), now)
                 continue
             } ?: continue
             if (JobFlow.пауза(r)) return true

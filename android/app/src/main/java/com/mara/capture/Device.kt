@@ -11,6 +11,7 @@ import android.provider.ContactsContract
 import android.provider.Telephony
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
+import java.io.FileNotFoundException
 import java.io.InputStream
 import java.security.MessageDigest
 
@@ -89,10 +90,18 @@ object Device {
     /** null — файла больше нет. `openInputStream` на исчезнувшей строке
      *  MediaStore не возвращает null, а бросает: без этого перехвата
      *  объявленный тут `InputStream?` был обещанием, которого никто не
-     *  выполнял, а обработка null у обоих зовущих — мёртвым кодом. */
+     *  выполнял, а обработка null у обоих зовущих — мёртвым кодом.
+     *
+     *  Ловим ровно `FileNotFoundException` и ничего шире. Оба зовущих на null
+     *  отвечают `FAILED`, а `FAILED` в этой очереди почти терминален:
+     *  `Store.pending()` его не отдаёт, и поднимает работу только
+     *  `retryFailed()` при пересохранении токена. Отозванное на минуту
+     *  `READ_MEDIA_AUDIO` или отвалившийся SAF-грант дают `SecurityException`
+     *  при целом файле — похоронить из-за него разговор значило бы потерять
+     *  его молча. Пусть летит выше, там повторят. */
     fun open(ctx: Context, rec: Recording): InputStream? = try {
         ctx.contentResolver.openInputStream(Uri.parse(rec.id))
-    } catch (e: Exception) {
+    } catch (e: FileNotFoundException) {
         null
     }
 
