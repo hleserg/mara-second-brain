@@ -1195,7 +1195,7 @@ OpenTelemetry допустим как стандарт инструментир�
 
 ### 17.6. Governance
 
-- [ ] Branch protection и обязательный CI включены.
+- [x] Branch protection и обязательный CI включены. *(2026-09-11: `required_status_checks: python, kotlin`, force-push и удаление ветки запрещены.)*
 - [ ] Работа идёт PR-only.
 - [ ] Каждый data model/migration/security/recorder PR получил независимый review Codex.
 - [ ] Максимум три субагента по умолчанию и budget guardrails зафиксированы в contributor/agent docs.
