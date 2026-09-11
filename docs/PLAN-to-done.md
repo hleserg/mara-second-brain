@@ -188,7 +188,7 @@ doctor только когда: doctor на `origin/main` **и** свежий `c
   `~/mara-usage-agent-os` @ `2464f7f`, рядом второе — `~/mara-codex-usage`.
   Это чужая работа в процессе, а не брошенная ветка; ни её, ни оба дерева
   не удалять. Решение — мешок М5 п.14. Размер S.
-- [x] **Т0.5 Branch protection.** *(2026-09-11: включена мной через API, 403 не случилось; `required_status_checks: python, kotlin`, `allow_force_pushes: false`, `allow_deletions: false`, `enforce_admins: false`. Пункт мешка М1 снят.)* Теперь возможна: репозиторий публичный,
+- [x] **Т0.5 Branch protection.** *(2026-09-11: включена мной через API, 403 не случилось; `required_status_checks: python, kotlin`, `allow_force_pushes: false`, `allow_deletions: false`, `enforce_admins: false`. Пункт мешка М1 снят. Работы CI при этом переименованы в `python` и `kotlin`: русское `name:` подменяло контекст, и PR застревал в BLOCKED навсегда.)* Теперь возможна: репозиторий публичный,
   защиты и рулсетов нет (`gh api repos/:owner/:repo/rulesets` пуст).
   Требуемые проверки: `python`, `kotlin`. Первый пункт §17.6.
   **Кто: агент** — пробую сам через `gh api -X PUT

@@ -1,7 +1,10 @@
-# Гейт на каждый PR. Пока владелец не включил branch protection, зелёная галочка
-# здесь ничего не запрещает, а только показывает. Репозиторий с 2026-09-03
-# публичный, так что защита ветки доступна на Free плане — включат, и этот же
-# файл станет обязательной проверкой без правок.
+# Гейт на каждый PR. С 2026-09-11 защита ветки `main` включена и обе работы
+# ниже — обязательные проверки.
+#
+# Имена работ — `python` и `kotlin` — это и есть контексты обязательных
+# проверок в настройках защиты. Русское название через `name:` их переименовало
+# бы, и защита ждала бы контекста, которого никто не присылает: PR навсегда
+# застревает в BLOCKED. Поэтому здесь id работы и её имя совпадают.
 name: гейт
 
 on:
@@ -10,8 +13,7 @@ on:
     branches: [main]
 
 jobs:
-  python:
-    name: unittest и self-check
+  python:                             # unittest и self-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +31,7 @@ jobs:
           MARA_VAULT: ${{ runner.temp }}/vault
         run: bash scripts/run-tests.sh
 
-  android:
-    name: Kotlin-ядро приложения
+  kotlin:                             # Kotlin-ядро приложения
     runs-on: ubuntu-latest            # aapt2 и d8 есть только под x86_64
     steps:
       - uses: actions/checkout@v4
