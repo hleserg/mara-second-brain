@@ -407,6 +407,12 @@ def metrics(con, root=None, vault=None):
         # посчитал; порча в канале даёт то же, но не на каждом звонке
         ("mara_ingest_stale_events",
          q("select count(*) from events where state='stale'")),
+        # карантин: содержимое дошло целиком, хеш сошёлся, а на звук не похоже
+        # (§6.2). Растёт — значит диктофон настроен не на тот формат либо
+        # присылает не он. Файл лежит в `quarantine/`, ретеншен его не тронет:
+        # строки в `blobs` у него нет
+        ("mara_ingest_quarantined_events",
+         q("select count(*) from events where state='quarantined'")),
         ("mara_tdlib_lag_seconds", heartbeat_lag(root, "tdlib")),
         ("mara_gmail_lag_seconds", heartbeat_lag(root, "gmail")),
         ("mara_whatsapp_lag_seconds", source_lag(con, "whatsapp")),
@@ -903,6 +909,60 @@ def need_blob(con, root, event_id, sha256):
     return False
 
 
+# Сколько байт начала хватает всем видам ниже: `ftyp` стоит со смещения 4,
+# бренд — с 8, а `WAVE` у RIFF — с 8; двенадцати достаточно, и читать больше
+# незачем.
+НЮХ = 12
+
+
+def нюх(начало):
+    """Вид и mime по содержимому, или (None, None). §6.2: «расширению файла
+    доверять нельзя».
+
+    Расширение приходит из тела запроса и до сих пор было единственным словом о
+    типе: `mi.blob_path` чистил его ради безопасности пути, а в `blobs.mime`
+    уезжала литеральная строка `"audio"`. То есть html-страница, zip или
+    оборванный текст ложились в дерево звонков под именем `.m4a` и получали
+    работу ASR, где падал уже ffmpeg — на шаг позже и без диагноза.
+
+    Список закрытый: что здесь не названо, уходит в карантин. Он собран по тому,
+    что умеет выдавать ACR Phone (§7.2) и читает ffmpeg, которым режет
+    `call_asr.py`. Расширять его — правка одного этого места.
+    """
+    b = bytes(начало)
+    if b[4:8] == b"ftyp":
+        # ISO-BMFF: m4a, mp4, 3gp и mov различаются брендом, а не расширением.
+        # ponytail: бренд не сверяется со списком — любой ISO-BMFF принимается
+        # как mp4-контейнер, потому что ffmpeg их все и читает. Понадобится
+        # различать видео от звука — это здесь и по бренду.
+        return ("3gp", "audio/3gpp") if b[8:11] == b"3gp" else ("m4a", "audio/mp4")
+    if b[:3] == b"ID3" or (b[:1] == b"\xff" and b[1:2] in (b"\xfb", b"\xf3", b"\xf2")):
+        # ponytail: sync-слово без разбора кадра. Первые два байта mp3 без ID3
+        # совпадают с началом многих потоков; кадр целиком тут не разбираем,
+        # цена ошибки — принятый мусор, а не пропущенная запись.
+        return "mp3", "audio/mpeg"
+    if b[:4] == b"RIFF" and b[8:12] == b"WAVE":
+        return "wav", "audio/wav"
+    if b[:4] == b"OggS":
+        return "ogg", "audio/ogg"
+    if b[:4] == b"fLaC":
+        return "flac", "audio/flac"
+    if b[:5] == b"#!AMR":
+        return "amr", "audio/amr"
+    return None, None
+
+
+def карантин_путь(root, sha256, ext):
+    """Куда ложится непонятое содержимое (§6.2). Дерево плоское и без года:
+    карантин разбирает человек, а ищет он по хешу из ответа, не по месяцу.
+
+    Имя берётся из `mi.blob_path`, чтобы чистка расширения была та же самая и
+    в одном месте: `ext` тут всё ещё сырое поле из тела запроса.
+    """
+    return os.path.join(root, "quarantine",
+                        os.path.basename(mi.blob_path(root, sha256, ext)))
+
+
 def ingest_audio(con, root, event_id, поток, n=None):
     """Блоб на диск с проверкой содержимого. Хеш не сошёлся — не успех (ТЗ §20).
 
@@ -953,7 +1013,26 @@ def ingest_audio(con, root, event_id, поток, n=None):
             con.execute("update events set state='stale' "
                         "where id=? and state='new'", (event_id,))
             return 409, {"error": "хеш не сошёлся", "expected": want, "got": got}
+        with open(tmp, "rb") as fh:
+            голова = fh.read(НЮХ)
+        вид, mime = нюх(голова)
         os.chmod(tmp, 0o600)
+        if вид is None:
+            # 415 у телефона терминальный (`Core.kt:280` — `else -> FAILED`), и
+            # это здесь правильный исход: повтор того же файла даст тот же
+            # результат. Локальную копию телефон не удаляет ни в одном
+            # состоянии, так что запись не теряется.
+            карантин = карантин_путь(root, want, ext)
+            os.makedirs(os.path.dirname(карантин), mode=0o700, exist_ok=True)
+            os.replace(tmp, карантин)
+            con.execute("update events set state='quarantined' "
+                        "where id=? and state in ('new','stale')", (event_id,))
+            return 415, {"error": "содержимое не похоже ни на один принимаемый вид",
+                         "declared_ext": ext, "head": голова[:4].hex()}
+        # путь — по содержимому, а не по заявленному расширению: каталог тот же
+        # (год и месяц), меняется только расширение в имени, поэтому replace
+        # остаётся внутри каталога и атомарным
+        path = mi.blob_path(root, want, вид)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -962,7 +1041,7 @@ def ingest_audio(con, root, event_id, поток, n=None):
     # повод обнулять pin и audio_until уже лежащей строки
     con.execute("insert or ignore into blobs(sha256,path,bytes,mime,created,audio_until)"
                 " values(?,?,?,?,?,?)",
-                (want, path, размер, "audio", mi.now_iso(), audio_until()))
+                (want, path, размер, mime, mi.now_iso(), audio_until()))
     finish_stored(con, root, event_id)
     return 200, {"event_id": event_id, "blob_sha256": want, "bytes": размер}
 

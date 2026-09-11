@@ -375,6 +375,18 @@ class CoreTest {
         assertEquals(JobState.FAILED, JobFlow.next(JobState.HASHED, ServerReply(401)))
     }
 
+    @Test
+    fun `415 терминален — сервер не принял содержимое`() {
+        // Сервер сверяет содержимое со списком видов (ТЗ §6.2) и непонятое
+        // кладёт в карантин, отвечая 415. Повтор даст то же самое: файл не
+        // изменится. Эта строка держит контракт, на который опирается сервер, —
+        // разреши тут повтор, и телефон будет лить один и тот же файл в
+        // карантин до конца батареи. Локальную копию `FAILED` не удаляет: её
+        // разбирает владелец через мастер.
+        assertEquals(JobState.FAILED, JobFlow.next(JobState.POSTED, ServerReply(415)))
+        assertEquals(JobState.FAILED, JobFlow.next(JobState.HASHED, ServerReply(415)))
+    }
+
     // ── сообщения: уведомления и SMS (спека 8–9) ──────────────────────────
 
     private val ув = NotificationParse.Seen(

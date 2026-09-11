@@ -9,6 +9,26 @@ import mara_ingest as mi
 import contextd
 
 
+def звук(хвост=b"", вид="wav"):
+    """Байты с настоящим заголовком контейнера.
+
+    С нюхом содержимого (§6.2, Т3.2) строка «это как бы аудио» перестала быть
+    аудио: приём сверяет начало файла с закрытым списком видов и непонятое
+    кладёт в карантин. Тесты, которым нужен успешный приём, обязаны присылать
+    то, что приём принимает.
+    """
+    головы = {
+        "wav": lambda t: b"RIFF" + struct.pack("<I", 36 + len(t)) + b"WAVE" + t,
+        "m4a": lambda t: struct.pack(">I", 24) + b"ftypM4A " + b"\x00" * 8 + t,
+        "3gp": lambda t: struct.pack(">I", 24) + b"ftyp3gp4" + b"\x00" * 8 + t,
+        "mp3": lambda t: b"ID3\x03\x00\x00\x00\x00\x00\x00" + t,
+        "ogg": lambda t: b"OggS\x00\x02" + t,
+        "flac": lambda t: b"fLaC\x00\x00" + t,
+        "amr": lambda t: b"#!AMR\n" + t,
+    }
+    return головы[вид](хвост)
+
+
 class Api(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -85,7 +105,7 @@ class Api(unittest.TestCase):
         навсегда: блоб на диске, расшифровки нет. Ловит это теперь и сверка
         (`запись_без_расшифровки`), но чинить дыру страховкой вместо одного
         слова в `where` — не дело."""
-        тело = "это аудио дошло со второго раза".encode("utf-8")
+        тело = звук("это аудио дошло со второго раза".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         _, r = self.post("/v1/ingest/event", {
             "kind": "call", "source": "phone", "source_id": "брошено-2",
@@ -106,7 +126,7 @@ class Api(unittest.TestCase):
             (eid,)).fetchone()[0], 1, "расшифровка должна встать в очередь")
 
     def test_правильный_блоб_принимается_и_ставит_работу(self):
-        body = "это как бы аудио".encode("utf-8")
+        body = звук("это как бы аудио".encode("utf-8"))
         sha = hashlib.sha256(body).hexdigest()
         _, r = self.post("/v1/ingest/event", {
             "kind": "call", "source": "phone", "source_id": "c4",
@@ -369,7 +389,7 @@ class Api(unittest.TestCase):
                         "блоба нет в базе — повтор обязан просить его снова")
 
     def test_после_загрузки_повтор_блоб_не_просит(self):
-        тело = "аудио которое доехало".encode("utf-8")
+        тело = звук("аудио которое доехало".encode("utf-8"))
         ev, r = self.звонок("n1-ok", тело)
         self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
                   raw=True, ctype="application/octet-stream")
@@ -379,7 +399,7 @@ class Api(unittest.TestCase):
     def test_вычищенный_ретеншеном_блоб_заново_не_просим(self):
         """Ретеншен удалил аудио по сроку (ТЗ §5). Повторная загрузка вернула бы
         удалённое намеренно, поэтому просить блоб нельзя."""
-        тело = "старое аудио".encode("utf-8")
+        тело = звук("старое аудио".encode("utf-8"))
         ev, r = self.звонок("n1-purged", тело)
         self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
                   raw=True, ctype="application/octet-stream")
@@ -392,7 +412,7 @@ class Api(unittest.TestCase):
         """Демон упал между записью блоба и переводом события в stored. Сегодня
         такое событие навсегда остаётся `new` без работы ASR: повтор с телефона
         видит дубль и уходит. Повтор обязан довести событие до конца."""
-        тело = "аудио после падения".encode("utf-8")
+        тело = звук("аудио после падения".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         ev, r = self.звонок("n1-crash", тело)
         self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
@@ -408,7 +428,7 @@ class Api(unittest.TestCase):
                          "ровно одна работа ASR, а не вторая на каждый повтор")
 
     def test_загрузка_блоба_дважды_не_плодит_работу(self):
-        тело = "аудио дважды".encode("utf-8")
+        тело = звук("аудио дважды".encode("utf-8"))
         ev, r = self.звонок("n1-twice", тело)
         for _ in range(2):
             code, _ = self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
@@ -421,7 +441,7 @@ class Api(unittest.TestCase):
         """N12. Два события с одним аудио льют его одновременно. На общем
         ".part" второй писатель усекает файл первого, и os.replace публикует
         склейку — либо падает, если сосед уже унёс временный файл."""
-        тело = ("параллель " * 4096).encode("utf-8")
+        тело = звук(("параллель " * 4096).encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         _, a = self.звонок("n12-a", тело)
         _, b = self.звонок("n12-b", тело)
@@ -450,7 +470,7 @@ class Api(unittest.TestCase):
         """N5. Путь блоба считается от даты загрузки. Августовская запись,
         долитая в сентябре, по вычисленному сегодня пути не находится, и
         повторная загрузка перезаписала бы строку вместе с pin и audio_until."""
-        тело = "аудио из прошлого месяца".encode("utf-8")
+        тело = звук("аудио из прошлого месяца".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         ev, r = self.звонок("n5", тело)
         self.post("/v1/ingest/audio?event=" + r["event_id"], тело,
@@ -690,7 +710,7 @@ class ТестПоРевьюГраницы(unittest.TestCase):
         каталог = tempfile.mkdtemp()
         mi.ROOT = каталог
         con = mi.connect(каталог)
-        сырьё = b"x" * (contextd.КУСОК + 7)
+        сырьё = звук(b"x" * (contextd.КУСОК + 7), "m4a")
         sha = hashlib.sha256(сырьё).hexdigest()
         eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
                                     "source_id": "дубль",
@@ -824,7 +844,7 @@ class ТестРазмерТела(unittest.TestCase):
         dir = tempfile.mkdtemp()
         mi.ROOT = dir
         con = mi.connect(dir)
-        сырьё = os.urandom(contextd.КУСОК + 12345)
+        сырьё = звук(os.urandom(contextd.КУСОК + 12345), "m4a")
         sha = hashlib.sha256(сырьё).hexdigest()
         eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
                                     "source_id": "поток",
@@ -1097,7 +1117,7 @@ class ТестКривойДлины(unittest.TestCase):
         каталог = tempfile.mkdtemp()
         mi.ROOT = каталог
         con = mi.connect(каталог)
-        сырьё = os.urandom(contextd.КУСОК + 100)
+        сырьё = звук(os.urandom(contextd.КУСОК + 100), "m4a")
         sha = hashlib.sha256(сырьё).hexdigest()
         eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
                                     "source_id": "обрыв",
@@ -1416,7 +1436,7 @@ class ТестScopes(unittest.TestCase):
 
     def test_дозагрузка_аудио_тоже_под_allowlist(self):
         """ADR-0009 ждёт отлуп на первом `audio` у устройства без разрешения."""
-        тело = "как бы аудио".encode("utf-8")
+        тело = звук("как бы аудио".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         eid = self.звонок("a1", тело)
         contextd.set_scopes(self.con, self.dev, ["message"])
@@ -1431,7 +1451,7 @@ class ТестScopes(unittest.TestCase):
 
     def test_своё_событие_дозагружается(self):
         """Обратная сторона: разрешённый вид дозагрузке не мешает."""
-        тело = "свой звонок".encode("utf-8")
+        тело = звук("свой звонок".encode("utf-8"))
         eid = self.звонок("a3", тело)
         код, _ = self.залить(eid, тело)
         self.assertEqual(код, 200)
@@ -1446,7 +1466,7 @@ class ТестScopes(unittest.TestCase):
         доехали бы никогда: `Core.kt:137` считает 403 терминальным, и
         `retryFailed()` упирался бы в тот же 403.
         """
-        тело = "звонок из прошлой жизни".encode("utf-8")
+        тело = звук("звонок из прошлой жизни".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         старый = self.звонок("a4", тело)
         новый_dev, новый = contextd.pair(self.con, "телефон переставили")
@@ -1487,7 +1507,7 @@ class ТестScopes(unittest.TestCase):
         дедуплицировался в неё, и дозагрузка проверяла сохранённый `message`
         против телефонного списка — 403, для клиента терминальный.
         """
-        тело = "звонок, на который позарились".encode("utf-8")
+        тело = звук("звонок, на который позарились".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         _, чужой = contextd.pair(self.con, "ноутбук")
         код, ответ = self.отправить(
@@ -1504,7 +1524,7 @@ class ТестScopes(unittest.TestCase):
 
     def test_кривой_хеш_и_расширение_не_уводят_запись_из_дерева(self):
         """`sha256` и `ext` приходят из тела и попадают в путь файла."""
-        тело = "аудио".encode("utf-8")
+        тело = звук("аудио".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         код, ответ = self.отправить("/v1/ingest/event", {
             "kind": "call", "source": "phone", "source_id": "b1",
@@ -1532,6 +1552,11 @@ class ТестScopes(unittest.TestCase):
         путь = self.con.execute("select path from blobs where sha256=?",
                                 (sha,)).fetchone()["path"]
         self.assertTrue(путь.startswith(os.path.join(self.dir, "calls")), путь)
+        # С нюхом содержимого (Т3.2) заявленное расширение в путь не попадает
+        # вовсе: `ext` из тела остаётся подсказкой, а имя файла даёт нюх.
+        # Чистка в `blob_path` от этого не лишняя — она держит путь временного
+        # файла, который создаётся до нюха.
+        self.assertTrue(путь.endswith(".wav"), путь)
 
     def test_присланный_dedupe_key_не_принимается(self):
         """Ключ дедупа считает сервер: иначе чужое событие можно похоронить.
@@ -1541,7 +1566,7 @@ class ТестScopes(unittest.TestCase):
         дозагрузка отвечала «событие без аудио» (400) — для клиента это
         терминально (`Core.kt`), звонок пропадал молча.
         """
-        тело = "звонок, который хотели похоронить".encode("utf-8")
+        тело = звук("звонок, который хотели похоронить".encode("utf-8"))
         sha = hashlib.sha256(тело).hexdigest()
         _, чужой = contextd.pair(self.con, "ноутбук")
         req = urllib.request.Request(
@@ -1921,7 +1946,7 @@ class ТестПределЗаливок(unittest.TestCase):
     def test_вторая_заливка_с_того_же_устройства_получает_503(self):
         con, срв, токен = self.поднять()
         _, токен2 = contextd.pair(con, "телефон-2")
-        а, б, в = os.urandom(4096), os.urandom(4096), os.urandom(4096)
+        а, б, в = (звук(os.urandom(4096), "m4a") for _ in range(3))
         eid_а, eid_б = self.событие(con, а), self.событие(con, б)
         eid_в = self.событие(con, в)
         было = contextd.ЗАЛИВОК
@@ -2103,7 +2128,7 @@ class ТестОбрывНеТрейсбек(unittest.TestCase):
         """
         срв, токен = self.поднять()
         con = mi.connect(mi.ROOT)
-        сырьё = os.urandom(4096)
+        сырьё = звук(os.urandom(4096), "m4a")
         sha = hashlib.sha256(сырьё).hexdigest()
         eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
                                     "source_id": sha,
@@ -2163,6 +2188,179 @@ class ТестОбрывНеТрейсбек(unittest.TestCase):
                 срв.handle_error(None, ("127.0.0.1", 1))
         self.assertIn("Traceback", ошибки.getvalue())
         self.assertIn("проба", ошибки.getvalue())
+
+class ТестНюхСодержимого(unittest.TestCase):
+    """Список разрешённых видов и нюх содержимого (ТЗ §6.2, Т3.2).
+
+    §6.2 требует MIME allowlist и content sniffing: «расширению файла доверять
+    нельзя». До этого расширение из тела запроса было единственным словом о
+    типе — `mi.blob_path` чистил его ради безопасности пути, а в `blobs.mime`
+    уезжала литеральная строка `"audio"`. Html-страница, zip или оборванный
+    текст ложились в дерево звонков под именем `.m4a`, получали работу ASR и
+    роняли уже ffmpeg — на шаг позже и без диагноза.
+    """
+
+    def стенд(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        return каталог, con
+
+    def событие(self, con, тело, ext="m4a", sid="нюх"):
+        sha = hashlib.sha256(тело).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": sid,
+                                    "blob": {"sha256": sha, "bytes": len(тело),
+                                             "ext": ext}})
+        return eid, sha
+
+    def test_нюх_узнаёт_каждый_допущенный_вид(self):
+        ожидаем = {"wav": "audio/wav", "m4a": "audio/mp4", "3gp": "audio/3gpp",
+                   "mp3": "audio/mpeg", "ogg": "audio/ogg", "flac": "audio/flac",
+                   "amr": "audio/amr"}
+        for вид, mime in ожидаем.items():
+            with self.subTest(вид=вид):
+                self.assertEqual(contextd.нюх(звук(b"\x00" * 64, вид)),
+                                 (вид, mime))
+
+    def test_нюх_узнаёт_mp3_без_id3(self):
+        """Поток без тега начинается sync-словом кадра, а не с `ID3`."""
+        for первые in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+            with self.subTest(начало=первые.hex()):
+                self.assertEqual(contextd.нюх(первые + b"\x90" + b"\x00" * 9),
+                                 ("mp3", "audio/mpeg"))
+
+    def test_нюх_не_узнаёт_не_звук(self):
+        for проба in (b"<html><body>err", b"PK\x03\x04" + b"\x00" * 8,
+                      b"\x7fELF" + b"\x00" * 8, b"just text!!!", b"",
+                      b"RIFF" + b"\x00" * 4 + b"AVI ", b"ftypM4A "):
+            with self.subTest(проба=проба[:8]):
+                self.assertEqual(contextd.нюх(проба), (None, None))
+
+    def test_настоящий_mime_вместо_литерала_audio(self):
+        каталог, con = self.стенд()
+        тело = звук("aac-подобное".encode("utf-8"), "m4a")
+        eid, sha = self.событие(con, тело)
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                       len(тело))
+        self.assertEqual(код, 200)
+        self.assertEqual(con.execute("select mime from blobs where sha256=?",
+                                     (sha,)).fetchone()["mime"], "audio/mp4",
+                         "в blobs.mime уезжала литеральная строка audio")
+
+    def test_расширение_врёт_а_путь_по_содержимому(self):
+        """Телефон объявил mp3, прислал m4a. Путь — по содержимому."""
+        каталог, con = self.стенд()
+        тело = звук("на самом деле mp4".encode("utf-8"), "m4a")
+        eid, sha = self.событие(con, тело, ext="mp3")
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                       len(тело))
+        self.assertEqual(код, 200)
+        путь = con.execute("select path from blobs where sha256=?",
+                           (sha,)).fetchone()["path"]
+        self.assertEqual(путь, mi.blob_path(каталог, sha, "m4a"))
+        self.assertTrue(os.path.exists(путь))
+        self.assertFalse(os.path.exists(mi.blob_path(каталог, sha, "mp3")))
+
+    def test_не_звук_уходит_в_карантин_с_415(self):
+        каталог, con = self.стенд()
+        тело = b"<html><head><title>502 Bad Gateway</title></head>" * 4
+        eid, sha = self.событие(con, тело)
+        код, ответ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                           len(тело))
+        self.assertEqual(код, 415, "415 у телефона терминальный (Core.kt:280)")
+        self.assertEqual(ответ["declared_ext"], "m4a")
+        self.assertEqual(ответ["head"], тело[:4].hex())
+        # файл сохранён: это единственная копия того, что телефон считал
+        # записью звонка, и разбирать её человеку
+        карантин = os.path.join(каталог, "quarantine", "%s.m4a" % sha)
+        self.assertTrue(os.path.exists(карантин), os.listdir(каталог))
+        with open(карантин, "rb") as fh:
+            self.assertEqual(fh.read(), тело)
+        self.assertEqual(oct(os.stat(карантин).st_mode & 0o777), "0o600")
+        # в дерево звонков не попало ничего, и работы ASR не завелось
+        self.assertFalse(os.path.exists(mi.blob_path(каталог, sha, "m4a")))
+        self.assertIsNone(con.execute("select 1 from blobs where sha256=?",
+                                      (sha,)).fetchone())
+        self.assertIsNone(con.execute(
+            "select 1 from jobs where event_id=?", (eid,)).fetchone(),
+            "непринятое содержимое не повод занимать GPU")
+        self.assertEqual(con.execute("select state from events where id=?",
+                                     (eid,)).fetchone()["state"], "quarantined")
+
+    def test_карантин_не_оставляет_part(self):
+        каталог, con = self.стенд()
+        тело = b"not audio at all"
+        eid, sha = self.событие(con, тело)
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело), len(тело))
+        каталог_блоба = os.path.dirname(mi.blob_path(каталог, sha, "m4a"))
+        self.assertEqual([f for f in os.listdir(каталог_блоба)
+                          if f.endswith(".part")], [])
+
+    def test_пустое_тело_не_звук(self):
+        """sha пустоты — законный хеш, и раньше пустой файл принимался."""
+        каталог, con = self.стенд()
+        eid, sha = self.событие(con, b"")
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(b""), 0)
+        self.assertEqual(код, 415)
+
+    def test_карантин_виден_в_метрике(self):
+        каталог, con = self.стенд()
+        тело = b"PK\x03\x04" + " это архив, а не звонок".encode("utf-8")
+        eid, _ = self.событие(con, тело)
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело), len(тело))
+        строки = contextd.metrics(con, каталог, None).splitlines()
+        своя = [l for l in строки
+                if l.startswith("mara_ingest_quarantined_events ")]
+        self.assertEqual(своя, ["mara_ingest_quarantined_events 1"], строки)
+
+    def test_карантин_не_считается_недолитым(self):
+        """Иначе сверка через сутки завела бы вечное «телефон не долил».
+
+        У карантинного события `blob_sha256` есть, строки в `blobs` нет — ровно
+        признак, по которому `запись_не_долита` ищет недоливы. Такая находка не
+        погасла бы никогда и заслонила бы настоящее «телефон замолчал».
+        """
+        import contextd_reconcile as rc
+        каталог, con = self.стенд()
+        тело = b"<html>not audio</html>"
+        eid, _ = self.событие(con, тело)
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело), len(тело))
+        старо = (datetime.now(mi.TZ) - timedelta(days=3)).isoformat()
+        con.execute("update events set received=? where id=?", (старо, eid))
+        имена = {f["check"] for f in rc.run(con, каталог, vault=None,
+                                           bm_db=None, targets=[])}
+        self.assertNotIn("запись-не-долита", имена)
+        self.assertIn("карантин", имена, "но молчать о нём тоже нельзя")
+
+    def test_карантин_находка_сверки_называет_числа(self):
+        import contextd_reconcile as rc
+        каталог, con = self.стенд()
+        for i, тело in enumerate((b"<html>1", b"PK\x03\x04 2")):
+            eid, _ = self.событие(con, тело, sid="карантин-%d" % i)
+            contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело), len(тело))
+        своя = [f for f in rc.карантин(con, каталог)][0]
+        self.assertEqual(своя["level"], "error")
+        self.assertEqual((своя["count"], своя["files"]), (2, 2))
+        self.assertIn("ACR", своя["detail"], "находка обязана сказать, что чинить")
+
+    def test_чистая_система_про_карантин_молчит(self):
+        import contextd_reconcile as rc
+        каталог, con = self.стенд()
+        self.assertEqual(rc.карантин(con, каталог), [])
+
+    def test_дубль_карантина_не_ломает_повтор(self):
+        """Тот же файл прислали дважды: оба раза 415, файл один, состояние одно."""
+        каталог, con = self.стенд()
+        тело = b"<html>dup</html>"
+        eid, sha = self.событие(con, тело)
+        for _ in range(2):
+            код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                           len(тело))
+            self.assertEqual(код, 415)
+        self.assertEqual(os.listdir(os.path.join(каталог, "quarantine")),
+                         ["%s.m4a" % sha])
+
 
 if __name__ == "__main__":
     unittest.main()
