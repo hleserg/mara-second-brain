@@ -1,5 +1,6 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
-import os, sys, io, json, hashlib, socket, tempfile, threading, time, unittest
+import contextlib, os, sys, io, json, hashlib, socket, struct
+import tempfile, threading, time, unittest
 import urllib.request, urllib.error
 from datetime import datetime, timedelta
 
@@ -1908,6 +1909,207 @@ class ТестПределЗаливок(unittest.TestCase):
             contextd.ЗАЛИВОК = было
             держим.close()
 
+
+class ТестОбрывНеТрейсбек(unittest.TestCase):
+    """#39: телефон уронил связь — в логе доктора 35 строк трейсбека.
+
+    Запись льётся минутами по домашнему wi-fi, и обрыв на середине — быт, а
+    не поломка. Трейсбек читается как «демон сломался»; приходя на каждый
+    разрыв, он ровно тем и вреден, что настоящая поломка в логе среди них уже
+    не видна.
+    """
+
+    def поднять(self):
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        срв = contextd.make_server(каталог, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=срв.serve_forever, daemon=True).start()
+        _, токен = contextd.pair(mi.connect(каталог), "телефон")
+        self.addCleanup(срв.server_close)
+        self.addCleanup(срв.shutdown)
+        return срв, токен
+
+    def дождаться(self, буфер, чего):
+        """Опрос, а не sleep: строку печатает поток сервера, момент не наш."""
+        предел = time.monotonic() + 10
+        while time.monotonic() < предел:
+            if чего in буфер.getvalue():
+                return
+            time.sleep(0.02)
+        self.fail("не дождались %r, было: %r" % (чего, буфер.getvalue()))
+
+    def test_обрыв_загрузки_даёт_строку_вместо_трейсбека(self):
+        срв, токен = self.поднять()
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(вывод), contextlib.redirect_stderr(ошибки):
+            гость = socket.create_connection(
+                ("127.0.0.1", срв.server_address[1]), timeout=10)
+            try:
+                гость.sendall((
+                    "POST /v1/ingest/audio?event=1 HTTP/1.1\r\n"
+                    "Host: 127.0.0.1\r\n"
+                    "Authorization: Bearer %s\r\n"
+                    "Content-Type: application/octet-stream\r\n"
+                    "Content-Length: 1000000\r\n\r\n" % токен
+                ).encode("utf-8"))
+                гость.sendall(b"x" * 64)
+                # RST, а не FIN: пропавшая сеть рвёт соединение именно так.
+                # Голый `close()` шлёт FIN, и `слить` видит спокойный EOF —
+                # тот путь тих и без правки (`contextd.py:756`).
+                гость.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                 struct.pack("ii", 1, 0))
+            finally:
+                гость.close()
+            self.дождаться(вывод, "обрыв")
+        self.assertNotIn("Traceback", ошибки.getvalue())
+        self.assertEqual(вывод.getvalue().count("обрыв"), 1, вывод.getvalue())
+        # Имя класса и есть весь диагноз: reset — телефон потерял сеть,
+        # timeout — тот самый поток, что висит 60 секунд.
+        self.assertIn("ConnectionResetError", вывод.getvalue())
+
+    def молча(self, срв, заголовки, ждать):
+        """Отправить заголовки, замолчать и вернуть напечатанное демоном.
+
+        Через настоящий сокет, а не вызовом `handle_error`: первая редакция
+        этого теста звала его напрямую и была зелёной на коде, который в бою
+        не печатал ни строки. Нашёл Codex, ревью PR #82.
+        """
+        было = contextd.Handler.timeout
+        contextd.Handler.timeout = 0.5         # вместо боевых шестидесяти
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(вывод), \
+                 contextlib.redirect_stderr(ошибки):
+                гость = socket.create_connection(
+                    ("127.0.0.1", срв.server_address[1]), timeout=10)
+                try:
+                    if заголовки:
+                        гость.sendall(заголовки)
+                    time.sleep(ждать)
+                finally:
+                    гость.close()
+        finally:
+            contextd.Handler.timeout = было
+        self.assertNotIn("Traceback", ошибки.getvalue())
+        return вывод.getvalue()
+
+    def test_зависшая_заливка_даёт_строку(self):
+        """Молчащий клиент не печатал ничего вовсе, и это хуже трейсбека.
+
+        Базовый `handle_one_request` ловит таймаут чтения сам и уносит его в
+        `log_message`, у нас пустой (`contextd.py:472`), — до `handle_error`
+        он не доходит. Поток при этом честно висит `timeout` секунд, и в логе
+        об этом не было ни слова.
+        """
+        срв, токен = self.поднять()
+        печать = self.молча(срв, (
+            "POST /v1/ingest/audio?event=1 HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Authorization: Bearer %s\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            "Content-Length: 1000000\r\n\r\n" % токен
+        ).encode("utf-8") + b"x" * 64, 1.5)
+        self.assertEqual(печать.count("обрыв"), 1, печать)
+        self.assertIn("TimeoutError", печать)
+
+    def test_молчание_на_пустом_соединении_строки_не_родит(self):
+        """Ради этого таймаут ловится вокруг тела, а не на весь запрос.
+
+        Телефон держит соединение в пуле, и оно упирается в тот же `timeout`
+        после каждой удачной заливки. Лови мы таймаут общим местом — каждая
+        успешная запись через минуту рожала бы «обрыв» на здоровой связи, то
+        есть ровно тот ложный сигнал, от которого этот PR и лечит.
+        """
+        срв, _ = self.поднять()
+        self.assertEqual(self.молча(срв, None, 1.5), "")
+
+    def test_обрыв_на_json_теле_тоже_виден(self):
+        """Сосед по коду молчал бы ровно так же, и мутант это показал.
+
+        Снятый перехват на json-пути пережил весь гейт, пока этого теста не
+        было: аудио стерегли, а событие рядом — нет.
+        """
+        срв, токен = self.поднять()
+        печать = self.молча(срв, (
+            "POST /v1/ingest/event HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Authorization: Bearer %s\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 100000\r\n\r\n" % токен
+        ).encode("utf-8") + b'{"kind":', 1.5)
+        self.assertEqual(печать.count("обрыв"), 1, печать)
+        self.assertIn("TimeoutError", печать)
+
+    def test_таймаут_склада_не_выдаётся_за_обрыв(self):
+        """Молчащий склад — поломка сервера, а не ушедший клиент.
+
+        Первая редакция ловила всякий `TimeoutError` из `аудио` и печатала на
+        него «обрыв»: запись блоба на сетевой диск, отвалившаяся по таймауту,
+        выглядела бы в логе как телефон, потерявший сеть. Нашёл Codex, круг 2
+        ревью PR #82. Ловим теперь только рождённый на чтении тела.
+        """
+        срв, токен = self.поднять()
+        con = mi.connect(mi.ROOT)
+        сырьё = os.urandom(4096)
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": sha,
+                                    "blob": {"sha256": sha, "ext": "m4a",
+                                             "bytes": len(сырьё)}})
+        было = contextd.ingest_audio
+
+        def склад_молчит(*a, **kw):
+            raise TimeoutError("склад не ответил")
+
+        contextd.ingest_audio = склад_молчит
+        self.addCleanup(setattr, contextd, "ingest_audio", было)
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(вывод), contextlib.redirect_stderr(ошибки):
+            адрес = "http://127.0.0.1:%d/v1/ingest/audio?event=%s" % (
+                срв.server_address[1], eid)
+            req = urllib.request.Request(адрес, data=сырьё, method="POST")
+            req.add_header("Authorization", "Bearer " + токен)
+            req.add_header("Content-Type", "application/octet-stream")
+            try:
+                urllib.request.urlopen(req, timeout=10).read()
+            except Exception:
+                pass                          # ответа не будет, он тут и не нужен
+            time.sleep(0.3)
+        self.assertNotIn("обрыв", вывод.getvalue())
+
+    def test_чужой_oserror_трейсбек_сохраняет(self):
+        """Мутант `isinstance(беда, OSError)` пережил весь гейт без этого.
+
+        `ConnectionError` — наследник `OSError`, и фильтр, расширенный до
+        родителя, накрыл бы `ENOSPC` при записи блоба: диск кончился, а в
+        логе «обрыв связи» и ни строки трейсбека.
+        """
+        срв, _ = self.поднять()
+        вывод, ошибки = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(вывод), contextlib.redirect_stderr(ошибки):
+            try:
+                raise OSError(28, "No space left on device")
+            except OSError:
+                срв.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("Traceback", ошибки.getvalue())
+        self.assertNotIn("обрыв", вывод.getvalue())
+
+    def test_чужая_беда_трейсбек_сохраняет(self):
+        """Без этого `handle_error` с голым `return` проходит гейт.
+
+        Заглушить всё — не тише, а слепее: место под заливку освобождает
+        `finally` (`contextd.py:640`), а вот почему упала запись на диск, без
+        трейсбека не узнать ни из чего.
+        """
+        срв, _ = self.поднять()
+        ошибки = io.StringIO()
+        with contextlib.redirect_stderr(ошибки):
+            try:
+                raise RuntimeError("проба")
+            except RuntimeError:
+                срв.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("Traceback", ошибки.getvalue())
+        self.assertIn("проба", ошибки.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

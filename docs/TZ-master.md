@@ -1195,15 +1195,19 @@ OpenTelemetry допустим как стандарт инструментир�
 
 ### 17.6. Governance
 
-- [ ] Branch protection и обязательный CI включены.
-- [ ] Работа идёт PR-only.
+- [x] Branch protection и обязательный CI включены. *(2026-09-11: `required_status_checks: python, kotlin`, force-push и удаление ветки запрещены.)*
+- [x] Работа идёт PR-only. *(2026-09-11: защита `main` включена, прямой пуш запрещён и для админов — `enforce_admins: true`.)*
 - [ ] Каждый data model/migration/security/recorder PR получил независимый review Codex.
-- [ ] Максимум три субагента по умолчанию и budget guardrails зафиксированы в contributor/agent docs.
+- [x] Максимум три субагента по умолчанию и budget guardrails зафиксированы в contributor/agent docs. *(`docs/CONTRIBUTING.md`, раздел «Ограничения агентов».)*
 - [ ] Ни один acceptance пункт не закрыт только ссылкой на unit test, если он требует полевого E2E.
 
 ---
 
 ## 18. План реализации и приоритеты
+
+> Действующий маршрут от текущего состояния к развёрнутой и проверенной
+> системе — `docs/PLAN-to-done.md`: волны, карточки задач, гейты и
+> сгруппированные задачи владельца. Фазы ниже — рамка, план — расписание.
 
 ### Phase 0 — Audit and safety gate
 
