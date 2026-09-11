@@ -335,3 +335,61 @@ class Свежесть(unittest.TestCase):
         self.assertFalse(cd.свежий(t.isoformat(),
                                    now=t + dt.timedelta(hours=24, seconds=1),
                                    часов=24))
+
+
+class БоевойПорог(unittest.TestCase):
+    """Каждый прогон `run()` выше заставу отключает — патчем `СВЕЖЕСТЬ_Ч` или
+    переменной среды, а прямые тесты `свежий()` передают `часов=` аргументом.
+    Значит боевое значение константы не держал ни один свидетель: мутант
+    `"24"` → `"0"` проходил и юниты, и self-check, и сквозной тест, а в бою
+    при нём ни один дайджест не доходил бы до телеграма никогда.
+
+    Здесь заставу не трогают вовсе. Событие двигают, а не порог."""
+
+    def setUp(self):
+        снято = mock.patch.dict(os.environ, clear=False)
+        снято.start()
+        self.addCleanup(снято.stop)
+        for k in cd.КЛЮЧИ:
+            os.environ.pop(k, None)
+        self.dir = tempfile.mkdtemp()
+        self.con = mi.connect(self.dir)
+        self.env = os.path.join(self.dir, "есть.env")
+        with open(self.env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
+
+    def прогон(self, часов_назад):
+        import datetime as dt
+        t = dt.datetime.now().astimezone() - dt.timedelta(hours=часов_назад)
+        eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone",
+            "source_id": "s%g" % часов_назад,
+            "occurred_at": t.isoformat(),
+            "ended_at": (t + dt.timedelta(minutes=1)).isoformat(),
+            "payload": EVENT["payload"]})
+        self.con.execute("update events set state='projected' where id=?", (eid,))
+        mi.write_json(mi.extraction_path(self.dir, eid), ПУСТО)
+        звали = []
+        было = cd.deliver
+        cd.deliver = lambda text, token, chat: звали.append(1) or "sent"
+        try:
+            cd.run(eid, root=self.dir, env_file=self.env)
+        finally:
+            cd.deliver = было
+        state = self.con.execute("select state from digests where event_id=?",
+                                 (eid,)).fetchone()["state"]
+        return bool(звали), state
+
+    def test_часовой_давности_звонок_доходит(self):
+        """Держит мутанта `СВЕЖЕСТЬ_Ч = 0`: при нём молчит вообще всё."""
+        звали, state = self.прогон(1)
+        self.assertTrue(звали, "живой звонок обязан дойти при боевом пороге")
+        self.assertEqual(state, "sent")
+
+    def test_вчерашняя_догрузка_не_доходит(self):
+        """Держит мутанта `СВЕЖЕСТЬ_Ч = 10**6` и мутанта
+        `ev["occurred"]` → `ev["received"]`: второй считает возраст от
+        приёма, а приём у догрузки — сию секунду."""
+        звали, state = self.прогон(25)
+        self.assertFalse(звали)
+        self.assertEqual(state, "stale")

@@ -43,7 +43,11 @@ API = os.environ.get("MARA_TELEGRAM_API",
 # Порог переопределяем средой по той же причине, что и `MARA_TELEGRAM_API`
 # выше: шаг дайджеста запускается отдельным процессом, и сквозной тест иначе
 # не может ни отключить заставу, ни проверить её.
-СВЕЖЕСТЬ_Ч = float(os.environ.get("MARA_DIGEST_MAX_AGE_H", "24"))
+try:
+    СВЕЖЕСТЬ_Ч = float(os.environ.get("MARA_DIGEST_MAX_AGE_H", "24"))
+except ValueError:
+    raise SystemExit("MARA_DIGEST_MAX_AGE_H — не число: %r"
+                     % os.environ.get("MARA_DIGEST_MAX_AGE_H"))
 
 
 def свежий(occurred, now=None, часов=None):
@@ -51,6 +55,10 @@ def свежий(occurred, now=None, часов=None):
     которую не смогли прочитать, хуже, чем написать лишний раз."""
     if not occurred:
         return True
+    # `occurred` от телефона приходит с офсетом (`Sync.kt` шлёт через
+    # `ZoneId.systemDefault()`), и сравнение идёт по абсолютным моментам.
+    # Наивная строка сравнится в зоне сервера — путь маловероятный, но
+    # молчать об этом нельзя.
     try:
         t = datetime.datetime.fromisoformat(occurred)
     except (ValueError, TypeError):
@@ -197,8 +205,12 @@ def run(event_id, root=None, env_file=None):
         # Звонок обработан: дайджест собран и лежит в `digests`. Не закрыть
         # его здесь значило бы держать работу в вечном ретрае ради сообщения,
         # которое мы намеренно не шлём.
-        print("call_digest: %s старше %g ч — в телеграм не шлём, текст в digests"
-              % (event_id, СВЕЖЕСТЬ_Ч))
+        # в stderr, а не в stdout: `contextd` зовёт шаг через
+        # `subprocess.run(capture_output=True)` и возвращает только stderr —
+        # ветка `not-private` этот урок уже выучила, эта чуть не повторила
+        print("call_digest: %s старше %g ч — в телеграм не шлём, текст в "
+              "digests; сверка назовёт его находкой «дайджест-догрузка»"
+              % (event_id, СВЕЖЕСТЬ_Ч), file=sys.stderr)
         con.execute("update events set state='done' where id=?", (event_id,))
         return did
     if state == "failed":

@@ -636,6 +636,35 @@ def дайджест_не_доставлен(con):
                     sample=[r["event_id"] for r in rows[:5]])]
 
 
+def дайджест_догрузка(con, окно_ч=24):
+    """Пачка приехала молча — владелец обязан узнать, что она была.
+
+    `call_digest` гасит догрузку намеренно: 69 звонков за неделю дали бы 69
+    сообщений подряд. Но погашенное не значит пропавшее — тексты и пункты
+    лежат в `digests`. Без этой находки они не видны нигде: сверка фильтрует
+    два других состояния, bootstrap Мары берёт только `sent`, а `print` из
+    шага уходит в stdout, который `contextd` выбрасывает. Находка была, а
+    действия, которое её гасит, не было ни одного.
+
+    Окно — сутки, и это не мелочь. Строки `stale` лежат в базе вечно; вечная
+    находка про них научила бы владельца не читать находки вовсе. Это
+    сообщение о событии («вчера приехала догрузка»), а не о поломке, и оно
+    обязано само уйти."""
+    rows = [r for r in con.execute(
+        "select event_id, sent_at from digests where state='stale' "
+        "order by sent_at").fetchall()
+        if (_возраст(r["sent_at"]) or 0) <= окно_ч * 3600]
+    if not rows:
+        return []
+    return [находка("дайджест-догрузка", "warn",
+                    "догрузкой пришло звонков: %d — в телеграм намеренно не "
+                    "слались (старше %g ч), тексты лежат в digests. Переслать "
+                    "нужный: MARA_DIGEST_MAX_AGE_H=999999 python3 "
+                    "scripts/call_digest.py --event <id>"
+                    % (len(rows), 24), count=len(rows),
+                    sample=[r["event_id"] for r in rows[:5]])]
+
+
 def dlq(con):
     n = con.execute("select count(*) from jobs where state='dlq'").fetchone()[0]
     if not n:
@@ -826,6 +855,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += _застава("дозагрузка", запись_не_долита, con)
     out += _застава("карантин", карантин, con, root)
     out += _застава("дайджест", дайджест_не_доставлен, con)
+    out += _застава("догрузка", дайджест_догрузка, con)
     out += _застава("dlq", dlq, con)
     out += _застава("бэкап", бэкап_ядра, targets, root=root)
     return out

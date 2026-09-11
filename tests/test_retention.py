@@ -184,6 +184,10 @@ class СверкаИсточников(unittest.TestCase):
                              "sent_at,state) values(?,?,?,?,?,?,?)",
                              (did, eid, "123456789", "текст", "[]",
                               mi.now_iso(), state))
+        self.con.execute("insert into digests(id,event_id,chat_id,text,items_json,"
+                         "sent_at,state) values(?,?,?,?,?,?,?)",
+                         ("d6", eid, "123456789", "текст", "[]",
+                          mi.now_iso(), "stale"))
         f = rc.дайджест_не_доставлен(self.con)
         self.assertEqual(f[0]["count"], 3,
                          "доставленный дайджест — не находка, "
@@ -789,3 +793,48 @@ class Сверка(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Догрузка(unittest.TestCase):
+    """Погашенная пачка обязана быть названной. `stale` не попадал ни в
+    сверку (`дайджест_не_доставлен` фильтрует два других состояния), ни в
+    bootstrap Мары (`where state='sent'`), а `print` уходил в stdout, который
+    `contextd` выбрасывает. Находка была, действия по ней — ни одного."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.con = mi.connect(self.root)
+        self.eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "x1",
+            "occurred_at": mi.now_iso(), "ended_at": mi.now_iso()})
+
+    def строка(self, did, state, часов_назад=0):
+        import datetime as dt
+        t = (dt.datetime.now().astimezone()
+             - dt.timedelta(hours=часов_назад)).isoformat()
+        self.con.execute("insert into digests(id,event_id,chat_id,text,"
+                         "items_json,sent_at,state) values(?,?,?,?,?,?,?)",
+                         (did, self.eid, "123456789", "текст", "[]", t, state))
+
+    def test_свежая_догрузка_названа(self):
+        self.строка("s1", "stale")
+        self.строка("s2", "stale")
+        self.строка("ok", "sent")
+        f = rc.дайджест_догрузка(self.con)
+        self.assertEqual(f[0]["count"], 2, "доставленный — не догрузка")
+        self.assertIn("MARA_DIGEST_MAX_AGE_H", f[0]["detail"],
+                      "находка обязана назвать действие, которое её гасит")
+        self.assertEqual(f[0]["level"], "warn")
+
+    def test_старая_догрузка_не_шумит_вечно(self):
+        """Строки `stale` лежат в базе вечно. Вечная находка про них научила
+        бы владельца не читать находки вовсе — окно ровно сутки."""
+        self.строка("s1", "stale", часов_назад=30)
+        self.assertEqual(rc.дайджест_догрузка(self.con), [])
+
+    def test_догрузка_доходит_до_сверки(self):
+        """Мутант «убрать `out += дайджест_догрузка(con)` из `run()`»
+        проходит оба теста выше, а сверка при нём молчит."""
+        self.строка("s1", "stale")
+        имена = [x["check"] for x in rc.run(self.con, self.root, vault=None)]
+        self.assertIn("дайджест-догрузка", имена)
