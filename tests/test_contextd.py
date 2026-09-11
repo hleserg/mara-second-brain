@@ -25,6 +25,8 @@ def звук(хвост=b"", вид="wav"):
         "ogg": lambda t: b"OggS\x00\x02" + t,
         "flac": lambda t: b"fLaC\x00\x00" + t,
         "amr": lambda t: b"#!AMR\n" + t,
+        "aac": lambda t: b"\xff\xf1\x50\x80" + t,          # ADTS, MPEG4, с CRC
+        "wma": lambda t: bytes.fromhex("3026b2758e66cf11a6d900aa0062ce6c") + t,
     }
     return головы[вид](хвост)
 
@@ -1552,10 +1554,14 @@ class ТестScopes(unittest.TestCase):
         путь = self.con.execute("select path from blobs where sha256=?",
                                 (sha,)).fetchone()["path"]
         self.assertTrue(путь.startswith(os.path.join(self.dir, "calls")), путь)
-        # С нюхом содержимого (Т3.2) заявленное расширение в путь не попадает
-        # вовсе: `ext` из тела остаётся подсказкой, а имя файла даёт нюх.
-        # Чистка в `blob_path` от этого не лишняя — она держит путь временного
-        # файла, который создаётся до нюха.
+        # С нюхом содержимого (Т3.2) заявленное расширение не попадает в имя
+        # **принятого** блоба: его даёт нюх. Дальше этого утверждение не идёт,
+        # и первая редакция этого комментария («в путь не попадает вовсе»)
+        # была неверна: у `ext` осталось два живых потребителя — каталог для
+        # `mkstemp` (`contextd.py`, до нюха) и имя файла в карантине
+        # (`карантин_путь`). Поэтому чистка в `blob_path` не лишняя, а
+        # враждебное расширение проверяется ещё и на карантинном пути —
+        # `test_карантин_не_уводит_враждебное_расширение_из_дерева`.
         self.assertTrue(путь.endswith(".wav"), путь)
 
     def test_присланный_dedupe_key_не_принимается(self):
@@ -2371,6 +2377,137 @@ class ТестНюхСодержимого(unittest.TestCase):
         import contextd_reconcile as rc
         каталог, con = self.стенд()
         self.assertEqual(rc.карантин(con, каталог), [])
+
+    def test_из_карантина_есть_выход(self):
+        """415, владелец расширил нюх, телефон повторил — запись доходит до памяти.
+
+        Это не гипотетический сценарий, а прописанная самим ТЗ процедура:
+        §6.2 отвергает непонятое, 415 у телефона терминален
+        (`Core.kt:280`), выход из `FAILED` — `Store.kt:207 retryFailed()`.
+        До правки `finish_stored` событие после этой процедуры получало 200,
+        блоб ложился в `calls/`, а состояние оставалось `quarantined`:
+        манифеста нет, работы `asr` нет, и молчали все проверки сверки разом.
+        """
+        каталог, con = self.стенд()
+        тело = b"MRA!" + b"\x00" * 60           # вид, которого нюх ещё не знает
+        eid, sha = self.событие(con, тело)
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                       len(тело))
+        self.assertEqual(код, 415)
+        self.assertEqual(con.execute("select state from events where id=?",
+                                     (eid,)).fetchone()["state"], "quarantined")
+
+        старый_нюх = contextd.нюх
+        contextd.нюх = lambda b: (("mra", "audio/x-mra") if bytes(b)[:4] == b"MRA!"
+                                  else старый_нюх(b))
+        try:
+            код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                           len(тело))
+        finally:
+            contextd.нюх = старый_нюх
+
+        self.assertEqual(код, 200)
+        self.assertEqual(con.execute("select state from events where id=?",
+                                     (eid,)).fetchone()["state"], "stored",
+                         "событие осталось в карантине — до памяти не дойдёт никогда")
+        self.assertTrue(os.path.exists(mi.manifest_path(каталог, eid)),
+                        "манифеста нет")
+        self.assertEqual(con.execute("select count(*) from jobs where event_id=?"
+                                     " and kind='asr'", (eid,)).fetchone()[0], 1,
+                         "работы asr нет — расшифровки не будет")
+        self.assertEqual(os.listdir(os.path.join(каталог, "quarantine")), [],
+                         "копия в карантине занимает диск вторым разом, "
+                         "а находка `карантин` горит вечно")
+
+    def test_заливка_через_полночь_первого_числа_не_рвётся(self):
+        """Между mkstemp и os.replace сменился месяц: каталог обязан остаться тот.
+
+        `blob_path` по умолчанию берёт `datetime.now(TZ)`, а вызовов два —
+        по заявленному расширению и по нюханому. С двумя «сейчас» второй уезжал
+        в каталог следующего месяца, `os.replace` падал `FileNotFoundError`
+        уже после приёма всех байт, `finally` сносил `.part`, и ответа телефону
+        не было вовсе.
+
+        Часы подменяются **в `mara_ingest`**, а не в `contextd`: это и есть
+        разница между починкой и её отсутствием. Починенный код спрашивает
+        время один раз у себя и передаёт его в оба вызова параметром `when`, то
+        есть часов `mara_ingest` не касается вовсе; сломанный спрашивает дважды
+        у `mara_ingest` и получает два разных месяца. Первая редакция этого
+        теста подменяла часы в `contextd` — и проходила на сломанном коде тоже.
+        """
+        каталог, con = self.стенд()
+        тело = звук(b"\x00" * 32, "wav")
+        eid, sha = self.событие(con, тело, ext="wav", sid="полночь")
+        отсчёт = [datetime(2026, 9, 30, 23, 59, 59, tzinfo=mi.TZ),
+                  datetime(2026, 10, 1, 0, 0, 1, tzinfo=mi.TZ)]
+        настоящий = mi.datetime
+
+        class Часы:
+            @staticmethod
+            def now(tz=None):
+                return отсчёт.pop(0) if len(отсчёт) > 1 else отсчёт[0]
+
+        mi.datetime = Часы
+        try:
+            код, ответ = contextd.ingest_audio(con, каталог, eid,
+                                               io.BytesIO(тело), len(тело))
+        finally:
+            mi.datetime = настоящий
+        self.assertEqual(код, 200, ответ)
+        путь = con.execute("select path from blobs where sha256=?",
+                           (sha,)).fetchone()["path"]
+        self.assertTrue(os.path.exists(путь), путь)
+
+    def test_нюх_узнаёт_всё_что_грузит_приложение(self):
+        """Мерка списка: `Core.kt:171` — одиннадцать расширений.
+
+        Приём, отвергающий то, что сам же попросил прислать, говорит владельцу
+        «проверить формат записи в ACR» про нормальный формат.
+        """
+        # opus в контейнере Ogg, 3gpp — то же, что 3gp
+        ожидаем = {"wav": "wav", "m4a": "m4a", "3gp": "3gp", "mp3": "mp3",
+                   "ogg": "ogg", "flac": "flac", "amr": "amr",
+                   "aac": "aac", "wma": "wma"}
+        for вид, ждём in ожидаем.items():
+            with self.subTest(вид=вид):
+                self.assertEqual(contextd.нюх(звук(b"\x00" * 64, вид))[0], ждём)
+
+    def test_нюх_узнаёт_mp3_с_crc_и_младших_версий(self):
+        """Перечисление трёх байт роняло в карантин обычную запись."""
+        for первые, что in ((b"\xff\xfa", "MPEG1 Layer III с CRC"),
+                            (b"\xff\xe3", "MPEG 2.5"),
+                            (b"\xff\xfd", "MPEG1 Layer II")):
+            with self.subTest(что=что):
+                self.assertEqual(contextd.нюх(первые + b"\x90" + b"\x00" * 9),
+                                 ("mp3", "audio/mpeg"))
+
+    def test_нюх_не_принимает_зарезервированные_комбинации(self):
+        """Маска не должна вырождаться в «первый байт 0xff — значит звук»."""
+        for первые, что in ((b"\xff\xeb", "версия зарезервирована"),
+                            (b"\xff\xe1", "слой зарезервирован, но не ADTS"),
+                            (b"\xff\x00", "синхры нет вовсе")):
+            with self.subTest(что=что):
+                self.assertEqual(contextd.нюх(первые + b"\x00" * 10),
+                                 (None, None))
+
+    def test_карантин_не_уводит_враждебное_расширение_из_дерева(self):
+        """`ext: "../../etc/x"` вместе с не-аудио телом: последний живой
+        потребитель сырого `ext`.
+
+        Принятый блоб имя берёт у нюха, а карантинное — у `blob_path` от
+        заявленного расширения. До этого теста сочетание «враждебный ext + тело,
+        которое не узнают» не присылалось ни разу: проверялись порознь.
+        """
+        каталог, con = self.стенд()
+        тело = b"<html>hostile</html>"
+        eid, sha = self.событие(con, тело, ext="../../etc/x", sid="враждебный")
+        код, _ = contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело),
+                                       len(тело))
+        self.assertEqual(код, 415)
+        лежит = os.listdir(os.path.join(каталог, "quarantine"))
+        self.assertEqual(лежит, ["%s.bin" % sha], лежит)
+        self.assertFalse(os.path.exists(os.path.join(каталог, "..", "..", "etc")),
+                         "запись ушла из дерева блобов")
 
     def test_дубль_карантина_не_ломает_повтор(self):
         """Тот же файл прислали дважды: оба раза 415, файл один, состояние одно."""
