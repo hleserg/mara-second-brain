@@ -1783,11 +1783,14 @@ class ТестЛогОтказов(unittest.TestCase):
         self.assertNotIn("keys=", строки[0])
 
     def test_замолчавший_клиент_всё_равно_оставляет_строку(self):
-        """Находка ревью: `отлуп` сначала сливает тело, и только потом отвечает.
+        """Находка ревью: отказ на замолчавшем клиенте оставляет строку в логе.
 
-        Клиент объявил длину и замолчал — `слить` упирается в `timeout` и
-        бросает, а печатает `say`, до которого дело не доходило. Отказ снова
-        уходил без строки: ровно та тишина, ради которой всё и делалось.
+        Когда-то `отлуп` сливал тело до ответа: клиент объявлял длину и
+        замолкал, `слить` упирался в `timeout` и бросал, а печатает `say` —
+        до которого дело не доходило. Отказ уходил без строки, ровно та
+        тишина, ради которой всё и делалось. Порядок с тех пор перевёрнут
+        (#73, Т3.3): сначала ответ, потом слив, — но строка обязана
+        появляться при любом порядке, и держит это здесь.
         """
         import contextlib
         import socket
@@ -2627,6 +2630,190 @@ class ТестНюхСодержимого(unittest.TestCase):
             self.assertEqual(код, 415)
         self.assertEqual(os.listdir(os.path.join(каталог, "quarantine")),
                          ["%s.m4a" % sha])
+
+
+
+class ТестОтказДоТела(unittest.TestCase):
+    """Отказ приходит до тела, если клиент спросил разрешения (#73, Т3.3).
+
+    Предел заливок (#73) отвечал 503 **после** того, как телефон выложил
+    мегабайты: сервер обязан вычитать тело, иначе клиент увидит broken pipe
+    вместо кода. Платил за это телефон — трафиком, а сервер — потоком,
+    занятым на всё время слива. `Expect: 100-continue` снимает обе платы:
+    клиент шлёт заголовки и ждёт, сервер отказывает до первого байта тела.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.srv = contextd.make_server(self.dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        con = mi.connect(self.dir)
+        self.dev, self.токен = contextd.pair(con, "телефон")
+        contextd._заливки.clear()
+
+    def tearDown(self):
+        contextd._заливки.clear()
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def шапка(self, длина, expect=True, событие="none"):
+        h = ("POST /v1/ingest/audio?event=%s HTTP/1.1\r\n" % событие +
+             "Host: 127.0.0.1\r\n"
+             "Authorization: Bearer %s\r\n"
+             "Content-Type: application/octet-stream\r\n"
+             "Content-Length: %d\r\n" % (self.токен, длина))
+        if expect:
+            h += "Expect: 100-continue\r\n"
+        return (h + "\r\n").encode()
+
+    @staticmethod
+    def код(s):
+        """Код следующего ответа; 0 — соединение закрылось, не ответив."""
+        буфер = b""
+        while b"\r\n" not in буфер:
+            try:
+                кусок = s.recv(256)
+            except OSError:      # RST: ответ потерян вместе с буфером приёма
+                return 0
+            if not кусок:
+                break
+            буфер += кусок
+        части = буфер.split()
+        return int(части[1]) if len(части) > 1 else 0
+
+    def спросить(self, длина, expect=True, тело=b""):
+        """Шлёт заголовки (и, если велено, тело) и возвращает код ответа.
+
+        Что телефон не заплатил трафиком, доказывает порядок, а не счётчик:
+        при `expect=True` мы ждём ответа, не отправив ни байта тела, и
+        клиентский таймаут (5 с) короче серверного (`timeout = 60`). Пришёл
+        код — значит сервер ответил, не дожидаясь тела.
+        """
+        s = socket.create_connection(self.srv.server_address, timeout=5)
+        s.settimeout(5)
+        s.sendall(self.шапка(длина, expect))
+        if not expect:
+            s.sendall(тело)
+        try:
+            return self.код(s)
+        finally:
+            s.close()
+
+    def ждать_освобождения(self, срок=2.0):
+        """Место освобождает поток сервера — его надо дождаться, а не угадать."""
+        предел = time.monotonic() + срок
+        while self.dev in contextd._заливки and time.monotonic() < предел:
+            time.sleep(0.01)
+        return self.dev not in contextd._заливки
+
+    def test_занятое_устройство_отказывает_до_тела(self):
+        contextd._заливки[self.dev] = contextd.ЗАЛИВОК
+        self.assertEqual(self.спросить(64 << 20), 503, "отказ пришёл не 503")
+        # место чужое, и проверка его не заняла: иначе четвёртая попытка
+        # сдвинула бы счётчик и место не вернулось бы никогда
+        self.assertEqual(contextd._заливки[self.dev], contextd.ЗАЛИВОК)
+
+    def test_слишком_большое_тело_отказывает_до_тела(self):
+        self.assertEqual(self.спросить(contextd.MAX_BODY + 1), 413)
+
+    def test_не_дождавшийся_ста_всё_равно_получает_код(self):
+        """Заголовок спрашивает разрешения, но ждать его клиент не обязан.
+
+        Транспорт вправе полить тело сразу за заголовками. Закрыть тогда
+        соединение с непрочитанным телом значит показать клиенту broken pipe
+        вместо кода — ровно #30. Поэтому отказ сливает и здесь, только по
+        короткому таймауту.
+        """
+        contextd._заливки[self.dev] = contextd.ЗАЛИВОК
+        s = socket.create_connection(self.srv.server_address, timeout=5)
+        s.settimeout(5)
+        # 32 КиБ, а не горсть байт: тело меньше буфера чтения уезжает в него
+        # вместе с заголовками, и очередь сокета при закрытии пуста — такое
+        # тело проходит и без слива, то есть ничего не проверяет.
+        s.sendall(self.шапка(32 << 10) + b"a" * (32 << 10))   # не ждём `100`
+        try:
+            self.assertEqual(self.код(s), 503, "отказ потерялся вместе с телом")
+        finally:
+            s.close()
+
+    def test_свободное_устройство_получает_сто(self):
+        """Счастливый путь не сломан, и место за устройством не залипает."""
+        s = socket.create_connection(self.srv.server_address, timeout=5)
+        s.settimeout(5)
+        s.sendall(self.шапка(3))
+        первая = s.recv(64)
+        self.assertIn(b"100", первая.split(b"\r\n")[0], первая)
+        s.sendall(b"abc")
+        # Дочитать окончательный ответ обязательно: без него проверка места
+        # ниже успевала бы раньше, чем сервер до места вообще дошёл, и
+        # проходила бы при любой утечке.
+        self.assertNotEqual(self.код(s), 0, "окончательного ответа не пришло")
+        s.close()
+        self.assertTrue(self.ждать_освобождения(), "место за устройством залипло")
+
+    def test_молчащий_клиент_получает_код_до_слива(self):
+        """Ответ уходит раньше слива — иначе молчун не получает ничего.
+
+        Клиент объявил мегабайт и не прислал ни байта. Сливали бы до ответа —
+        `слить` упёрся бы в `timeout = 60`, клиент в свои пять секунд, и кода
+        не было бы вовсе. `Expect` тут не при чём: проверяется общий путь всех
+        отказов, который эта правка и переставила.
+        """
+        contextd._заливки[self.dev] = contextd.ЗАЛИВОК
+        self.assertEqual(self.спросить(1 << 20, expect=False, тело=b""), 503)
+
+    def test_слив_на_expect_ждёт_тишину_а_не_таймаут(self):
+        """Укороченный слив — величина измеримая, а не намерение.
+
+        Отказ на `Expect` тело всё-таки дочитывает: ждать `100` клиент не
+        обязан. Но дождавшийся не пришлёт ни байта, и обычный `timeout`
+        держал бы поток всё это время. Меряем закрытием соединения: оно
+        должно прийти по `ТИШИНА`, а не по таймауту обработчика.
+        """
+        with unittest.mock.patch.object(contextd, "ТИШИНА", 0.2), \
+                unittest.mock.patch.object(contextd.Handler, "timeout", 5):
+            contextd._заливки[self.dev] = contextd.ЗАЛИВОК
+            s = socket.create_connection(self.srv.server_address, timeout=10)
+            s.settimeout(10)
+            s.sendall(self.шапка(1 << 20))
+            начало = time.monotonic()
+            self.assertEqual(self.код(s), 503)
+            while s.recv(4096):
+                pass                      # ждём, когда сервер закроет
+            прошло = time.monotonic() - начало
+            s.close()
+        self.assertLess(прошло, 2.0,
+                        "слив тянулся дольше `ТИШИНА`: %.2f с" % прошло)
+
+    def test_expect_не_ломает_нормальную_заливку(self):
+        """Счастливый путь целиком: разрешение, тело, 200 и блоб на месте.
+
+        Отказы проверены выше, но `Expect` — общий заголовок, и сломать им
+        обычную заливку куда дороже, чем не сэкономить на отказе. Остальные
+        заливочные тесты ходят через `urllib`, который `Expect` не шлёт.
+        """
+        # Настоящая голова контейнера: с нюхом содержимого (§6.2) «как бы
+        # аудио» уезжает в карантин с 415, и тест проверял бы карантин.
+        сырьё = звук(b"x" * 256, "m4a")
+        sha = hashlib.sha256(сырьё).hexdigest()
+        eid, _ = mi.put_event(mi.connect(self.dir),
+                              {"kind": "call", "source": "phone", "source_id": sha,
+                               "blob": {"sha256": sha, "ext": "m4a",
+                                        "bytes": len(сырьё)}})
+        s = socket.create_connection(self.srv.server_address, timeout=10)
+        s.settimeout(10)
+        s.sendall(self.шапка(len(сырьё), событие=eid))
+        self.assertIn(b"100", s.recv(64).split(b"\r\n")[0])
+        s.sendall(сырьё)
+        self.assertEqual(self.код(s), 200)
+        s.close()
+        self.assertTrue(self.ждать_освобождения(), "место за устройством залипло")
+
+    def test_без_expect_поведение_прежнее(self):
+        """Кто не спрашивал — платит как раньше, и код тот же."""
+        contextd._заливки[self.dev] = contextd.ЗАЛИВОК
+        self.assertEqual(self.спросить(64, expect=False, тело=b"a" * 64), 503)
 
 
 if __name__ == "__main__":

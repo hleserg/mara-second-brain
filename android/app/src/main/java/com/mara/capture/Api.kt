@@ -59,17 +59,32 @@ class Api(private val base: String, private val token: String) {
     /**
      * Аудио потоком: часовой разговор в память не поднимаем.
      * setFixedLengthStreamingMode заодно избавляет от буферизации целиком.
+     *
+     * `Expect: 100-continue` — чтобы отказ обходился в заголовки, а не в
+     * запись целиком (#73). Сервер отвечает 413 на слишком большое тело и
+     * 503 на исчерпанный потолок потоков; без этого заголовка он обязан
+     * сначала вычитать мегабайты, которые всё равно выбросит, и телефон
+     * платит за отказ трафиком. Разрешения ждёт транспорт, не мы: код ниже
+     * пишет тело как раньше.
      */
     fun putAudio(eventId: String, bytes: Long, body: () -> InputStream): ServerReply {
         val c = open("/v1/ingest/audio?event=$eventId", "POST", auth = true)
         return try {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/octet-stream")
+            c.setRequestProperty("Expect", "100-continue")
             c.setFixedLengthStreamingMode(bytes)
             body().use { input -> c.outputStream.use { input.copyTo(it, 64 * 1024) } }
             ServerReply(code(c), eventId)
         } catch (e: Exception) {
-            ServerReply(0)
+            // Отказ до тела рвёт запись: сервер ответил и закрыл поток, наш
+            // `write` упал. Ответ при этом уже пришёл, и `responseCode` его
+            // отдаёт. Прежний безусловный ноль называл этот отказ
+            // отсутствием сети — очередь повторяла запись немедленно и
+            // бесконечно, вместо того чтобы разобрать 413 (терминально) или
+            // переждать 503. Настоящий обрыв связи `code` не спасёт: там
+            // `responseCode` бросит снова, и ноль вернётся сам.
+            ServerReply(code(c), eventId)
         } finally {
             c.disconnect()
         }
