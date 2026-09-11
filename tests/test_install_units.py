@@ -165,6 +165,38 @@ class Установщик(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("systemd видит не то", r.stderr)
 
+    def test_под_root_без_явных_значений_отказ(self):
+        """`sudo ./install-units.sh --apply` поставил бы боевой юнит root'у.
+
+        Под sudo `id -un` даёт root, `$HOME` становится /root — и юнит уезжает
+        с `User=root` и состоянием в /root. Послеустановочная сверка это не
+        поймает: она сравнивает установленное с рендером, а рендер под root тот
+        же самый. Ломается первый рестарт, а не установка.
+        """
+        bin_ = os.path.join(self.tmp, "bin")
+        self.шим(bin_, "id",
+                 'case "${1:-}" in -u) echo 0;; -un) echo root;; *) exit 1;; esac\n')
+        env = {k: v for k, v in self.env.items()
+               if k not in ("USER_NAME", "STATE", "VENV_TDLIB")}
+        for режим in ("--check", "--apply"):
+            with self.subTest(режим=режим):
+                r = subprocess.run(["bash", УСТАНОВЩИК, режим], env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+                self.assertIn("под root/sudo не запускать", r.stderr)
+        self.assertEqual(os.listdir(self.dest), [], "юнит всё-таки поставлен")
+        self.assertEqual(self.вызовы(), [], "systemctl всё-таки позван")
+
+    def test_под_root_с_явными_значениями_работает(self):
+        """Отказ — про угаданные значения, а не про root как таковой."""
+        bin_ = os.path.join(self.tmp, "bin")
+        self.шим(bin_, "id",
+                 'case "${1:-}" in -u) echo 0;; -un) echo root;; *) exit 1;; esac\n')
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dest, "contextd.service")) as fh:
+            self.assertIn("User=mara", fh.read())
+
     def test_в_шаблонах_нет_системного_имени_пользователя(self):
         """Сторож против возврата: юнит в репозитории обязан быть шаблоном.
 
