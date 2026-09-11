@@ -2339,10 +2339,33 @@ class ТестНюхСодержимого(unittest.TestCase):
         for i, тело in enumerate((b"<html>1", b"PK\x03\x04 2")):
             eid, _ = self.событие(con, тело, sid="карантин-%d" % i)
             contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело), len(тело))
-        своя = [f for f in rc.карантин(con, каталог)][0]
+        своя = rc.карантин(con, каталог)[0]
         self.assertEqual(своя["level"], "error")
-        self.assertEqual((своя["count"], своя["files"]), (2, 2))
+        self.assertEqual((своя["count"], своя["events"]), (2, 2))
         self.assertIn("ACR", своя["detail"], "находка обязана сказать, что чинить")
+
+    def test_разобранный_каталог_гасит_находку(self):
+        """Находка, которая не гаснет никогда, учит не читать `error`.
+
+        Состояние `quarantined` из события уже не уходит — оно тупиковое. Считай
+        находка строки событий, она стояла бы вечно: тот же дефект, который в
+        этом файле осуждён у `запись_не_долита` и который круг 1 ревью PR #90
+        забраковал у `волт_пропал`. Гаснуть она обязана ровно тем действием, о
+        котором просит.
+        """
+        import contextd_reconcile as rc
+        каталог, con = self.стенд()
+        тело = b"<html>razberut</html>"
+        eid, _ = self.событие(con, тело)
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(тело), len(тело))
+        self.assertEqual(len(rc.карантин(con, каталог)), 1)
+        for f in os.listdir(os.path.join(каталог, "quarantine")):
+            os.unlink(os.path.join(каталог, "quarantine", f))
+        self.assertEqual(rc.карантин(con, каталог), [],
+                         "каталог разобран — находка обязана погаснуть")
+        # а событие остаётся записью о том, что было: справка, не условие
+        self.assertEqual(con.execute("select state from events where id=?",
+                                     (eid,)).fetchone()["state"], "quarantined")
 
     def test_чистая_система_про_карантин_молчит(self):
         import contextd_reconcile as rc
