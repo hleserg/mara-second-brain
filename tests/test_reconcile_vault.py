@@ -243,7 +243,7 @@ class КарточкиПропали(unittest.TestCase):
         self.база("kb/conversations/a.md", "kb/conversations/схема.canvas")
         self.assertNotIn("карточки-пропали", self.находки())
 
-    def test_пустой_путь_в_базе_не_роняет_проверку(self):
+    def test_null_в_пути_не_роняет_проверку(self):
         """`file_path is null` до появления обратной стороны был безвреден:
         `None` только вычитался. Теперь он идёт в `startswith` и роняет
         `лаг_индекса` целиком — вместе с уже посчитанной находкой
