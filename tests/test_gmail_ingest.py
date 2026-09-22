@@ -114,6 +114,8 @@ class Вход(unittest.TestCase):
             return 0
 
         окружение = dict(os.environ)
+        было_umask = os.umask(0o022)
+        os.umask(было_umask)
         os.environ["GMAIL_CLIENT_ID"], os.environ["GMAIL_CLIENT_SECRET"] = "cid", "secret"
         было_login, было_argv = g.login, sys.argv
         g.login, sys.argv = вход, ["gmail_ingest.py", "--login", "--port", "8766", "--env", "/нет/такого"]
@@ -123,6 +125,9 @@ class Вход(unittest.TestCase):
             g.login, sys.argv = было_login, было_argv
             os.environ.clear()
             os.environ.update(окружение)
+            # `main()` ставит umask 0o077 и обратно не возвращает: в бою это
+            # правильно, в прогоне тестов — утечка в чужие временные файлы.
+            os.umask(было_umask)
         self.assertEqual(видел["port"], 8766)
 
     def test_403_объясняет_выключенный_api(self):
