@@ -421,6 +421,25 @@ def _env(name):
     return v
 
 
+def профиль(access_token):
+    """Кто вошёл. 403 здесь — почти всегда выключенный в проекте Gmail API.
+
+    Важно, что это случается **после** обмена кода на токен: refresh-токен уже
+    выдан, но ещё не сохранён. Не «потерян» — повторный --login выдаст новый.
+    Глотаем только 403: 401 и всё остальное должны лететь наружу как есть.
+    """
+    req = urllib.request.Request(API + "profile", headers={"Authorization": "Bearer " + access_token})
+    try:
+        return _json(req)
+    except urllib.error.HTTPError as e:
+        if e.code != 403:
+            raise
+        raise SystemExit(
+            "Gmail API отвечает 403. Включи его в проекте Google "
+            "(APIs & Services → Library → Gmail API → Enable) и повтори --login. "
+            "Refresh-токен этого захода не сохранён — повторный вход выдаст новый.")
+
+
 def login(home, client_id, client_secret, port=ПОРТ):
     """Loopback-редирект: браузер владельца доходит до doctor через ssh -L."""
     os.makedirs(home, mode=0o700, exist_ok=True)
@@ -457,8 +476,7 @@ def login(home, client_id, client_secret, port=ПОРТ):
                       redirect_uri=redirect, grant_type="authorization_code", code_verifier=verifier))
     if not tok.get("refresh_token"):
         raise SystemExit("Google не отдал refresh token: отзови доступ в аккаунте и войди снова")
-    req = urllib.request.Request(API + "profile", headers={"Authorization": "Bearer " + tok["access_token"]})
-    email = _json(req).get("emailAddress", "")
+    email = профиль(tok["access_token"]).get("emailAddress", "")
     if not личный(email):
         raise SystemExit("%s — не личный Gmail, рабочую почту не "
                          "подключаем (ТЗ §12 TZ-ambient-memory.md); "
@@ -630,15 +648,23 @@ def self_check():
     return 0
 
 
-def main():
+def парсер():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--env", default=ENV, help="файл с GMAIL_CLIENT_ID/SECRET и MARA_CONTEXT_TOKEN")
     ap.add_argument("--login", action="store_true", help="одноразовый вход через браузер")
+    ap.add_argument("--port", type=int, default=ПОРТ,
+                    help="порт loopback-редиректа; обязан совпадать с портом ssh -L "
+                         "(по умолчанию %d, но он бывает занят чужим процессом)" % ПОРТ)
     ap.add_argument("--sync", action="store_true", help="прогон по history (крон)")
     ap.add_argument("--backfill", action="store_true", help="забор истории за --days")
     ap.add_argument("--days", type=int, default=ДНЕЙ)
     ap.add_argument("--self-check", action="store_true")
+    return ap
+
+
+def main():
+    ap = парсер()
     a = ap.parse_args()
     os.umask(0o077)
     home = state_dir(a.root)
@@ -647,7 +673,7 @@ def main():
             return self_check()
         load_env(a.env)
         if a.login:
-            login(home, _env("GMAIL_CLIENT_ID"), _env("GMAIL_CLIENT_SECRET"))
+            login(home, _env("GMAIL_CLIENT_ID"), _env("GMAIL_CLIENT_SECRET"), a.port)
             return 0
         if a.backfill:
             return sync(home, a.days)

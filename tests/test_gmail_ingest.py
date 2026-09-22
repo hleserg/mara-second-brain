@@ -1,6 +1,6 @@
 """Разбор письма и контракт события Gmail
 (спека 7, ТЗ §12 `TZ-ambient-memory.md`) — без Google."""
-import os, sys, json, base64, unittest
+import os, sys, json, base64, io, unittest, urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import gmail_ingest as g
@@ -94,6 +94,60 @@ class Граница(unittest.TestCase):
 
     def test_scope_только_чтение(self):
         self.assertTrue(g.SCOPE.endswith("gmail.readonly"))
+
+
+class Вход(unittest.TestCase):
+    """Две ловушки первого входа 2026-09-11, каждая стоила по заходу."""
+
+    def test_порт_настраивается(self):
+        a = g.парсер().parse_args([])
+        self.assertEqual(a.port, g.ПОРТ)
+        a = g.парсер().parse_args(["--login", "--port", "8766"])
+        self.assertEqual(a.port, 8766, "порт обязан совпадать с портом ssh -L, а 8765 бывает занят")
+
+    def test_порт_доезжает_до_входа(self):
+        """Порт был не зашит, а потерян: `login` его принимал, `main` не передавал."""
+        видел = {}
+
+        def вход(home, cid, secret, port=g.ПОРТ):
+            видел["port"] = port
+            return 0
+
+        окружение = dict(os.environ)
+        os.environ["GMAIL_CLIENT_ID"], os.environ["GMAIL_CLIENT_SECRET"] = "cid", "secret"
+        было_login, было_argv = g.login, sys.argv
+        g.login, sys.argv = вход, ["gmail_ingest.py", "--login", "--port", "8766", "--env", "/нет/такого"]
+        try:
+            self.assertEqual(g.main(), 0)
+        finally:
+            g.login, sys.argv = было_login, было_argv
+            os.environ.clear()
+            os.environ.update(окружение)
+        self.assertEqual(видел["port"], 8766)
+
+    def test_403_объясняет_выключенный_api(self):
+        def ошибка(req, timeout=60):
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(b""))
+        было, g._json = g._json, ошибка
+        try:
+            with self.assertRaises(SystemExit) as e:
+                g.профиль("токен")
+        finally:
+            g._json = было
+        текст = str(e.exception)
+        self.assertIn("Gmail API", текст)
+        self.assertIn("не сохранён", текст, "токен выдан, но не сохранён — повторный --login выдаст новый")
+
+    def test_401_не_проглатывается(self):
+        def ошибка(req, timeout=60):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b""))
+        было, g._json = g._json, ошибка
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                g.профиль("токен")
+        finally:
+            g._json = было
+        self.assertEqual(e.exception.code, 401)
 
 
 if __name__ == "__main__":
