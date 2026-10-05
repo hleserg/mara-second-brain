@@ -9,6 +9,7 @@ import os, sys, tempfile, unittest
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_existing_scripts import load                     # noqa: E402
 
 TODAY = "2026-10-05"
