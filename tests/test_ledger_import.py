@@ -954,6 +954,21 @@ class Идентичность(unittest.TestCase):
         счёт, _ = li.сверка(self.con, self.vault)
         self.assertEqual(счёт["спорных"], 1)
 
+    def test_write_ids_обходит_спорную_карточку(self):
+        """Ревью P3-11: карточка на пути удалённой соседки (её проекция
+        осталась) — спор для переноса; `--write-ids` падал на ключе
+        `projections.path` посреди прогона."""
+        карточка(self.vault, "kb/commitments/a.md", source_id="a")
+        карточка(self.vault, "kb/commitments/b.md", source_id="b")
+        карточка(self.vault, "kb/commitments/c.md", source_id="c")
+        li.run(self.con, self.vault)
+        os.remove(os.path.join(self.vault, "kb/commitments/b.md"))
+        os.rename(os.path.join(self.vault, "kb/commitments/a.md"),
+                  os.path.join(self.vault, "kb/commitments/b.md"))
+        self.assertEqual(li.вписать_id(self.con, self.vault), (1, 1), "c вписана, b пропущена")
+        with open(os.path.join(self.vault, "kb/commitments/b.md"), encoding="utf-8") as fh:
+            self.assertNotIn("\nid: ", fh.read())
+
     def test_write_ids_без_строки_в_реестре_не_выдумывает(self):
         карточка(self.vault, "kb/commitments/a.md")
         self.assertEqual(li.вписать_id(self.con, self.vault), (0, 1))
