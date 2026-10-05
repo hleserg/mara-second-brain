@@ -10,6 +10,15 @@
 объектов кладётся отпечаток файла — по нему будущая пересборка отличит свой
 файл от поправленного руками.
 
+История правок переносится тоже (Т2.0, шаг 3а плана миграций): каждая строка
+журнала «Правки:» ложится в `corrections` под детерминированным id, а статус,
+которому в журнале нет объяснения, получает отметку об этом — иначе после
+смены авторитета база утверждала бы, что 192 отмены 21.09 и 28.09 взялись
+из ниоткуда. Ревизий из журнала не восстанавливаем: в нём нет версий, и
+придумывать их задним числом — выдумывать данные (ADR-0003, «Откат и
+миграция»); `version` у перенесённых строк остаётся 1, ревизии начнутся с
+первой доменной команды Т2.3.
+
 Ключ — `source_id` карточки, а не путь: карточку могут переименовать в
 Obsidian, и это не повод завести второе обязательство. Id объекта при повторном
 запуске не меняется никогда (ТЗ §4.3).
@@ -18,8 +27,9 @@ Obsidian, и это не повод завести второе обязател
     python3 scripts/ledger_import.py               # перенести
     python3 scripts/ledger_import.py --self-check
 """
-import os, re, sys, glob, hashlib, argparse, importlib.util, sqlite3, tempfile
+import os, re, sys, glob, json, uuid, hashlib, argparse, importlib.util, sqlite3, tempfile
 from collections import Counter
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -114,14 +124,15 @@ def карточки(vault, подкаталог):
 def run(con, vault=None, dry_run=False):
     """Перенести всё, что есть. Возвращает счётчики."""
     vault = vault or VAULT
-    итог = {"обязательств": 0, "разговоров": 0, "обновлено": 0, "спорных": 0}
+    итог = {"обязательств": 0, "разговоров": 0, "обновлено": 0, "спорных": 0,
+            "правок": 0}
     for подкаталог, вид, таблица, поля in ВИДЫ:
         счётчик = "обязательств" if вид == "commitment" else "разговоров"
         # карта своя на каждый вид: `source_native_id` уникален внутри таблицы,
         # а не поперёк. Одна общая карта означала бы, что обязательство с
         # `source_id: call/…`, поставленным руками, съедает разговор
         видели = {}
-        for rel, fm, sha, _ in карточки(vault, подкаталог):
+        for rel, fm, sha, текст in карточки(vault, подкаталог):
             if not fm:
                 # шапки нет вовсе: завести объект со всеми полями NULL и
                 # ключом по пути хуже, чем не заводить — такая строка потом
@@ -233,6 +244,8 @@ def run(con, vault=None, dry_run=False):
             con.execute("insert or replace into projections"
                         "(path,object_kind,object_id,content_sha256,written) "
                         "values(?,?,?,?,?)", (rel, вид, oid, sha, mi.now_iso()))
+            if вид == "commitment":
+                итог["правок"] += правки_в_базу(con, oid, fm, текст)
     return итог
 
 
@@ -257,7 +270,7 @@ def журнал(текст):
             мусор.append(l)
             continue
         з = {"when": m.group(1), "who": m.group(2), "event": m.group(3),
-             "status": None, "due": None, "notes": []}
+             "status": None, "due": None, "notes": [], "raw": l}
         for часть in filter(None, (x.strip() for x in m.group(4).split(";"))):
             п = ПЕРЕХОД.match(часть)
             if п:
@@ -303,30 +316,222 @@ def история(vault):
     return итог, замечания
 
 
+# Пространство имён для id строк `corrections`, которые пишет перенос.
+# Id детерминированный — uuid5 от объекта и строки журнала, — а не uuid7:
+# перенос запускают дважды (проба, потом всерьёз), и повтор обязан лечь в
+# те же строки, а не удвоить историю. Побочно по id видно, своя строка или
+# чужая: всё, что в `corrections` объекта не входит в множество ожидаемых
+# id, перенос не писал — это либо доменная команда Т2.5, либо строка от
+# прежней редакции журнала. Сверка такие считает и называет, но не трогает.
+ПРОСТРАНСТВО = uuid.UUID("6d617261-0000-5000-8000-6c6564676572")  # «mara…ledger»
+# Кто пишет строку «статус без следа»: не человек и не модель, а сам перенос.
+# Строка нужна, потому что после смены авторитета журнал в волте никто не
+# перечитает, и статус без строки в базе выглядел бы объяснённым.
+ПЕРЕНОС = "ledger_import"
+
+
+def _id_правки(oid, ключ):
+    return str(uuid.uuid5(ПРОСТРАНСТВО, "%s\x00%s" % (oid, ключ)))
+
+
+def _когда(минуты):
+    """`2026-09-21T15:08` журнала → ISO со сдвигом, как `events.occurred`.
+
+    Журнал пишет `now_iso()[:16]` (`call_project._поправить`), то есть время
+    в `MARA_TZ_HOURS`; сдвиг отрезан ради ширины строки, а не потерян.
+    Возвращаем его, чтобы колонка держала и UTC, и исходный сдвиг (§5.1).
+    """
+    try:
+        return datetime.fromisoformat(минуты.replace(" ", "T")).replace(
+            tzinfo=mi.TZ).isoformat(timespec="seconds")
+    except ValueError:
+        return минуты
+
+
+def правки_из_карточки(oid, fm, текст):
+    """Строки `corrections` для одного обязательства. Ничего не пишет.
+
+    Одна строка журнала → по строке на каждое изменённое поле (`status`,
+    `due`); заметка без перехода — строка с полем `note`. Заметки рядом с
+    переходом уходят в `reason` каждой строки перехода — это и есть «почему».
+    Актор везде человек: строка с событием — слова владельца через
+    `mara_correction` (`origin_event` его и несёт), строка без события —
+    правка рукой в волте. «Мара» в журнале — кто записал, а не кто решил.
+
+    Статус в шапке, которого журнал не объясняет (`история()`: «без следа»,
+    «рукой без события», «разошлось»), получает одну строку с `old_json`
+    null от актора `ledger_import` и причиной словами. Это не выдуманная
+    история, а запись факта: на момент переноса шапка говорила так, и
+    объяснения этому в волте не было.
+    """
+    статус = _строка(fm.get("status")) or "proposed"
+    записи, _ = журнал(текст)
+    строки = []
+    for n, з in enumerate(записи):
+        # ключ id — номер строки и её текст: поправленная руками строка даёт
+        # новую строку в базе, а прежняя остаётся и становится «чужой» для
+        # сверки; одинаковые строки подряд различает номер
+        ключ = "%d\x00%s\x00" % (n, з["raw"])
+        общее = {"actor_type": "human", "actor_id": з["who"],
+                 "origin_event": з["event"], "occurred": _когда(з["when"])}
+        причина = ("правка через mara_correction" if з["event"]
+                   else "правка рукой в волте")
+        if з["notes"]:
+            причина += ": " + "; ".join(з["notes"])
+        переходы = [(поле, з[поле]) for поле in ("status", "due") if з[поле]]
+        if not переходы:
+            строки.append(dict(общее, id=_id_правки(oid, ключ + "note"),
+                               field="note", old_json=None,
+                               new_json=json.dumps("; ".join(з["notes"]),
+                                                   ensure_ascii=False),
+                               reason=причина))
+        for поле, (было, стало) in переходы:
+            # «не был» и «?» — так `_поправить` печатает пустоту
+            строки.append(dict(общее, id=_id_правки(oid, ключ + поле),
+                               field=поле,
+                               old_json=(None if было in ("не был", "?")
+                                         else json.dumps(было, ensure_ascii=False)),
+                               new_json=json.dumps(стало, ensure_ascii=False),
+                               reason=причина))
+    переходы_статуса = [з for з in записи if з["status"]]
+    if переходы_статуса and переходы_статуса[-1]["status"][1] != статус:
+        почему = ("шапка расходится с журналом: журнал говорит %s"
+                  % переходы_статуса[-1]["status"][1])
+    elif переходы_статуса or статус == "proposed":
+        почему = None
+    elif статус == "open" and (_строка(fm.get("origin")) or "").startswith(
+            "correction/"):
+        почему = None                       # заведена правкой: `_завести`
+    else:
+        почему = "статус из шапки без строки в журнале «Правки:»"
+    if почему:
+        строки.append({"id": _id_правки(oid, "head/status"), "field": "status",
+                       "old_json": None,
+                       "new_json": json.dumps(статус, ensure_ascii=False),
+                       "actor_type": "import", "actor_id": ПЕРЕНОС,
+                       "origin_event": None, "reason": почему,
+                       "occurred": (_строка(fm.get("valid_from"))
+                                    or _строка(fm.get("created"))
+                                    or mi.now_iso())})
+    return строки
+
+
+def правки_в_базу(con, oid, fm, текст):
+    """Записать историю обязательства. Возвращает число новых строк.
+
+    `insert or ignore` по детерминированному id: повтор переноса не плодит
+    строк, а правка строки журнала руками даёт новую строку рядом со
+    старой — старую перенос не трогает, о ней скажет сверка.
+    """
+    новых = 0
+    for r in правки_из_карточки(oid, fm, текст):
+        новых += con.execute(
+            "insert or ignore into corrections(id,object_kind,object_id,field,"
+            "old_json,new_json,actor_type,actor_id,reason,origin_event,occurred) "
+            "values(?,'commitment',?,?,?,?,?,?,?,?,?)",
+            (r["id"], oid, r["field"], r["old_json"], r["new_json"],
+             r["actor_type"], r["actor_id"], r["reason"], r["origin_event"],
+             r["occurred"])).rowcount
+    return новых
+
+
+def сверка(con, vault):
+    """«Карточек столько же, сколько строк» (migration-plan.md §4 шаг 3а,
+    §5 предусловия Т2.8). Только читает. Возвращает (счётчики, замечания).
+
+    Три вопроса, каждый — счётчиком и строкой на каждое расхождение: у
+    каждой карточки есть строка объекта; статус в строке тот же, что в
+    шапке; история в `corrections` — ровно та, что в журнале. Строки
+    `corrections`, которых перенос не писал (id вне ожидаемого множества),
+    считаются «чужими»: до Т2.5 это след прежней редакции журнала, после —
+    доменные команды, и в обоих случаях не перенесённое.
+    """
+    итог, замечания = Counter(), []
+    for rel, fm, _, текст in карточки(vault, "kb/commitments"):
+        итог["карточек"] += 1
+        if not fm:
+            итог["без строки"] += 1
+            замечания.append("%s: без шапки, строки в базе нет" % rel)
+            continue
+        native = (_строка(fm.get("source_id")) or "").strip() or "vault:" + rel
+        row = con.execute("select id, status from commitments where "
+                          "source_native_id=?", (native,)).fetchone()
+        if row is None:
+            итог["без строки"] += 1
+            замечания.append("%s: строки в базе нет (ключ %s)" % (rel, native))
+            continue
+        итог["строк"] += 1
+        статус = _строка(fm.get("status")) or "proposed"
+        if (row["status"] or "proposed") != статус:
+            итог["статус разошёлся"] += 1
+            замечания.append("%s: в шапке %s, в базе %s"
+                             % (rel, статус, row["status"]))
+        ожидаемые = {r["id"] for r in правки_из_карточки(row["id"], fm, текст)}
+        в_базе = {r[0] for r in con.execute(
+            "select id from corrections where object_kind='commitment' "
+            "and object_id=?", (row["id"],))}
+        итог["правок ожидается"] += len(ожидаемые)
+        нет, чужие = ожидаемые - в_базе, в_базе - ожидаемые
+        итог["правок нет в базе"] += len(нет)
+        итог["правок чужих"] += len(чужие)
+        if нет or чужие:
+            замечания.append("%s: правок из журнала нет в базе %d, чужих в базе %d"
+                             % (rel, len(нет), len(чужие)))
+    итог["строк без карточки"] = con.execute(
+        "select count(*) from commitments where id not in "
+        "(select object_id from projections where object_kind='commitment')"
+    ).fetchone()[0]
+    return итог, замечания
+
+
+def строка_сверки(итог):
+    return "сверка Т2.0: " + ", ".join(
+        "%s %d" % (k, итог[k]) for k in (
+            "карточек", "строк", "без строки", "строк без карточки",
+            "статус разошёлся", "правок ожидается", "правок нет в базе",
+            "правок чужих"))
+
+
+def сошлось(итог):
+    return not any(итог[k] for k in ("без строки", "строк без карточки",
+                                     "статус разошёлся", "правок нет в базе",
+                                     "правок чужих"))
+
+
 def self_check():
     with tempfile.TemporaryDirectory() as tmp:
         root, vault = os.path.join(tmp, "b"), os.path.join(tmp, "v")
         os.makedirs(root)
         os.makedirs(os.path.join(vault, "kb/commitments"))
         карточка = os.path.join(vault, "kb/commitments", "2026-09-03-smeta.md")
-        шапка = ("title: прислать смету\nstatus: proposed\n"
+        шапка = ("title: прислать смету\nstatus: open\n"
                  "source_id: commitment/call_1/requests/1\norigin: call/call_1\n")
         with open(карточка, "w", encoding="utf-8") as fh:
-            fh.write("---\n%s---\n\n- Обещание: прислать смету\n" % шапка)
+            fh.write("---\n%s---\n\n- Обещание: прислать смету\n\nПравки:\n"
+                     "- 2026-09-21T15:08, Мара, correction/c1: статус proposed → open\n"
+                     % шапка)
         con = mi.connect(root)
 
         assert run(con, vault, dry_run=True)["обязательств"] == 1
         assert con.execute("select count(*) from commitments").fetchone()[0] == 0, \
             "проба не пишет"
 
-        assert run(con, vault)["обязательств"] == 1
+        итог = run(con, vault)
+        assert итог["обязательств"] == 1 and итог["правок"] == 1, итог
         r = con.execute("select * from commitments").fetchone()
         assert r["title"] == "прислать смету" and r["origin_event"] == "call_1"
         было = r["id"]
+        п = con.execute("select * from corrections").fetchone()
+        assert (п["object_id"], п["field"], п["origin_event"]) == \
+            (было, "status", "c1") and json.loads(п["new_json"]) == "open", dict(п)
 
-        assert run(con, vault)["обязательств"] == 0, "второй раз новых нет"
+        итог = run(con, vault)
+        assert итог["обязательств"] == 0 and итог["правок"] == 0, \
+            "второй раз ни новых объектов, ни новых правок"
         assert con.execute("select id from commitments").fetchone()[0] == было, \
             "ТЗ §4.3: id не меняется"
+        счёт, замечания = сверка(con, vault)
+        assert сошлось(счёт) and not замечания, (dict(счёт), замечания)
 
         ids = [mi.uuid7() for _ in range(200)]
         assert ids == sorted(ids) and len(set(ids)) == 200, "uuid7 монотонен"
@@ -363,17 +568,36 @@ def main():
     else:
         con = mi.connect(a.root)
     итог = run(con, a.vault, dry_run=a.dry_run)
-    print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d, спорных %d"
+    print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d, "
+          "спорных %d, правок %d"
           % (" (проба)" if a.dry_run else "", итог["обязательств"],
-             итог["разговоров"], итог["обновлено"], итог["спорных"]))
+             итог["разговоров"], итог["обновлено"], итог["спорных"],
+             итог["правок"]))
     if a.dry_run:
-        сверка, замечания = история(a.vault)
+        история_, замечания = история(a.vault)
         for z in замечания:
             print("ledger_import: " + z, file=sys.stderr)
         print("история правок: " + ", ".join(
-            "%s %d" % (k, сверка[k]) for k in (
+            "%s %d" % (k, история_[k]) for k in (
                 "по пути правок", "рукой без события", "без правок",
                 "без следа", "разошлось", "неразобрано строк")))
+    # Сверка «карточек столько же, сколько строк» — после записи всерьёз и у
+    # пробы поверх живой базы (там она отвечает на вопрос «что разойдётся»).
+    # На пробе расхождение кодом не считается: до первого переноса истории
+    # в базе нет по определению.
+    if con is not None and con.execute(
+            "select 1 from sqlite_master where name='corrections'").fetchone() is None:
+        # проба поверх базы до миграции 2 (doctor до Т2.8): таблицы истории
+        # ещё нет, и сверять историю нечем — говорим это, а не падаем
+        print("сверка Т2.0: в базе нет таблицы corrections (схема до миграции 2) "
+              "— история не сверяется", file=sys.stderr)
+    elif con is not None:
+        счёт, замечания = сверка(con, a.vault)
+        for z in замечания:
+            print("ledger_import: " + z, file=sys.stderr)
+        print(строка_сверки(счёт))
+        if not a.dry_run and not сошлось(счёт):
+            return 1
     return 1 if итог["спорных"] else 0
 
 

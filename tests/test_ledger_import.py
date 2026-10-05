@@ -9,7 +9,7 @@
 второй запуск (ТЗ §4.3: id не меняется никогда), иначе первый же откат
 разъедется с волтом.
 """
-import os, sys, io, hashlib, contextlib, sqlite3, tempfile, unittest
+import os, sys, io, json, hashlib, contextlib, sqlite3, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -259,7 +259,7 @@ class Перенос(unittest.TestCase):
     def test_пустой_волт_не_падает(self):
         self.assertEqual(self.перенести(),
                          {"обязательств": 0, "разговоров": 0, "обновлено": 0,
-                          "спорных": 0})
+                          "спорных": 0, "правок": 0})
 
 
     def test_обязательство_из_поправки_помнит_событие(self):
@@ -580,6 +580,15 @@ class Запуск(unittest.TestCase):
                                       "where name='digests'").fetchone(),
                           "проба прогнала схему")
 
+    def test_проба_поверх_базы_до_миграции_2_не_падает_на_истории(self):
+        # на doctor база останется версии 1 до Т2.8, а пробу гоняют и до него
+        mi.migrate(self.root, 1).close()
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        код, вывод = self.запустить("--dry-run")
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("нет таблицы corrections", вывод)
+        self.assertEqual(mi._версия(mi._открыть(self.root)), 1, "проба мигрировала")
+
     def test_спорная_карточка_даёт_единицу(self):
         карточка(self.vault, "kb/commitments/2026-09-03-a.md")
         карточка(self.vault, "kb/commitments/2026-09-03-b.md")
@@ -656,6 +665,160 @@ class История(unittest.TestCase):
         self.assertEqual(итог["разошлось"], 1)          # d: журнал говорит open
         self.assertEqual(итог["без правок"], 1)         # e
         self.assertTrue(any("d.md" in z and "разошлось" in z for z in замечания))
+
+
+class Запись(unittest.TestCase):
+    """Т2.0, шаг 3а: журнал «Правки:» ложится в `corrections`, статус без
+    объяснения получает отметку, сверка говорит, сошлось ли."""
+
+    ПУТЬ = ("- 2026-09-21T15:08, Мара, correction/correction_1: статус proposed → open; "
+            "срок не был → 2026-10-01; позвонить сначала")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.vault = os.path.join(self.tmp.name, "vault")
+        self.con = mi.connect(self.root)
+
+    def правки(self, **где):
+        q = "select * from corrections"
+        if где:
+            q += " where " + " and ".join("%s=?" % k for k in где)
+        return [dict(r) for r in self.con.execute(q, list(где.values()))]
+
+    def test_строка_журнала_раскладывается_по_полям(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open",
+                            due="2026-10-01"), self.ПУТЬ)
+        итог = li.run(self.con, self.vault)
+        self.assertEqual(итог["правок"], 2, "статус и срок — две строки")
+        oid = self.con.execute("select id from commitments").fetchone()[0]
+        статус, = self.правки(field="status")
+        self.assertEqual((статус["object_kind"], статус["object_id"]), ("commitment", oid))
+        self.assertEqual((json.loads(статус["old_json"]), json.loads(статус["new_json"])),
+                         ("proposed", "open"))
+        self.assertEqual(статус["origin_event"], "correction_1")
+        self.assertEqual((статус["actor_type"], статус["actor_id"]), ("human", "Мара"))
+        self.assertIn("позвонить сначала", статус["reason"], "заметка — это «почему»")
+        self.assertEqual(статус["occurred"], "2026-09-21T15:08:00+03:00",
+                         "сдвиг возвращён (§5.1)")
+        срок, = self.правки(field="due")
+        self.assertIsNone(срок["old_json"], "«не был» — это пустота, а не строка")
+        self.assertEqual(json.loads(срок["new_json"]), "2026-10-01")
+
+    def test_повтор_переноса_не_удваивает_историю(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        li.run(self.con, self.vault)
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 0)
+        self.assertEqual(len(self.правки()), 2)
+
+    def test_заметка_рукой_без_события(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md"),
+                   "- 2026-09-21T18:30, Мара: почистить всё")
+        li.run(self.con, self.vault)
+        з, = self.правки()
+        self.assertEqual((з["field"], json.loads(з["new_json"])), ("note", "почистить всё"))
+        self.assertIsNone(з["origin_event"])
+        self.assertIn("рукой", з["reason"])
+
+    def test_статус_без_следа_получает_отметку_переноса(self):
+        карточка(self.vault, "kb/commitments/a.md", status="cancelled",
+                 valid_from="2026-09-28T12:00:00+03:00")
+        li.run(self.con, self.vault)
+        о, = self.правки()
+        self.assertEqual((о["field"], о["old_json"], json.loads(о["new_json"])),
+                         ("status", None, "cancelled"))
+        self.assertEqual((о["actor_type"], о["actor_id"]), ("import", li.ПЕРЕНОС))
+        self.assertIn("без строки в журнале", о["reason"])
+        self.assertEqual(о["occurred"], "2026-09-28T12:00:00+03:00",
+                         "время отметки — valid_from карточки, не момент переноса")
+
+    def test_разошлось_шапка_с_журналом_помечено(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="done"),
+                   self.ПУТЬ)
+        li.run(self.con, self.vault)
+        отметки = self.правки(actor_type="import")
+        self.assertEqual(len(отметки), 1)
+        self.assertIn("журнал говорит open", отметки[0]["reason"])
+        self.assertEqual(json.loads(отметки[0]["new_json"]), "done",
+                         "в базе статус шапки — она сегодня авторитет")
+
+    def test_proposed_и_заведённая_правкой_отметки_не_получают(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        карточка(self.vault, "kb/commitments/b.md", status="open", source_id="b",
+                 origin="correction/c9")
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 0)
+
+    def test_проба_истории_не_пишет(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        self.assertEqual(li.run(self.con, self.vault, dry_run=True)["правок"], 0)
+        self.assertEqual(self.правки(), [])
+
+    def test_сверка_сходится_после_переноса(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        карточка(self.vault, "kb/commitments/b.md", status="cancelled", source_id="b")
+        li.run(self.con, self.vault)
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertTrue(li.сошлось(счёт), (dict(счёт), замечания))
+        self.assertEqual((счёт["карточек"], счёт["строк"], счёт["правок ожидается"]),
+                         (2, 2, 3))
+        self.assertEqual(замечания, [])
+
+    def test_сверка_видит_карточку_без_строки_и_чужую_правку(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        li.run(self.con, self.vault)
+        # карточка появилась после переноса
+        карточка(self.vault, "kb/commitments/b.md", status="open", source_id="b")
+        # строка, которой перенос не писал: правка журнала руками задним числом
+        oid = self.con.execute("select id from commitments").fetchone()[0]
+        self.con.execute("insert into corrections(id,object_kind,object_id,field,"
+                         "new_json,occurred) values('x','commitment',?,'note','\"\"',"
+                         "'2026-10-01T00:00:00+03:00')", (oid,))
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertFalse(li.сошлось(счёт))
+        self.assertEqual((счёт["без строки"], счёт["правок чужих"]), (1, 1))
+        self.assertEqual(len(замечания), 2, замечания)
+
+    def test_сверка_видит_статус_и_строку_без_карточки(self):
+        p = карточка(self.vault, "kb/commitments/a.md", status="open")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: open", "status: done"))
+        self.con.execute("insert into commitments(id, source_native_id, status) "
+                         "values('сирота', 'vault:нет', 'open')")
+        счёт, _ = li.сверка(self.con, self.vault)
+        self.assertEqual((счёт["статус разошёлся"], счёт["строк без карточки"]), (1, 1))
+
+    def test_правка_строки_журнала_руками_оставляет_старую_строку_чужой(self):
+        p = карточка(self.vault, "kb/commitments/a.md", status="open")
+        с_журналом(p, self.ПУТЬ)
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("позвонить сначала", "позвонить потом"))
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 2,
+                         "изменённая строка — новые id")
+        счёт, _ = li.сверка(self.con, self.vault)
+        self.assertEqual((счёт["правок нет в базе"], счёт["правок чужих"]), (0, 2))
+
+    def test_main_после_переноса_печатает_сверку_и_падает_на_расхождении(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        код, вывод = Запуск.запустить(self)
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("правок 2", вывод)
+        self.assertIn("сверка Т2.0: карточек 1, строк 1", вывод)
+        self.con.execute("delete from corrections")
+        код, вывод = Запуск.запустить(self)
+        self.assertEqual(код, 0, "повтор дописывает недостающее и сходится")
+        self.assertIn("правок 2", вывод)
 
 
 if __name__ == "__main__":
