@@ -1023,6 +1023,20 @@ class Версия(unittest.TestCase):
         li.run(self.con, self.vault)
         self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 8)
 
+    def test_перерисованный_created_не_ревизия(self):
+        """Проектор ставит `created: now_iso()` при каждой перерисовке; это не
+        изменение объекта, и версия от него расти не должна."""
+        p = карточка(self.vault, "kb/commitments/a.md", created="2026-09-03T01:00:00+03:00")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("2026-09-03T01:00:00+03:00", "2026-10-05T09:00:00+03:00"))
+        li.run(self.con, self.vault)
+        r = self.con.execute("select version, created from commitments").fetchone()
+        self.assertEqual((r["version"], r["created"]), (1, "2026-09-03T01:00:00+03:00"))
+        self.assertEqual(len(self.ревизии()), 1)
+
     def test_актор_ревизии_от_зовущего(self):
         карточка(self.vault, "kb/commitments/a.md")
         li.перенести_карточку(self.con, self.vault, "kb/commitments/a.md",

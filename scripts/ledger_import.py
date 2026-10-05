@@ -359,8 +359,12 @@ def _записать_объект(con, таблица, вид, oid, значе�
                  mi.now_iso()))
         return
     старое = dict(con.execute("select * from %s where id=?" % таблица, (oid,)).fetchone())
+    # `created` у существующего объекта не переносится: проектор ставит в
+    # шапку `mi.now_iso()` при каждой перерисовке, и перенос этого поля
+    # давал бы ложную ревизию и version+1 на каждую повторную проекцию.
+    # Время рождения объекта — то, что легло первым.
     изменилось = {k: [старое.get(k), v] for k, v in значения.items()
-                  if k != "id" and старое.get(k) != v}
+                  if k not in ("id", "created") and старое.get(k) != v}
     if not изменилось:
         return
     поля_sql = ", ".join("%s=?" % k for k in sorted(изменилось))
