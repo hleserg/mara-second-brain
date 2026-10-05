@@ -565,6 +565,7 @@ class Запуск(unittest.TestCase):
         self.assertEqual(код, 0)
         self.assertFalse(os.path.exists(self.root), "проба завела " + self.root)
         self.assertIn("обязательств 1", вывод)
+        self.assertIn("без правок 1, без следа 0", вывод, "проба печатает сверку Т2.0")
 
     def test_проба_на_живой_базе_не_мигрирует(self):
         # `mi.connect` — это и есть миграция (Т0.8, migration-plan.md): проба
@@ -602,6 +603,59 @@ class Запуск(unittest.TestCase):
         self.assertIn("self-check: ок", вывод)
         self.assertNotIn("обязательств", вывод,
                           "это не самопроверка, а перенос")
+
+
+def с_журналом(p, *строки):
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write("\nПравки:\n" + "".join(s + "\n" for s in строки))
+
+
+class История(unittest.TestCase):
+    """Т2.0: статус живёт во фронтматтере, а объяснение — в журнале «Правки:».
+    Сверка говорит, какой статус чем объяснён, до любой смены авторитета."""
+
+    ПУТЬ = "- 2026-09-21T15:08, Мара, correction/correction_1: статус proposed → open; "
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.v = self.tmp.name
+
+    def test_строка_пути_правок_разбирается(self):
+        записи, мусор = li.журнал("x\n\nПравки:\n" + self.ПУТЬ +
+                                  "\n- 2026-09-22T10:00, Мара, correction/c2: "
+                                  "срок не был → 2026-10-01; позвонить сначала\n")
+        self.assertEqual(мусор, [])
+        self.assertEqual(записи[0]["event"], "correction_1")
+        self.assertEqual(записи[0]["status"], ("proposed", "open"))
+        self.assertEqual(записи[1]["due"], ("не был", "2026-10-01"))
+        self.assertEqual(записи[1]["notes"], ["позвонить сначала"])
+
+    def test_заметка_рукой_и_мусор(self):
+        записи, мусор = li.журнал("\nПравки:\n- 2026-09-21T18:30, Мара: почистить всё\n"
+                                  "Правки:\nчто-то своё\n")
+        self.assertIsNone(записи[0]["event"])
+        self.assertEqual(записи[0]["notes"], ["почистить всё"])
+        self.assertEqual(мусор, ["что-то своё"], "повторный заголовок — не мусор")
+
+    def test_сверка_раскладывает_статусы(self):
+        к = "kb/commitments/"
+        с_журналом(карточка(self.v, к + "a.md", status="open"), self.ПУТЬ)
+        с_журналом(карточка(self.v, к + "b.md", status="cancelled",
+                            source_id="b"), "- 2026-09-21T18:30, Мара: чистый лист")
+        карточка(self.v, к + "c.md", status="cancelled", source_id="c")
+        с_журналом(карточка(self.v, к + "d.md", status="done", source_id="d"),
+                   self.ПУТЬ)
+        карточка(self.v, к + "e.md", source_id="e")
+        карточка(self.v, к + "f.md", status="open", source_id="f",
+                 origin="correction/c9")
+        итог, замечания = li.история(self.v)
+        self.assertEqual(итог["по пути правок"], 2)     # a и заведённая правкой f
+        self.assertEqual(итог["рукой без события"], 1)  # b
+        self.assertEqual(итог["без следа"], 1)          # c
+        self.assertEqual(итог["разошлось"], 1)          # d: журнал говорит open
+        self.assertEqual(итог["без правок"], 1)         # e
+        self.assertTrue(any("d.md" in z and "разошлось" in z for z in замечания))
 
 
 if __name__ == "__main__":

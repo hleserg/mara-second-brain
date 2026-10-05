@@ -18,7 +18,8 @@ Obsidian, и это не повод завести второе обязател
     python3 scripts/ledger_import.py               # перенести
     python3 scripts/ledger_import.py --self-check
 """
-import os, sys, glob, hashlib, argparse, importlib.util, sqlite3, tempfile
+import os, re, sys, glob, hashlib, argparse, importlib.util, sqlite3, tempfile
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -107,7 +108,7 @@ def карточки(vault, подкаталог):
         текст = raw.decode("utf-8", "replace").lstrip("\ufeff").replace("\r\n", "\n")
         fm, _ = mb.frontmatter(текст)
         yield (os.path.relpath(p, vault), fm,
-               hashlib.sha256(raw).hexdigest())
+               hashlib.sha256(raw).hexdigest(), текст)
 
 
 def run(con, vault=None, dry_run=False):
@@ -120,7 +121,7 @@ def run(con, vault=None, dry_run=False):
         # а не поперёк. Одна общая карта означала бы, что обязательство с
         # `source_id: call/…`, поставленным руками, съедает разговор
         видели = {}
-        for rel, fm, sha in карточки(vault, подкаталог):
+        for rel, fm, sha, _ in карточки(vault, подкаталог):
             if not fm:
                 # шапки нет вовсе: завести объект со всеми полями NULL и
                 # ключом по пути хуже, чем не заводить — такая строка потом
@@ -235,6 +236,73 @@ def run(con, vault=None, dry_run=False):
     return итог
 
 
+# Строку журнала пишет `call_project._поправить`:
+#   - 2026-09-21T15:08, Мара, correction/<id>: статус a → b; срок x → y; заметка
+# и рукой — без события, как «чистый лист» 21.09: `- <когда>, <кто>: <заметка>`.
+СТРОКА = re.compile(r"^- (\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}), ([^,:]+?)"
+                    r"(?:, correction/(\S+?))?: (.*)$")
+ПЕРЕХОД = re.compile(r"^(статус|срок) (.+?) → (\S+)$")
+
+
+def журнал(текст):
+    """Журнал «Правки:» из тела карточки → (записи, неразобранные строки)."""
+    _, _, хвост = текст.partition("\nПравки:\n")
+    записи, мусор = [], []
+    for l in хвост.splitlines():
+        l = l.strip()
+        if not l or l == "Правки:":
+            continue
+        m = СТРОКА.match(l)
+        if not m:
+            мусор.append(l)
+            continue
+        з = {"when": m.group(1), "who": m.group(2), "event": m.group(3),
+             "status": None, "due": None, "notes": []}
+        for часть in filter(None, (x.strip() for x in m.group(4).split(";"))):
+            п = ПЕРЕХОД.match(часть)
+            if п:
+                з["status" if п.group(1) == "статус" else "due"] = п.group(2, 3)
+            else:
+                з["notes"].append(часть)
+        записи.append(з)
+    return записи, мусор
+
+
+def история(vault):
+    """Сверка Т2.0: чем объяснён статус каждого обязательства. Ничего не пишет.
+
+    Статус без следа в журнале — это правка мимо пути правок (21.09 и 28.09
+    так закрыто 192 обязательства). Переносить такой статус в реестр можно,
+    но объяснять его нечем, и сказать об этом надо до смены авторитета.
+    """
+    итог, замечания = Counter(), []
+    for rel, fm, _, текст in карточки(vault, "kb/commitments"):
+        статус = _строка(fm.get("status")) or "proposed"
+        записи, мусор = журнал(текст)
+        итог["неразобрано строк"] += len(мусор)
+        for l in мусор:
+            замечания.append("%s: строка журнала не разобрана: %s" % (rel, l[:80]))
+        переходы = [з for з in записи if з["status"]]
+        if переходы:
+            последний = переходы[-1]
+            if последний["status"][1] != статус:
+                вид = "разошлось"
+                замечания.append("%s: разошлось — в шапке %s, журнал говорит %s"
+                                 % (rel, статус, последний["status"][1]))
+            else:
+                вид = ("по пути правок" if последний["event"]
+                       else "рукой без события")
+        elif статус == "proposed":
+            вид = "без правок"
+        elif статус == "open" and (_строка(fm.get("origin")) or "").startswith(
+                "correction/"):
+            вид = "по пути правок"          # заведена правкой: `_завести`
+        else:
+            вид = "рукой без события" if записи else "без следа"
+        итог[вид] += 1
+    return итог, замечания
+
+
 def self_check():
     with tempfile.TemporaryDirectory() as tmp:
         root, vault = os.path.join(tmp, "b"), os.path.join(tmp, "v")
@@ -298,6 +366,14 @@ def main():
     print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d, спорных %d"
           % (" (проба)" if a.dry_run else "", итог["обязательств"],
              итог["разговоров"], итог["обновлено"], итог["спорных"]))
+    if a.dry_run:
+        сверка, замечания = история(a.vault)
+        for z in замечания:
+            print("ledger_import: " + z, file=sys.stderr)
+        print("история правок: " + ", ".join(
+            "%s %d" % (k, сверка[k]) for k in (
+                "по пути правок", "рукой без события", "без правок",
+                "без следа", "разошлось", "неразобрано строк")))
     return 1 if итог["спорных"] else 0
 
 
