@@ -731,8 +731,62 @@ class Запись(unittest.TestCase):
                          ("status", None, "cancelled"))
         self.assertEqual((о["actor_type"], о["actor_id"]), ("import", li.ПЕРЕНОС))
         self.assertIn("без строки в журнале", о["reason"])
-        self.assertEqual(о["occurred"], "2026-09-28T12:00:00+03:00",
-                         "время отметки — valid_from карточки, не момент переноса")
+        # `valid_from` карточки ставит только `_поправить`; у статуса без
+        # журнала настоящего времени нет, и дата создания карточки им не
+        # является (ревью P2-3) — честнее момент переноса с оговоркой
+        self.assertIn("момент переноса", о["reason"])
+        self.assertEqual(о["occurred"][:10], mi.now_iso()[:10])
+        self.assertNotEqual(о["occurred"], "2026-09-28T12:00:00+03:00")
+
+    def test_статус_сменили_рукой_повторно_и_отметка_новая_а_сверка_сходится(self):
+        """Ревью P2-1: ключ отметки без статуса оставлял в базе прежнюю
+        отметку, а сверка по множеству id зеленила историю, которой нет."""
+        p = карточка(self.vault, "kb/commitments/a.md", status="cancelled")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: cancelled", "status: done"))
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 1, "новая отметка")
+        отметки = sorted(json.loads(о["new_json"]) for о in self.правки(actor_type="import"))
+        self.assertEqual(отметки, ["cancelled", "done"], "обе отметки — история")
+        self.assertEqual(self.con.execute("select status from commitments").fetchone()[0],
+                         "done")
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertTrue(li.сошлось(счёт), (dict(счёт), замечания))
+        self.assertEqual(счёт["правок чужих"], 0, "своя прежняя отметка — не чужая")
+
+    def test_повтор_не_сбрасывает_колонки_проектора_в_projections(self):
+        """Ревью P2-2: `insert or replace` заводил строку проекции заново и
+        обнулял `ledger_version`/`projector_version`/`manifest_hash`."""
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        self.con.execute("update projections set ledger_version=3, projector_version=1, "
+                         "manifest_hash='h'")
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: proposed", "status: open"))
+        li.run(self.con, self.vault)
+        r = self.con.execute("select ledger_version, projector_version, manifest_hash, "
+                             "content_sha256 from projections").fetchone()
+        self.assertEqual(tuple(r)[:3], (3, 1, "h"))
+        self.assertEqual(r["content_sha256"],
+                         hashlib.sha256(текст.replace("status: proposed", "status: open")
+                                        .encode("utf-8")).hexdigest(),
+                         "а отпечаток — свежий")
+
+    def test_сверка_называет_спорную_карточку_а_не_чужое_расхождение(self):
+        """Ревью P3-1: дубль source_id сравнивался с объектом первой карточки
+        и выглядел как расхождение переноса."""
+        карточка(self.vault, "kb/commitments/a.md", status="open")
+        карточка(self.vault, "kb/commitments/a2.md", status="done")
+        li.run(self.con, self.vault)
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertEqual((счёт["спорных"], счёт["статус разошёлся"], счёт["правок чужих"]),
+                         (1, 0, 0), (dict(счёт), замечания))
+        self.assertFalse(li.сошлось(счёт))
+        self.assertTrue(any("a2.md: спорная" in z for z in замечания), замечания)
 
     def test_разошлось_шапка_с_журналом_помечено(self):
         с_журналом(карточка(self.vault, "kb/commitments/a.md", status="done"),

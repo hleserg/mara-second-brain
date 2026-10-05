@@ -292,5 +292,43 @@ class Манифест(unittest.TestCase):
         self.assertEqual(r["манифест"]["сверено_размеров"], 4, r)
 
 
+    def test_файл_между_описью_и_таром_не_роняет_учение(self):
+        """Ревью PR #117, P2-4: опись и тар обходили мелочь по отдельности;
+        файл, положенный воркером в зазор, попадал в тар, но не в опись, и
+        ночное учение падало на «лишнем файле» — а за ним не шла ротация.
+        Теперь обход один; подмена `мелочь` подкладывает файл на втором
+        вызове, и при одном обходе второго вызова просто нет."""
+        import unittest.mock
+        исходная = self.мод.мелочь
+        вызовов = []
+
+        def подмена(root):
+            вызовов.append(1)
+            if len(вызовов) >= 2:
+                open(os.path.join(root, "transcripts", "e2.jsonl"), "w").write("{}\n")
+            return исходная(root)
+
+        with unittest.mock.patch.object(self.мод, "мелочь", подмена), \
+                unittest.mock.patch.dict(os.environ, {"MARA_BACKUP_ALLOW_SAME_DEV": "1"}), \
+                unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_НОСИТЕЛЕЙ",
+                                           os.path.join(self.tmp, "state", "core-targets.json")):
+            os.makedirs(os.path.join(self.tmp, "state"), exist_ok=True)
+            r = self.мод.прогон(self.root, [self.цель], self.пароль, 7,
+                                os.path.join(self.tmp, "work"), аудио=False, drill=True)
+        self.assertEqual(len(вызовов), 1, "мелочь обошли дважды")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "transcripts", "e2.jsonl")))
+        self.assertTrue(r, r)
+
+    def test_verify_не_открыл_это_код_3_без_трейсбека(self):
+        """Ревью P3-3: «не смог открыть» и «разошлось» не сливаются в единицу."""
+        for args in (["--verify", os.path.join(self.tmp, "нет.tar.gz.gpg")],
+                     ["--verify", self.архив, "--pass-file", os.path.join(self.tmp, "нет")]):
+            r = subprocess.run([sys.executable, СКРИПТ] + args,
+                               capture_output=True, text=True, env=self.env)
+            self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("не смог открыть", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

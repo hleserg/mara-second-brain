@@ -174,7 +174,7 @@ def мелочь(root):
     return sorted(out)
 
 
-def собрать_манифест(root, копия, keep):
+def собрать_манифест(root, копия, keep, файлы_мелочи=None):
     """Опись копии по §5.3: что лежит в архиве и чем это проверить.
 
     `files` — sha256 каждого файла, `bytes` — его размер; оба по одному и тому
@@ -184,11 +184,15 @@ def собрать_манифест(root, копия, keep):
     публичный репозиторий попадать не должно. `schema_version` — то же
     `pragma user_version`, что лежит в `counts`, только под своим именем из
     ТЗ: восстанавливающий ищет его там, а не внутри счётчиков таблиц.
-    `db_bytes` остаётся ради читателей манифеста версии 1."""
+    `db_bytes` остаётся ради читателей манифеста версии 1.
+
+    `файлы_мелочи` — тот же список, что уйдёт в `архив`: обход один, иначе
+    файл, положенный воркером между двумя обходами, попадал в тар, но не в
+    опись, и ночное учение падало на «лишнем файле» (ревью PR #117, P2-4)."""
     сч = счётчики(копия)
     файлы = {"contextd.db": sha(копия)}
     размеры = {"contextd.db": os.path.getsize(копия)}
-    for rel, p in мелочь(root):
+    for rel, p in (мелочь(root) if файлы_мелочи is None else файлы_мелочи):
         файлы[rel] = sha(p)
         размеры[rel] = os.path.getsize(p)
     return {"manifest_version": МАНИФЕСТ_ВЕРСИЯ, "created": mi.now_iso(),
@@ -199,12 +203,13 @@ def собрать_манифест(root, копия, keep):
             "retention": {"class": КЛАСС_ХРАНЕНИЯ, "keep": keep}}
 
 
-def архив(root, снимок_db, манифест, dst):
-    """tar.gz: база, манифест и метаданные. Список файлов — allowlist."""
+def архив(root, снимок_db, манифест, dst, файлы_мелочи=None):
+    """tar.gz: база, манифест и метаданные. Список файлов — allowlist, и
+    ровно тот, по которому собран манифест (см. `собрать_манифест`)."""
     with tarfile.open(dst, "w:gz") as tf:
         tf.add(снимок_db, arcname="contextd.db")
         tf.add(манифест, arcname="manifest.json")
-        for rel, p in мелочь(root):
+        for rel, p in (мелочь(root) if файлы_мелочи is None else файлы_мелочи):
             tf.add(p, arcname=rel)
 
 
@@ -653,13 +658,14 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
     try:
         копия = os.path.join(stage, "contextd.db")
         снимок(db, копия)
-        м = собрать_манифест(root, копия, keep)
+        список = мелочь(root)             # один обход на опись и на тар
+        м = собрать_манифест(root, копия, keep, список)
         сч = м["counts"]
         путь_м = os.path.join(stage, "manifest.json")
         with open(путь_м, "w", encoding="utf-8") as fh:
             json.dump(м, fh, ensure_ascii=False, indent=1, sort_keys=True)
         tar = os.path.join(stage, "core.tar.gz")
-        архив(root, копия, путь_м, tar)
+        архив(root, копия, путь_м, tar, список)
         enc = os.path.join(stage, имя)
         шифр(tar, enc, пароль)
         сводка = {"архив": имя, "байт": os.path.getsize(enc),
@@ -1843,7 +1849,7 @@ def main():
     ap.add_argument("--verify", metavar="ПУТЬ",
                     help="сверить копию с её манифестом: архив, каталог "
                          "носителя или развёрнутая копия; код 1 — разошлось, "
-                         "2 — хешей нет")
+                         "2 — хешей нет, 3 — не смог открыть")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -1851,7 +1857,15 @@ def main():
     if a.verify:
         # Носители и корень тут ни при чём: сверяется то, на что указали, и
         # команда обязана работать на машине, где ни того ни другого ещё нет.
-        r = проверить_манифест(a.verify, a.pass_file)
+        try:
+            r = проверить_манифест(a.verify, a.pass_file)
+        except (RuntimeError, OSError, subprocess.CalledProcessError,
+                tarfile.TarError, ValueError) as e:
+            # «не смог открыть» — не «разошлось»: трейсбек и единица
+            # сливали бы их в одно (ревью PR #117, P3-3)
+            print("core-backup --verify: не смог открыть %s: %s: %s"
+                  % (a.verify, type(e).__name__, e), file=sys.stderr)
+            raise SystemExit(3)
         print(json.dumps(r, ensure_ascii=False, indent=1, sort_keys=True))
         # Ноль только за «сошлось». Копия, которую проверить нечем, — не
         # проверенная копия, и зелёный код про неё был бы тем же молчанием,
