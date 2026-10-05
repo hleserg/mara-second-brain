@@ -11,16 +11,22 @@ pass, триаж issues…». Заголовок карточки написан
 человеческим текстом. Без ключа или если облако не ответило — печатаем
 старую механику, молчать хуже.
 
-Пустой вывод = молчание: Hermes ничего не отправит, если день был пустой.
+Перед сводкой — утро (Т-У.1, `docs/morning-brief.md`): до трёх дел из
+`kb/commitments`. Его собираем локально и без модели: у обязательств
+`cloud_allowed: false`. Утро печатается всегда, даже пустое — тишина
+неотличима от поломки.
 
     python3 scripts/daily-summary.py                  # за вчера
     python3 scripts/daily-summary.py --date 2026-08-31 --raw   # без облака
 """
-import os, re, sys, json, argparse, urllib.request
+import os, re, sys, glob, json, argparse, urllib.request
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vault_common                                          # noqa: E402
+import context_pack                                          # noqa: E402
+
+mb = context_pack.mb          # парсер фронтматтера в репо один
 
 FM = re.compile(r"\A---\n(.*?)\n---\n(.*)", re.S)
 API = "https://openrouter.ai/api/v1/chat/completions"
@@ -48,7 +54,7 @@ PROMPT = """Ты пишешь Серёге сводку за вчера: что 
   мелочь по сборке. Если за день в проекте только это — проект не называй.
 - Ничего не выдумывай. Чего в карточках нет — того не пиши.
 - Одно и то же дело — один пункт, а не по пункту на карточку.
-- От пяти до девяти пунктов, каждый одной строкой, не длиннее двух строк.
+- Не больше трёх пунктов: самое крупное за день, каждый одной строкой.
 - Без вступления и без вывода. Не начинай строку с двоеточия и названия
   проекта — пиши сразу по делу, глаголом.
 
@@ -151,7 +157,7 @@ def summary(vault, day, key=None, model=None, raw=False):
             redact.require_chain()
             clean, _ = redact.redact(material(git, ses))
             got = ask(material(git, ses), key, model, clean)
-            text = "" if got.strip().lower().startswith("пусто") else got
+            text = "" if got.strip().lower().startswith("пусто") else three(got)
         except Exception as e:
             # Сводка обязана прийти. Не вышло по-человечески — шлём механику
             # и говорим почему, чтобы поломка не выглядела нормой.
@@ -159,8 +165,83 @@ def summary(vault, day, key=None, model=None, raw=False):
     elif git or ses:
         text = plain(git, ses)
 
-    if d: text += ("\n\n" if text else "") + "Из дневника:\n" + d
+    if d: text += ("\n\n" if text else "") + "Из дневника:\n" + three(d)
     return ("Сводка за %s\n\n" % day + text.strip()) if text.strip() else ""
+
+
+def three(text):
+    """Первые три непустые строки. Модель просят о трёх, но просьба — не
+    гарантия, а утро, которое растёт, перестают читать."""
+    return "\n".join([l for l in text.splitlines() if l.strip()][:3])
+
+
+FRESH_DAYS = 3                # неподтверждённое старше — не мелькает
+TOP = 3                       # пунктов в утре
+
+
+def commitments(vault):
+    out = []
+    for p in sorted(glob.glob(os.path.join(vault, "kb/commitments", "*.md"))):
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            fm, _ = mb.frontmatter(fh.read())
+        out.append(fm)
+    return out
+
+
+def closed(vault, day):
+    """Сколько закрыто за день: статус done, и правка статуса пришлась на день."""
+    return sum(1 for fm in commitments(vault) if fm.get("status") == "done"
+               and str(fm.get("valid_from") or "").startswith(day))
+
+
+def _откуда(fm, today):
+    src = str(fm.get("origin") or "")
+    src = ("звонок" if src.startswith("call/") else
+           "сказано Маре" if src.startswith("correction/") else "запись")
+    occ = str(fm.get("occurred") or "")
+    day = occ[:10]
+    yday = (datetime.fromisoformat(today) - timedelta(days=1)).date().isoformat()
+    when = ("сегодня" if day == today else "вчера" if day == yday else
+            "%s.%s" % (day[8:10], day[5:7]) if day else "")
+    if len(occ) >= 16 and occ[10] in "T ":       # в карточках звонков — пробел
+        when += ", " + occ[11:16]
+    return ("%s %s" % (src, when)).strip()
+
+
+def morning(vault, today):
+    """Утро v1 по правилам `docs/morning-brief.md`. Без модели."""
+    edge = (datetime.fromisoformat(today) - timedelta(days=FRESH_DAYS)).date().isoformat()
+    live = [fm for fm in commitments(vault)
+            if fm.get("status") in context_pack.OPEN and fm.get("title")
+            and (fm.get("status") == "open"
+                 or str(fm.get("occurred") or "")[:10] >= edge)]
+    due = lambda fm: str(fm.get("due") or "")[:10]
+    dated = [fm for fm in live if due(fm) == today]
+    late = sorted([fm for fm in live if due(fm) and due(fm) < today], key=due)[-1:]
+    maybe = sorted([fm for fm in live if fm.get("status") == "proposed"
+                    and fm not in dated and fm not in late],
+                   key=lambda fm: str(fm.get("occurred") or ""), reverse=True)
+    blocks, n = [], 0
+    for head, items, tail in (("Сегодня с датой:", dated, lambda fm: "срок сегодня"),
+                              ("Это ещё нужно?", late,
+                               lambda fm: "срок был %s.%s" % (due(fm)[8:10], due(fm)[5:7])),
+                              ("Это твоё?", maybe, lambda fm: "")):
+        lines = []
+        for fm in items[:TOP - n]:
+            n += 1
+            title = mb.cut(mb.clean(str(fm["title"])), context_pack.MAX_TITLE)
+            lines.append("%d. %s%s\n   (%s)" % (n, title, " — " + tail(fm) if tail(fm) else "",
+                                                 _откуда(fm, today)))
+        if lines:
+            blocks.append("\n".join([head] + lines))
+    rest = len(live) - n
+    if not blocks:
+        blocks.append("С датой на сегодня ничего.")
+    if rest:
+        blocks.append("Ещё %d ждут — не сегодня." % rest)
+    if n:
+        blocks[-1] += "\nОтветь Маре словами: «сделал», «не моё», «перенеси на пятницу»."
+    return "\n\n".join(blocks)
 
 
 def main(argv=None):
@@ -173,7 +254,10 @@ def main(argv=None):
     day = a.date or (datetime.now().date() - timedelta(days=1)).isoformat()
     text = summary(a.vault, day, os.environ.get("OPENROUTER_API_KEY"),
                    os.environ.get("MARA_DIGEST_MODEL", "deepseek/deepseek-v4-pro"), a.raw)
-    if text: print(text)
+    today = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+    done = closed(a.vault, day)
+    parts = [morning(a.vault, today), "Вчера закрыто: %d." % done if done else "", text]
+    print("\n\n".join(p for p in parts if p))
     return 0
 
 
