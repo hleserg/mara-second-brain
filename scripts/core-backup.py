@@ -40,7 +40,13 @@ import mara_ingest as mi
 # Список жёсткий, и он же кормит сверку восстановления: таблица, которой тут
 # нет, в проверку не попадёт молча. Добавлять сюда каждую новую (ADR-0001).
 ТАБЛИЦЫ = ("devices", "events", "jobs", "blobs", "digests",
-           "commitments", "conversations", "projections")
+           "commitments", "conversations", "projections",
+           # миграция 2 (Т2.1): набор §4.2
+           "messages", "transcripts", "transcript_segments", "entities",
+           "entity_aliases", "decisions", "facts", "evidence_refs",
+           "relations", "revisions", "corrections", "ingest_attempts",
+           "job_attempts", "audit_events", "provider_health", "alerts",
+           "compute_nodes")
 ПРОБА = 3                                              # столько блобов сверяем
 # Причина живёт одной строкой на два пути: её печатает ночь и её же
 # кладёт в итог ручное учение. Двумя литералами они расходились бы молча,
@@ -125,10 +131,15 @@ def снимок(db, dst):
 
 
 def счётчики(db):
+    """Строки по `ТАБЛИЦЫ`. Таблицы, которой в базе нет, нет и в итоге:
+    архив, снятый до миграции, сверяется со своим же манифестом, где её
+    тоже не было, — а не падает на `no such table`."""
     con = sqlite3.connect(db)
     try:
+        есть = {r[0] for r in con.execute(
+            "select name from sqlite_master where type='table'")}
         out = {t: con.execute("select count(*) from %s" % t).fetchone()[0]
-               for t in ТАБЛИЦЫ}
+               for t in ТАБЛИЦЫ if t in есть}
         out["user_version"] = con.execute("pragma user_version").fetchone()[0]
         return out
     finally:

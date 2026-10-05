@@ -19,6 +19,7 @@
 
     python3 scripts/mara_ingest.py --self-check
     MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate
+    MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate 1   # откат
 """
 import os, sys, json, time, uuid, random, sqlite3, hashlib, threading
 from datetime import datetime, timezone, timedelta
@@ -133,14 +134,14 @@ def uuid7():
           ("projections", "path"))
 
 
-def _операторы():
-    """SCHEMA по одному оператору, без комментариев.
+def _операторы(схема=None):
+    """SCHEMA (или другая схема миграции) по одному оператору, без комментариев.
 
     Нужно потому, что `executescript` перед запуском делает commit: подай он
     DDL внутри перестройки — и она перестанет быть одной транзакцией, а
     оборвавшись на середине, оставит базу без таблицы.
     """
-    for кусок in SCHEMA.split(";"):
+    for кусок in (схема or SCHEMA).split(";"):
         сжато = "\n".join(с for с in кусок.splitlines()
                           if not с.lstrip().startswith("--")).strip()
         if сжато:
@@ -157,7 +158,7 @@ def _ужать_ledger(con):
 
     Аддитивной миграцией это не делается: `alter table add column` заводит
     новую колонку, а уже созданную не трогает. В SQLite ужесточение колонки —
-    только перестройка таблицы целиком. Транзакцию держит `_поднять`.
+    только перестройка таблицы целиком. Транзакцию держит `_сдвинуть`.
     """
     if all(_обязателен(con, т, к) for т, к in ЛЕДЖЕР):
         return
@@ -185,7 +186,7 @@ def _миграция_1(con):
     """Базлайн: схема, какой её оставил код до версий.
 
     SCHEMA по одному оператору, а не `executescript`: тот перед запуском
-    делает commit и вынес бы миграцию из транзакции `_поднять`.
+    делает commit и вынес бы миграцию из транзакции `_сдвинуть`.
     """
     for о in _операторы():
         con.execute(о)
@@ -195,9 +196,152 @@ def _миграция_1(con):
     _ужать_ledger(con)                             # НБ12 из #39
 
 
+# Миграция 2: весь минимальный набор сущностей §4.2 мастер-ТЗ (Т2.1).
+# Только добавляет: новые таблицы и колонки, старые не перестраивает — Г4
+# не нужен. SCHEMA выше заморожена как базлайн: её проигрывает миграция 1, и
+# допиши туда — новая база и боевая разъедутся. Колонки, которых ТЗ не
+# задаёт, — минимум: ключ, время, `*_json` на остальное. Время — ISO-8601
+# текстом со сдвигом, как `events.occurred`: и UTC, и исходный сдвиг в одной
+# строке (§5.1). Ключи на чужие объекты разных видов (`object_kind` плюс
+# `object_id`) внешними быть не могут — SQLite не знает полиморфных ссылок.
+# Не свои таблицы: source_events — это `events`, DLQ — `jobs.state='dlq'`,
+# projection_state — колонки `projections`, claims живут в `facts`.
+SCHEMA_2 = """
+create table if not exists messages(
+  id text primary key not null, event_id text not null references events(id),
+  conversation_id text references conversations(id), sender text,
+  recipients_json text, sent text, body text, created text);
+create table if not exists transcripts(
+  id text primary key not null, event_id text not null references events(id),
+  blob_sha256 text, engine text, model text, language text, created text);
+create table if not exists transcript_segments(
+  id text primary key not null,
+  transcript_id text not null references transcripts(id),
+  seq integer not null, start_ms integer not null, end_ms integer not null,
+  speaker text, text text, unique(transcript_id, seq),
+  check(start_ms >= 0 and end_ms >= start_ms));
+create table if not exists entities(
+  id text primary key not null, kind text not null, name text not null,
+  version integer not null default 1, created text, updated text);
+create table if not exists entity_aliases(
+  entity_id text not null references entities(id), alias text not null,
+  source text, created text, primary key(entity_id, alias));
+create table if not exists decisions(
+  id text primary key not null, title text, status text, decided text,
+  conversation_id text references conversations(id), origin_event text,
+  version integer not null default 1, created text, updated text,
+  classification text);
+create table if not exists facts(
+  id text primary key not null, subject_kind text not null,
+  subject_id text not null, predicate text not null, object_json text,
+  confidence real check(confidence between 0 and 1), valid_from text,
+  valid_until text, origin_event text, version integer not null default 1,
+  created text, updated text, classification text);
+create table if not exists evidence_refs(
+  id text primary key not null, object_kind text not null,
+  object_id text not null,
+  kind text not null check(kind in ('audio', 'message', 'derived')),
+  segment_id text references transcript_segments(id), start_ms integer,
+  end_ms integer, message_id text references messages(id),
+  derived_from_json text,
+  producer text not null check(producer in ('rule', 'model', 'human')),
+  created text);
+create table if not exists relations(
+  id text primary key not null, from_kind text not null,
+  from_id text not null, type text not null, to_kind text not null,
+  to_id text not null, confidence real, valid_from text, valid_until text,
+  origin_event text, created text);
+create table if not exists revisions(
+  object_kind text not null, object_id text not null,
+  version integer not null, changed_json text, actor_type text,
+  actor_id text, reason text, origin_event text, occurred text not null,
+  primary key(object_kind, object_id, version));
+create table if not exists corrections(
+  id text primary key not null, object_kind text not null,
+  object_id text not null, version integer, field text, old_json text,
+  new_json text, actor_type text, actor_id text, reason text,
+  origin_event text, occurred text not null);
+create table if not exists ingest_attempts(
+  id text primary key not null, source text, device_id text,
+  idempotency_key text, received text not null, outcome text not null,
+  event_id text references events(id), error text);
+create table if not exists job_attempts(
+  job_id text not null references jobs(id), attempt integer not null,
+  started text not null, finished text, outcome text, error text,
+  primary key(job_id, attempt));
+create table if not exists audit_events(
+  id text primary key not null, occurred text not null, actor_type text,
+  actor_id text, action text not null, object_kind text, object_id text,
+  detail_json text);
+create table if not exists provider_health(
+  provider text primary key not null,
+  state text not null default 'unknown' check(state in
+    ('healthy', 'degraded', 'unhealthy', 'unknown', 'recovering')),
+  checked text, since text, detail_json text);
+create table if not exists alerts(
+  id text primary key not null, kind text not null, severity text,
+  state text not null default 'open' check(state in
+    ('open', 'acked', 'resolved')),
+  object_kind text, object_id text, opened text not null, resolved text,
+  detail_json text);
+create table if not exists compute_nodes(
+  id text primary key not null, name text not null unique, role text,
+  last_seen text, capabilities_json text);
+create index if not exists segments_transcript on transcript_segments(transcript_id);
+create index if not exists evidence_object on evidence_refs(object_kind, object_id);
+create index if not exists corrections_object on corrections(object_kind, object_id);
+create index if not exists audit_object on audit_events(object_kind, object_id)
+"""
+# Колонки, которые миграция 2 добавляет к старым таблицам. `drop column`
+# откатывает их только пока на них нет индекса и ограничений — не вешать.
+КОЛОНКИ_2 = (
+    ("commitments", "version", "integer not null default 1"),   # ADR-0003
+    ("commitments", "updated", "text"),
+    ("commitments", "source_account", "text"),                  # ADR-0002
+    ("commitments", "extractor", "text"),                       # ТЗ: модель
+    ("commitments", "prompt_version", "text"),
+    ("projections", "ledger_version", "integer"),   # = projection_state
+    ("projections", "projector_version", "integer"),
+    ("projections", "manifest_hash", "text"),
+)
+
+
+def _миграция_2(con):
+    for о in _операторы(SCHEMA_2):
+        con.execute(о)
+    for таблица, поле, тип in КОЛОНКИ_2:
+        con.execute("alter table %s add column %s %s" % (таблица, поле, тип))
+
+
+def _откат_2(con):
+    """Назад к 1 — только пока в новое ничего не записали.
+
+    Записали — отказ: такой откат стёр бы данные, и идёт он через
+    восстановление из бэкапа (RUNBOOK-deploy.md §6а), а не этой командой.
+    """
+    таблицы = [о.split("(")[0].split()[-1] for о in _операторы(SCHEMA_2)
+               if о.startswith("create table")]
+    занято = [т for т in таблицы
+              if con.execute("select 1 from %s limit 1" % т).fetchone()]
+    занято += sorted({т for т, п, тип in КОЛОНКИ_2 if con.execute(
+        "select 1 from %s where %s is not %s limit 1" % (
+            т, п, "1" if "default 1" in тип else "null")).fetchone()})
+    if занято:
+        raise RuntimeError("contextd.db: откат 2 → 1 стёр бы записанное в %s"
+                           " — только восстановлением из бэкапа"
+                           % ", ".join(занято))
+    for таблица, поле, _ in КОЛОНКИ_2:
+        con.execute("alter table %s drop column %s" % (таблица, поле))
+    for т in reversed(таблицы):          # дети раньше родителей: внешние ключи
+        con.execute("drop table %s" % т)
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
-МИГРАЦИИ = (_миграция_1,)
+МИГРАЦИИ = (_миграция_1, _миграция_2)
+# Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
+# ниже него только пустая база.
+ОТКАТЫ = (None, _откат_2)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 
@@ -211,15 +355,16 @@ def _новее(v):
                         "%d) — код откачен без базы? Не пишу в неё." % (v, ВЕРСИЯ))
 
 
-def _поднять(con):
-    """Поднять базу до `ВЕРСИЯ`, по номеру за раз, каждый — одной транзакцией.
+def _сдвинуть(con, цель=ВЕРСИЯ):
+    """Довести базу до версии `цель`, по номеру за раз, каждый — одной
+    транзакцией. Обычно вверх, до `ВЕРСИЯ`; ниже — откат по `ОТКАТЫ`.
 
     `begin immediate` берёт запись сразу, и версия перечитывается уже под
     замком: второй `--migrate`, пришедший в ту же секунду, ждёт до 30 с
     (timeout соединения) и видит готовое. `user_version` живёт в заголовке
     базы и откатывается вместе с транзакцией — сорвался шаг, номер прежний.
     """
-    if _версия(con) == ВЕРСИЯ:
+    if _версия(con) == цель:
         return                       # не брать замок на запись ради `pragma`
     while True:
         con.execute("begin immediate")
@@ -227,11 +372,19 @@ def _поднять(con):
             v = _версия(con)
             if v > ВЕРСИЯ:
                 raise _новее(v)
-            if v == ВЕРСИЯ:
+            if v == цель:
                 con.execute("commit")
                 return
-            МИГРАЦИИ[v](con)
-            con.execute("pragma user_version=%d" % (v + 1))
+            if v < цель:
+                МИГРАЦИИ[v](con)
+                v += 1
+            else:
+                if ОТКАТЫ[v - 1] is None:
+                    raise RuntimeError("contextd.db: версия %d — базлайн, "
+                                       "ниже не откатывается" % v)
+                ОТКАТЫ[v - 1](con)
+                v -= 1
+            con.execute("pragma user_version=%d" % v)
             con.execute("commit")
         except BaseException:
             con.execute("rollback")
@@ -245,6 +398,9 @@ def _открыть(root):
                           isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("pragma journal_mode=wal")
+    # Вне транзакции, иначе молча не включится — потому здесь, а не в
+    # миграции. По умолчанию SQLite ссылки не проверяет вовсе (ADR-0005).
+    con.execute("pragma foreign_keys=on")
     return con
 
 
@@ -261,7 +417,7 @@ def connect(root=None):
         # ponytail: при двух и более миграциях сосед, открывший новую базу
         # между шагами, увидит промежуточный номер и откажет — один раз, на
         # первом запуске; его крон пройдёт в следующий заход.
-        _поднять(con)
+        _сдвинуть(con)
     elif v != ВЕРСИЯ:
         con.close()
         raise _новее(v) if v > ВЕРСИЯ else RuntimeError(
@@ -270,11 +426,13 @@ def connect(root=None):
     return con
 
 
-def migrate(root=None):
-    """Поднять схему до версии кода и вернуть открытое соединение."""
+def migrate(root=None, цель=ВЕРСИЯ):
+    """Довести схему до `цель` (по умолчанию — версия кода) и вернуть
+    открытое соединение. Ниже версии кода `connect()` эту базу не откроет:
+    откат делают перед тем, как вернуть старый код (RUNBOOK-deploy.md §6а)."""
     con = _открыть(root)
     try:
-        _поднять(con)
+        _сдвинуть(con, цель)
     except BaseException:
         con.close()
         raise
@@ -287,14 +445,22 @@ def _migrate_cli():
         print("mara_ingest --migrate: базы нет (MARA_BLOBS=%s?)" % ROOT,
               file=sys.stderr)
         return 2
+    после = sys.argv[sys.argv.index("--migrate") + 1:]
+    цель = int(после[0]) if после and после[0].isdigit() else ВЕРСИЯ
+    if not 0 < цель <= ВЕРСИЯ:
+        print("mara_ingest --migrate: версии %d код не знает (1…%d)"
+              % (цель, ВЕРСИЯ), file=sys.stderr)
+        return 2
     con = _открыть(ROOT)
     было = _версия(con)
     con.close()
-    con = migrate(ROOT)
+    con = migrate(ROOT, цель)
     итог = con.execute("pragma integrity_check").fetchone()[0]
-    print("contextd.db: версия %d → %d, integrity_check: %s"
-          % (было, _версия(con), итог))
-    return 0 if итог == "ok" else 1
+    ссылки = "ok" if not con.execute(
+        "pragma foreign_key_check").fetchall() else "битые ссылки"
+    print("contextd.db: версия %d → %d, integrity_check: %s, "
+          "foreign_key_check: %s" % (было, _версия(con), итог, ссылки))
+    return 0 if итог == ссылки == "ok" else 1
 
 
 def dedupe_key(source, source_id, blob_sha256=None):
@@ -598,7 +764,8 @@ def self_check():
     # проглотит молча,
     # так что заметить можно только здесь.
     assert all(о.startswith("create ") and sqlite3.complete_statement(о + ";")
-               for о in _операторы()), "SCHEMA разъехалась по `;`"
+               for схема in (SCHEMA, SCHEMA_2) for о in _операторы(схема)), \
+        "SCHEMA разъехалась по `;`"
     # Целость по `;` — не весь инвариант. `create table if not exists
     # commitments (` с лишним пробелом оставляет SCHEMA целой, а перестройка
     # ищет свой оператор по префиксу с открывающей скобкой вплотную — и не

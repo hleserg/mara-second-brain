@@ -307,7 +307,7 @@ class СхемаЛеджера(unittest.TestCase):
                 return self.con.execute(sql, args)
 
         with self.assertRaises(sqlite3.OperationalError):
-            mi._поднять(Срыв(con))
+            mi._сдвинуть(Срыв(con))
         self.assertEqual(
             con.execute("pragma user_version").fetchone()[0], 0,
             "версия поднялась, а миграция откатилась")
@@ -341,7 +341,7 @@ class СхемаЛеджера(unittest.TestCase):
                 return self.con.execute(sql, args)
 
         счёт = Счётчик(con)
-        mi._поднять(счёт)
+        mi._сдвинуть(счёт)
         self.assertEqual(
             [с for с in счёт.было if с != "pragma user_version"], [],
             "миграция на уже поднятой базе полезла в запись")
@@ -428,6 +428,167 @@ class Версия(unittest.TestCase):
             capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(self.путь))
+
+
+# §4.2 мастер-ТЗ → где сущность живёт в базе. Три имени не свои таблицы:
+# `source_events` — это `events` с первого дня, DLQ — `jobs.state='dlq'`,
+# `projection_state` — колонки `projections`. `facts` держит и claims.
+СУЩНОСТИ = {
+    "source_events": "events", "conversations": "conversations",
+    "messages": "messages", "transcripts": "transcripts",
+    "transcript_segments": "transcript_segments", "entities": "entities",
+    "entity_aliases": "entity_aliases", "commitments": "commitments",
+    "decisions": "decisions", "facts/claims": "facts",
+    "evidence_refs": "evidence_refs", "relations": "relations",
+    "revisions": "revisions", "corrections": "corrections",
+    "projection_state": "projections", "ingest_attempts": "ingest_attempts",
+    "jobs": "jobs", "job_attempts": "job_attempts",
+    "audit_events": "audit_events", "provider_health": "provider_health",
+    "alerts": "alerts", "compute_nodes": "compute_nodes",
+}
+
+
+def форма(путь):
+    """Таблицы, их колонки и индексы — то, что откат обязан вернуть.
+
+    Не текст `sqlite_master.sql`: `drop column` правит его на месте, и
+    равенство текста зависело бы от того, как SQLite расставил запятые."""
+    con = sqlite3.connect(путь)
+    try:
+        return {т: (con.execute("pragma table_info(%s)" % т).fetchall(),
+                    sorted(r[1] for r in
+                           con.execute("pragma index_list(%s)" % т)))
+                for (т,) in con.execute(
+                    "select name from sqlite_master where type='table'")}
+    finally:
+        con.close()
+
+
+class Сущности(unittest.TestCase):
+    """Т2.1, кусок 2: миграция 2 заводит весь набор §4.2 и умеет назад."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.путь = os.path.join(self.dir, "contextd.db")
+
+    def база_v1(self):
+        """База в форме, которая стоит на doctor с 05.10: версия 1."""
+        con = sqlite3.connect(self.путь, isolation_level=None)
+        con.row_factory = sqlite3.Row
+        mi.МИГРАЦИИ[0](con)
+        con.execute("pragma user_version=1")
+        con.execute("insert into commitments(id,title,source_native_id) "
+                    "values('c1','смета','vault:kb/commitments/a.md')")
+        con.close()
+
+    def версия(self):
+        con = sqlite3.connect(self.путь)
+        try:
+            return con.execute("pragma user_version").fetchone()[0]
+        finally:
+            con.close()
+
+    def test_весь_набор_сущностей_на_месте(self):
+        mi.connect(self.dir).close()
+        таблицы = форма(self.путь)
+        for сущность, таблица in СУЩНОСТИ.items():
+            with self.subTest(сущность=сущность):
+                self.assertIn(таблица, таблицы)
+        колонки = {r[1] for r in таблицы["projections"][0]}
+        self.assertLessEqual({"ledger_version", "projector_version",
+                              "manifest_hash"}, колонки)
+        колонки = {r[1] for r in таблицы["commitments"][0]}
+        self.assertLessEqual({"version", "updated", "source_account",
+                              "extractor", "prompt_version"}, колонки)
+
+    def test_внешние_ключи_держат(self):
+        con = mi.connect(self.dir)
+        self.assertEqual(con.execute("pragma foreign_keys").fetchone()[0], 1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            con.execute("insert into transcript_segments(id,transcript_id,"
+                        "seq,start_ms,end_ms) values('s1','нет',0,0,10)")
+
+    def test_v1_доезжает_и_строки_целы(self):
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ)
+        self.assertEqual(con.execute(
+            "select version from commitments where id='c1'").fetchone()[0], 1)
+        self.assertEqual(con.execute("pragma foreign_key_check").fetchall(), [])
+
+    def test_откат_возвращает_форму_v1(self):
+        self.база_v1()
+        было = форма(self.путь)
+        mi.migrate(self.dir).close()
+        self.assertNotEqual(форма(self.путь), было)
+        mi.migrate(self.dir, 1).close()
+        self.assertEqual(self.версия(), 1)
+        self.assertEqual(форма(self.путь), было)
+        con = sqlite3.connect(self.путь)
+        self.assertEqual(
+            con.execute("select count(*) from commitments").fetchone()[0], 1)
+        con.close()
+        mi.migrate(self.dir).close()          # и обратно вверх — без хвостов
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ)
+
+    def test_откат_не_стирает_данные_молча(self):
+        """Путь вниз без потерь только пока в новое никто не писал. Записали
+        — отказ: такой откат идёт через восстановление из бэкапа."""
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        con.execute("insert into entities(id,kind,name) "
+                    "values('e1','person','Кто-то')")
+        con.close()
+        with self.assertRaises(RuntimeError) as e:
+            mi.migrate(self.dir, 1)
+        self.assertIn("entities", str(e.exception))
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ)
+
+    def test_правленая_версия_обязательства_тоже_держит_откат(self):
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        con.execute("update commitments set version=2 where id='c1'")
+        con.close()
+        with self.assertRaises(RuntimeError) as e:
+            mi.migrate(self.dir, 1)
+        self.assertIn("commitments", str(e.exception))
+
+    def test_ниже_базлайна_не_откатывается(self):
+        mi.connect(self.dir).close()
+        mi.migrate(self.dir, 1).close()
+        with self.assertRaises(RuntimeError):
+            mi.migrate(self.dir, 0)
+        self.assertEqual(self.версия(), 1)
+
+    def test_команда_с_номером_откатывает(self):
+        self.база_v1()
+        mi.migrate(self.dir).close()
+        r = subprocess.run(
+            [sys.executable, os.path.join(СКРИПТЫ, "mara_ingest.py"),
+             "--migrate", "1"], env=dict(os.environ, MARA_BLOBS=self.dir),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("версия %d → 1" % mi.ВЕРСИЯ, r.stdout)
+        self.assertIn("foreign_key_check: ok", r.stdout)
+        self.assertEqual(self.версия(), 1)
+
+    def test_счётчики_бэкапа_видят_новые_таблицы_и_старый_архив(self):
+        """Сверка восстановления считает по `ТАБЛИЦЫ`. Новая таблица мимо
+        списка в сверку не попадёт; архив версии 1 при этом обязан
+        считаться, а не падать на `no such table`."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "core_backup", os.path.join(СКРИПТЫ, "core-backup.py"))
+        cb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cb)
+        mi.connect(self.dir).close()
+        таблицы = {т for т in форма(self.путь) if not т.startswith("sqlite_")}
+        self.assertEqual(set(cb.ТАБЛИЦЫ), таблицы)
+        os.remove(self.путь)
+        self.база_v1()
+        сч = cb.счётчики(self.путь)
+        self.assertEqual((сч["commitments"], сч["user_version"]), (1, 1))
+        self.assertNotIn("entities", сч)
 
 
 if __name__ == "__main__":
