@@ -18,6 +18,7 @@
 импортируют, а не запускают.
 
     python3 scripts/mara_ingest.py --self-check
+    MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate
 """
 import os, sys, json, time, uuid, random, sqlite3, hashlib, threading
 from datetime import datetime, timezone, timedelta
@@ -156,68 +157,144 @@ def _ужать_ledger(con):
 
     Аддитивной миграцией это не делается: `alter table add column` заводит
     новую колонку, а уже созданную не трогает. В SQLite ужесточение колонки —
-    только перестройка таблицы целиком.
+    только перестройка таблицы целиком. Транзакцию держит `_поднять`.
     """
     if all(_обязателен(con, т, к) for т, к in ЛЕДЖЕР):
         return
-    # `begin immediate` берёт запись сразу: второй процесс, открывшийся в ту
-    # же секунду, ждёт здесь до 30 с (timeout соединения) и входит только
-    # после чужого commit — две перестройки не переплетаются. Пере-проверка
-    # ниже не про сохранность: дождавшийся перестроил бы новую таблицу в
-    # такую же новую и ничего не потерял. Она про то, чтобы не делать этого
-    # зря.
-    con.execute("begin immediate")
-    try:
-        for таблица, ключ in ЛЕДЖЕР:
-            if _обязателен(con, таблица, ключ):
-                continue           # успел сосед, пока мы стояли за замком
-            поля = ",".join(r["name"] for r in
-                            con.execute("pragma table_info(%s)" % таблица))
-            con.execute("alter table %s rename to %s_old" % (таблица, таблица))
-            con.execute(next(о for о in _операторы() if о.startswith(
-                "create table if not exists %s(" % таблица)))
-            con.execute("insert into %s(%s) select %s from %s_old"
-                        % (таблица, поля, поля, таблица))
-            con.execute("drop table %s_old" % таблица)
-        # только теперь, когда `_old` снесены вместе со своими индексами:
-        # индекс уезжает за переименованной таблицей, сохраняя имя, и
-        # `create index if not exists` увидел бы имя занятым и промолчал —
-        # проекции остались бы без индекса, и никто бы не заметил
-        for о in _операторы():
-            if о.startswith("create index"):
-                con.execute(о)
-        con.execute("commit")
-    except Exception:
-        con.execute("rollback")
-        raise
+    for таблица, ключ in ЛЕДЖЕР:
+        if _обязателен(con, таблица, ключ):
+            continue
+        поля = ",".join(r["name"] for r in
+                        con.execute("pragma table_info(%s)" % таблица))
+        con.execute("alter table %s rename to %s_old" % (таблица, таблица))
+        con.execute(next(о for о in _операторы() if о.startswith(
+            "create table if not exists %s(" % таблица)))
+        con.execute("insert into %s(%s) select %s from %s_old"
+                    % (таблица, поля, поля, таблица))
+        con.execute("drop table %s_old" % таблица)
+    # только теперь, когда `_old` снесены вместе со своими индексами:
+    # индекс уезжает за переименованной таблицей, сохраняя имя, и
+    # `create index if not exists` увидел бы имя занятым и промолчал —
+    # проекции остались бы без индекса, и никто бы не заметил
+    for о in _операторы():
+        if о.startswith("create index"):
+            con.execute(о)
 
 
-def connect(root=None):
-    """Открыть базу, создав схему. Каталог 0700: в нём лежат личные разговоры."""
+def _миграция_1(con):
+    """Базлайн: схема, какой её оставил код до версий.
+
+    SCHEMA по одному оператору, а не `executescript`: тот перед запуском
+    делает commit и вынес бы миграцию из транзакции `_поднять`.
+    """
+    for о in _операторы():
+        con.execute(о)
+    if "scopes" not in {r["name"] for r in
+                        con.execute("pragma table_info(devices)")}:
+        con.execute("alter table devices add column scopes text")  # ADR-0009
+    _ужать_ledger(con)                             # НБ12 из #39
+
+
+# Номер миграции — её место здесь плюс один: `user_version` N значит, что
+# прошли первые N. Дописывать только в конец (migration-plan.md §2).
+МИГРАЦИИ = (_миграция_1,)
+ВЕРСИЯ = len(МИГРАЦИИ)
+КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
+
+
+def _версия(con):
+    return con.execute("pragma user_version").fetchone()[0]
+
+
+def _новее(v):
+    return RuntimeError("contextd.db: схема версии %d новее кода (он знает до "
+                        "%d) — код откачен без базы? Не пишу в неё." % (v, ВЕРСИЯ))
+
+
+def _поднять(con):
+    """Поднять базу до `ВЕРСИЯ`, по номеру за раз, каждый — одной транзакцией.
+
+    `begin immediate` берёт запись сразу, и версия перечитывается уже под
+    замком: второй `--migrate`, пришедший в ту же секунду, ждёт до 30 с
+    (timeout соединения) и видит готовое. `user_version` живёт в заголовке
+    базы и откатывается вместе с транзакцией — сорвался шаг, номер прежний.
+    """
+    if _версия(con) == ВЕРСИЯ:
+        return                       # не брать замок на запись ради `pragma`
+    while True:
+        con.execute("begin immediate")
+        try:
+            v = _версия(con)
+            if v > ВЕРСИЯ:
+                raise _новее(v)
+            if v == ВЕРСИЯ:
+                con.execute("commit")
+                return
+            МИГРАЦИИ[v](con)
+            con.execute("pragma user_version=%d" % (v + 1))
+            con.execute("commit")
+        except BaseException:
+            con.execute("rollback")
+            raise
+
+
+def _открыть(root):
     root = root or ROOT
     os.makedirs(root, mode=0o700, exist_ok=True)
     con = sqlite3.connect(os.path.join(root, "contextd.db"), timeout=30,
                           isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("pragma journal_mode=wal")
-    con.executescript(SCHEMA)
-    # Аддитивные миграции. `create table if not exists` существующую таблицу не
-    # трогает, поэтому колонки, появившиеся позже, добавляются здесь и по одной.
-    # Дешевле отдельного миграционного скрипта: выполняется на каждом открытии,
-    # идемпотентно, и база на doctor доезжает сама — при первом же открытии,
-    # то есть с ближайшим кроном, а не с рестартом демона.
-    have = {r["name"] for r in con.execute("pragma table_info(devices)")}
-    if "scopes" not in have:                       # ADR-0009, откат п. 2
-        try:
-            con.execute("alter table devices add column scopes text")
-        except sqlite3.OperationalError as e:
-            # Два процесса открылись разом и оба увидели, что колонки нет.
-            # Тот, кто пришёл вторым, получает `duplicate column name` —
-            # это не ошибка, а ровно тот результат, которого он и хотел.
-            if "duplicate column" not in str(e).lower():
-                raise
-    _ужать_ledger(con)                             # НБ12 из #39
     return con
+
+
+def connect(root=None):
+    """Открыть базу. Каталог 0700: в нём лежат личные разговоры.
+
+    Схему не трогает: миграция — отдельной командой (`migrate`), иначе выкат
+    кода и есть миграция, и проводит её первый же крон. Исключение — пустой
+    файл: беречь в нём нечего, и он сразу заводится последней версией.
+    """
+    con = _открыть(root)
+    v = _версия(con)
+    if v == 0 and con.execute("select 1 from sqlite_master").fetchone() is None:
+        # ponytail: при двух и более миграциях сосед, открывший новую базу
+        # между шагами, увидит промежуточный номер и откажет — один раз, на
+        # первом запуске; его крон пройдёт в следующий заход.
+        _поднять(con)
+    elif v != ВЕРСИЯ:
+        con.close()
+        raise _новее(v) if v > ВЕРСИЯ else RuntimeError(
+            "contextd.db: схема версии %d, код ждёт %d — сначала `%s`"
+            % (v, ВЕРСИЯ, КОМАНДА))
+    return con
+
+
+def migrate(root=None):
+    """Поднять схему до версии кода и вернуть открытое соединение."""
+    con = _открыть(root)
+    try:
+        _поднять(con)
+    except BaseException:
+        con.close()
+        raise
+    return con
+
+
+def _migrate_cli():
+    db = os.path.join(ROOT, "contextd.db")
+    if not os.path.exists(db):
+        print("mara_ingest --migrate: базы нет (MARA_BLOBS=%s?)" % ROOT,
+              file=sys.stderr)
+        return 2
+    con = _открыть(ROOT)
+    было = _версия(con)
+    con.close()
+    con = migrate(ROOT)
+    итог = con.execute("pragma integrity_check").fetchone()[0]
+    print("contextd.db: версия %d → %d, integrity_check: %s"
+          % (было, _версия(con), итог))
+    return 0 if итог == "ok" else 1
 
 
 def dedupe_key(source, source_id, blob_sha256=None):
@@ -516,16 +593,17 @@ def self_check():
         assert "не абсолютный" in str(e), str(e)
     # `_операторы()` режет SCHEMA по `;`. Точка с запятой в комментарии или
     # в литерале разрежет её посреди оператора, и перестройка не найдёт
-    # `create table` — упадёт `StopIteration` из `connect`, то есть встанет
-    # всё, что открывает базу. `executescript` такую SCHEMA проглотит молча,
+    # `create table` — упадёт `StopIteration` из миграции, то есть ни
+    # `--migrate`, ни новая база не поднимутся. `executescript` такую SCHEMA
+    # проглотит молча,
     # так что заметить можно только здесь.
     assert all(о.startswith("create ") and sqlite3.complete_statement(о + ";")
                for о in _операторы()), "SCHEMA разъехалась по `;`"
     # Целость по `;` — не весь инвариант. `create table if not exists
     # commitments (` с лишним пробелом оставляет SCHEMA целой, а перестройка
     # ищет свой оператор по префиксу с открывающей скобкой вплотную — и не
-    # находит: `StopIteration` из `connect`, то есть встают все, кто открывает
-    # базу. Тесты это ловят, но на машине без тестов заметить можно только
+    # находит: `StopIteration` из миграции, то есть не поднимется ни одна
+    # база. Тесты это ловят, но на машине без тестов заметить можно только
     # здесь.
     for таблица, _ in ЛЕДЖЕР:
         assert sum(о.startswith("create table if not exists %s(" % таблица)
@@ -538,4 +616,6 @@ def self_check():
 if __name__ == "__main__":
     if "--self-check" in sys.argv:
         raise SystemExit(self_check())
-    print("mara_ingest: библиотека, запускать нечего (есть --self-check)")
+    if "--migrate" in sys.argv:
+        raise SystemExit(_migrate_cli())
+    print("mara_ingest: библиотека; есть --self-check и --migrate")

@@ -1222,7 +1222,7 @@ class ТестScopes(unittest.TestCase):
                     "revoked_at text)")
         con.execute("insert into devices(id,name,token_sha256) values('d1','старое','x')")
         con.commit(); con.close()
-        con = mi.connect(каталог)
+        con = mi.migrate(каталог)
         колонки = {r["name"] for r in con.execute("pragma table_info(devices)")}
         self.assertIn("scopes", колонки)
         row = con.execute("select name, scopes from devices where id='d1'").fetchone()
@@ -1309,51 +1309,23 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(код, 1)
         self.assertIn("--allow %s call message" % self.dev, вывод)
 
-    def test_гонка_миграции_не_валит_открытие(self):
-        """Колонку добавил сосед между `pragma` и `alter` — это не ошибка.
-
-        Гонку тут не ждут случайно, а устраивают: подменённый `sqlite3.connect`
-        добавляет колонку ровно в тот момент, когда наш `pragma table_info` уже
-        отработал и сказал «колонки нет». Без `except OperationalError` в
-        `mi.connect` этот тест падает с `duplicate column name`.
-        """
+    def test_колонка_уже_есть_миграция_проходит(self):
+        """База, где `scopes` уже добавили, — `--migrate` не падает на
+        `duplicate column`. Гонки двух открытий за колонку больше нет:
+        миграция идёт под `begin immediate` и перечитывает версию под ним."""
         import sqlite3
         каталог = tempfile.mkdtemp()
         путь = os.path.join(каталог, "contextd.db")
         con = sqlite3.connect(путь)
         con.execute("create table devices(id text primary key, name text, "
                     "token_sha256 text not null, created text, last_seen text, "
-                    "revoked_at text)")
+                    "revoked_at text, scopes text)")
         con.commit(); con.close()
-
-        настоящий = sqlite3.connect
-
-        class Соседский(sqlite3.Connection):
-            """Соединение, за спиной которого колонку добавляет кто-то другой."""
-            подставил = False
-
-            def execute(self, sql, *a):
-                r = super().execute(sql, *a)
-                if not Соседский.подставил and "table_info(devices)" in sql:
-                    Соседский.подставил = True
-                    сосед = настоящий(путь)
-                    сосед.execute("alter table devices add column scopes text")
-                    сосед.commit(); сосед.close()
-                return r
-
-        sqlite3.connect = lambda *a, **k: настоящий(*a, factory=Соседский,
-                                                    **{k_: v for k_, v in k.items()
-                                                       if k_ != "factory"})
-        try:
-            mi.connect(каталог).close()
-        finally:
-            sqlite3.connect = настоящий
-        self.assertTrue(Соседский.подставил,
-                        "гонка не состоялась, тест ничего не проверил")
+        mi.migrate(каталог).close()
         con = sqlite3.connect(путь)
-        имена = {r[1] for r in con.execute("pragma table_info(devices)")}
+        self.assertEqual(con.execute("pragma user_version").fetchone()[0],
+                         mi.ВЕРСИЯ)
         con.close()
-        self.assertIn("scopes", имена)
 
     def test_история_пуста_у_нового_устройства(self):
         dev2, _ = contextd.pair(self.con, "ещё не звонил")
