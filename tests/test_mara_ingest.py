@@ -1,7 +1,8 @@
 """Приём: дедуп, аренда работ, расписание ретраев (ТЗ §17, §20)."""
-import os, sys, sqlite3, tempfile, unittest
+import os, sys, sqlite3, tempfile, unittest, subprocess
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+sys.path.insert(0, СКРИПТЫ)
 import mara_ingest as mi
 
 EV = {"kind": "call", "source": "phone", "source_id": "call-1",
@@ -243,12 +244,12 @@ class СхемаЛеджера(unittest.TestCase):
                     con.execute("insert into %s(%s) values(null)"
                                 % (таблица, поле))
 
-    def test_старая_база_доезжает_сама(self):
+    def test_старая_база_доезжает_миграцией(self):
         """Аддитивная миграция такое не умеет: `add column` уже созданную
-        колонку не меняет. Значит перестройка — и она обязана случиться при
-        первом же открытии, как и добавление `scopes`."""
+        колонку не меняет. Значит перестройка — и случается она в `--migrate`,
+        а не при открытии (migration-plan.md §2 п.1)."""
         self.старая_база()
-        con = mi.connect(self.dir)
+        con = mi.migrate(self.dir)
         for таблица, поле in КЛЮЧИ:
             флаги = {r["name"]: r["notnull"] for r in
                      con.execute("pragma table_info(%s)" % таблица)}
@@ -257,7 +258,7 @@ class СхемаЛеджера(unittest.TestCase):
 
     def test_перестройка_не_теряет_строки(self):
         self.старая_база()
-        con = mi.connect(self.dir)
+        con = mi.migrate(self.dir)
 
         def одно(sql):
             return con.execute(sql).fetchone()[0]
@@ -271,7 +272,7 @@ class СхемаЛеджера(unittest.TestCase):
         not exists` потом видит занятое имя и молча ничего не делает. Тогда
         сверка проекций теряет свой индекс и никто об этом не узнаёт."""
         self.старая_база()
-        con = mi.connect(self.dir)
+        con = mi.migrate(self.dir)
         имена = {r["name"] for r in
                  con.execute("pragma index_list(projections)")}
         self.assertIn("projections_object", имена)
@@ -306,7 +307,10 @@ class СхемаЛеджера(unittest.TestCase):
                 return self.con.execute(sql, args)
 
         with self.assertRaises(sqlite3.OperationalError):
-            mi._ужать_ledger(Срыв(con))
+            mi._поднять(Срыв(con))
+        self.assertEqual(
+            con.execute("pragma user_version").fetchone()[0], 0,
+            "версия поднялась, а миграция откатилась")
         флаги = {r["name"]: r["notnull"] for r in
                  con.execute("pragma table_info(commitments)")}
         self.assertEqual(флаги["id"], 0, "форма не вернулась к прежней")
@@ -315,13 +319,12 @@ class СхемаЛеджера(unittest.TestCase):
         self.assertEqual([r["name"] for r in con.execute(
             "select name from sqlite_master where name like '%_old'")], [])
 
-    def test_второе_открытие_не_лезет_в_запись(self):
-        """Ранний выход — не украшение. Без него каждое открытие базы брало
-        бы `begin immediate`, то есть блокировку на запись, ради трёх
-        `pragma`; а открывают базу демон на каждый HTTP-поток, бэкап, ретеншн
-        и весь крон."""
+    def test_второй_migrate_не_лезет_в_запись(self):
+        """Ранний выход — не украшение. Без него каждый `--migrate` на уже
+        поднятой базе брал бы `begin immediate`, то есть блокировку на
+        запись под живым демоном, ради одной `pragma`."""
         self.старая_база()
-        mi.connect(self.dir).close()
+        mi.migrate(self.dir).close()
         con = mi.connect(self.dir)
 
         class Счётчик:
@@ -338,21 +341,93 @@ class СхемаЛеджера(unittest.TestCase):
                 return self.con.execute(sql, args)
 
         счёт = Счётчик(con)
-        mi._ужать_ledger(счёт)
+        mi._поднять(счёт)
         self.assertEqual(
-            [с for с in счёт.было
-             if not с.startswith("pragma table_info(")], [],
-            "перестройка на уже перестроенной базе полезла в запись")
+            [с for с in счёт.было if с != "pragma user_version"], [],
+            "миграция на уже поднятой базе полезла в запись")
 
     def test_второе_открытие_ничего_не_перестраивает(self):
         self.старая_база()
-        mi.connect(self.dir).close()
+        mi.migrate(self.dir).close()
         con = mi.connect(self.dir)
         остатки = [r["name"] for r in con.execute(
             "select name from sqlite_master where name like '%_old'")]
         self.assertEqual(остатки, [], "хвосты перестройки остались в базе")
         self.assertEqual(
             con.execute("select count(*) from commitments").fetchone()[0], 1)
+
+
+class Версия(unittest.TestCase):
+    """Т2.1: версия схемы в `pragma user_version`, миграции — отдельной
+    командой. `connect()` больше ничего не перестраивает: иначе выкат кода
+    и есть миграция, и первый же крон проводит её без бэкапа и без гейта
+    Г4 (migration-plan.md §1)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.путь = os.path.join(self.dir, "contextd.db")
+
+    def версия(self):
+        con = sqlite3.connect(self.путь)
+        try:
+            return con.execute("pragma user_version").fetchone()[0]
+        finally:
+            con.close()
+
+    def test_пустая_база_заводится_последней_версией(self):
+        mi.connect(self.dir).close()
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ)
+        self.assertGreaterEqual(mi.ВЕРСИЯ, 1)
+
+    def test_старая_база_отказ_с_командой(self):
+        СхемаЛеджера.старая_база(self)
+        with self.assertRaises(RuntimeError) as e:
+            mi.connect(self.dir)
+        self.assertIn("mara_ingest.py --migrate", str(e.exception))
+        флаги = {r[1]: r[3] for r in sqlite3.connect(self.путь).execute(
+            "pragma table_info(commitments)")}
+        self.assertEqual(флаги["id"], 0, "connect перестроил таблицу сам")
+        self.assertEqual(self.версия(), 0)
+
+    def test_база_новее_кода_отказ(self):
+        mi.connect(self.dir).close()
+        con = sqlite3.connect(self.путь)
+        con.execute("pragma user_version=%d" % (mi.ВЕРСИЯ + 1))
+        con.close()
+        for открыть in (mi.connect, mi.migrate):
+            with self.subTest(открыть=открыть.__name__):
+                with self.assertRaises(RuntimeError) as e:
+                    открыть(self.dir)
+                self.assertIn("новее", str(e.exception))
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ + 1)
+
+    def test_после_migrate_connect_открывает(self):
+        СхемаЛеджера.старая_база(self)
+        mi.migrate(self.dir).close()
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ)
+        con = mi.connect(self.dir)
+        self.assertEqual(
+            con.execute("select count(*) from commitments").fetchone()[0], 1)
+
+    def test_команда_поднимает_и_проверяет(self):
+        СхемаЛеджера.старая_база(self)
+        r = subprocess.run(
+            [sys.executable, os.path.join(СКРИПТЫ, "mara_ingest.py"),
+             "--migrate"], env=dict(os.environ, MARA_BLOBS=self.dir),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("версия 0 → %d" % mi.ВЕРСИЯ, r.stdout)
+        self.assertIn("integrity_check: ok", r.stdout)
+
+    def test_команда_не_заводит_базу_там_где_её_нет(self):
+        """Опечатка в `MARA_BLOBS` не должна молча заводить пустую базу
+        рядом с боевой и рапортовать «поднята»."""
+        r = subprocess.run(
+            [sys.executable, os.path.join(СКРИПТЫ, "mara_ingest.py"),
+             "--migrate"], env=dict(os.environ, MARA_BLOBS=self.dir),
+            capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self.путь))
 
 
 if __name__ == "__main__":
