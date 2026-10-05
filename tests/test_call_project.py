@@ -311,6 +311,8 @@ class Идентичность(unittest.TestCase):
         ids2 = {rel: _id(_текст(os.path.join(vault, rel)))
                 for rel in second if rel.startswith("kb/")}
         self.assertEqual(ids1, ids2, "id при повторной проекции другой")
+        self.assertEqual([r[0] for r in con.execute("select actor_type from revisions")],
+                         ["projector"] * 2, "по ревизии на обязательство, без повторов")
         # реестр знает объекты с первой проекции и теми же id
         в_базе = {r[0] for r in con.execute("select id from commitments")}
         в_базе |= {r[0] for r in con.execute("select id from conversations")}
@@ -371,6 +373,11 @@ class Идентичность(unittest.TestCase):
         self.assertEqual(con.execute("select status from commitments").fetchone()[0], "done")
         self.assertEqual(con.execute("select count(*) from corrections").fetchone()[0], 1,
                          "строка журнала «статус open → done» в истории")
+        ревизии = [dict(r) for r in con.execute("select * from revisions order by version")]
+        self.assertEqual([r["version"] for r in ревизии], [1, 2])
+        self.assertEqual((ревизии[1]["actor_type"], ревизии[1]["actor_id"],
+                          ревизии[1]["reason"]), ("human", "owner", "correction/correction_2"))
+        self.assertEqual(con.execute("select version from commitments").fetchone()[0], 2)
 
     def test_заведённая_правкой_на_занятом_пути_получает_различитель_из_id(self):
         root, vault, con = self.стенд()

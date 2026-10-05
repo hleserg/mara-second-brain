@@ -907,5 +907,90 @@ class Идентичность(unittest.TestCase):
         self.assertIn("вписано 0", Запуск.запустить(self, "--write-ids")[1])
 
 
+class Версия(unittest.TestCase):
+    """ADR-0003 п.1–2: `version` растёт на принятое изменение, `revisions`
+    хранит только изменившиеся поля; перерисовка без изменений версию не
+    трогает и ревизии не плодит."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.vault = os.path.join(self.tmp.name, "vault")
+        self.con = mi.connect(self.root)
+
+    def ревизии(self):
+        return [dict(r) for r in self.con.execute(
+            "select * from revisions order by version")]
+
+    def test_новый_объект_версия_1_и_ревизия_1(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        r = self.con.execute("select version from commitments").fetchone()
+        self.assertEqual(r["version"], 1)
+        рев, = self.ревизии()
+        self.assertEqual((рев["version"], рев["actor_type"], рев["actor_id"]),
+                         (1, "import", li.ПЕРЕНОС))
+        self.assertEqual(json.loads(рев["changed_json"])["status"], [None, "proposed"])
+
+    def test_повтор_без_изменений_версию_не_трогает(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
+        self.assertEqual(len(self.ревизии()), 1)
+
+    def test_изменение_поля_поднимает_версию_и_пишет_дифф(self):
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: proposed", "status: done"))
+        li.run(self.con, self.vault)
+        r = self.con.execute("select version, status, updated from commitments").fetchone()
+        self.assertEqual((r["version"], r["status"]), (2, "done"))
+        self.assertIsNotNone(r["updated"])
+        рев = self.ревизии()[-1]
+        self.assertEqual(рев["version"], 2)
+        self.assertEqual(json.loads(рев["changed_json"]), {"status": ["proposed", "done"]},
+                         "только изменившееся поле, до и после")
+
+    def test_перерисовка_не_откатывает_версию_на_единицу(self):
+        """`insert or replace` делал ровно это — заводил строку заново с
+        `version` по умолчанию."""
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        self.con.execute("update commitments set version=7")
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("due: 2026-09-04", "due: 2026-09-05"))
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 8)
+
+    def test_актор_ревизии_от_зовущего(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        li.перенести_карточку(self.con, self.vault, "kb/commitments/a.md",
+                              актор=("human", "owner", "correction/c1"))
+        рев, = self.ревизии()
+        self.assertEqual((рев["actor_type"], рев["actor_id"], рев["reason"]),
+                         ("human", "owner", "correction/c1"))
+
+    def test_у_разговора_версии_нет_и_обновление_проходит(self):
+        p = карточка(self.vault, "kb/conversations/c.md", type="conversation",
+                     source_id="call/call_1", status=None, owner=None, due=None,
+                     promised_to=None, origin=None, title="Звонок")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("title: Звонок", "title: Звонок с Анной"))
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select title from conversations").fetchone()[0],
+                         "Звонок с Анной")
+        self.assertEqual(self.ревизии(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

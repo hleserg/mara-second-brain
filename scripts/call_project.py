@@ -344,7 +344,8 @@ def run(event_id, vault, root=None):
     # Реестр узнаёт о карточке тем же прогоном, а не ночным переносом: id
     # в шапке и ключ строки — одно и то же с первой секунды (Т2.2).
     for rel in written:
-        li.перенести_карточку(con, vault, rel)
+        li.перенести_карточку(con, vault, rel,
+                              актор=("projector", "call_project", "проекция звонка"))
     con.execute("update events set state='projected' where id=?", (event_id,))
     # пакет для Мары пересобираем сразу: обязательство, о котором она узнает
     # только после ночного крона, — это обязательство, о котором она не узнает
@@ -535,7 +536,9 @@ def apply_correction(vault, event, con=None):
                            % (item, "; ".join(открытые) or "список пуст")}
     rel = out.get("card") if out.get("changed") else out.get("created")
     if con is not None and rel:
-        li.перенести_карточку(con, vault, rel)
+        # актор — владелец: правка словами это его решение, Мара лишь записала
+        li.перенести_карточку(con, vault, rel, актор=(
+            "human", "owner", "correction/%s" % event.get("id")))
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
     return out

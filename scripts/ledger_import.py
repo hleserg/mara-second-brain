@@ -196,12 +196,26 @@ def run(con, vault=None, dry_run=False):
     return итог
 
 
-def _перенести(con, rel, fm, sha, текст, вид, таблица, поля, dry_run=False):
+# Кто пишет строку «статус без следа» и ревизию переноса: не человек и не
+# модель, а сам перенос. Строка нужна, потому что после смены авторитета
+# журнал в волте никто не перечитает, и статус без строки в базе выглядел бы
+# объяснённым.
+ПЕРЕНОС = "ledger_import"
+ПЕРЕНОС_АКТОР = ("import", ПЕРЕНОС, "перенос из волта")
+
+
+def _перенести(con, rel, fm, sha, текст, вид, таблица, поля, dry_run=False,
+               актор=ПЕРЕНОС_АКТОР):
     """Одна карточка → строка объекта, проекция, история.
 
     Возвращает `(новый ли объект, записано строк истории)`, либо None, если
     карточка спорная и не перенесена. Правила спора — ниже по тексту, они
     писались кровью трёх кругов ревью и исключений не имеют.
+
+    `актор` — `(actor_type, actor_id, reason)` для ревизии: кто принёс
+    изменение. Перенос — сам перенос, проектор — `call_project`, правка
+    словами — владелец; без этого ревизии от всех трёх путей выглядели бы
+    одинаково, и журнал отвечал бы на вопрос «что», но не «кто».
     """
     native = ключ(fm, rel)
     row = con.execute("select id from %s where source_native_id=?" % таблица,
@@ -288,10 +302,7 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
     значения["origin_event"] = (
         событие(_строка(fm.get("origin"))) if вид == "commitment"
         else событие(_строка(fm.get("source_id"))))
-    имена = sorted(значения)
-    con.execute("insert or replace into %s(%s) values(%s)"
-                % (таблица, ",".join(имена), ",".join("?" * len(имена))),
-                [значения[k] for k in имена])
+    _записать_объект(con, таблица, вид, oid, значения, новый, актор)
     # путь мог смениться при переименовании: у объекта ровно одна проекция
     con.execute("delete from projections where object_id=? and path<>?",
                 (oid, rel))
@@ -302,7 +313,56 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
     return новый, правок
 
 
-def перенести_карточку(con, vault, rel):
+def _записать_объект(con, таблица, вид, oid, значения, новый, актор):
+    """Строка объекта: вставка или обновление только изменившихся полей.
+
+    ADR-0003 п.1–2: `version` живёт в реестре и растёт на единицу на каждое
+    принятое изменение, а `revisions` хранит только то, что изменилось, до
+    и после. `insert or replace` этого не умеет: он заводит строку заново с
+    `version` по умолчанию — то есть молча откатывает счётчик на 1 при
+    каждом переносе. Перерисовка без изменений версию не трогает.
+    Версия и ревизии есть у обязательств; у разговоров колонки `version`
+    нет (их не правят), им — обычное обновление.
+    """
+    actor_type, actor_id, причина = актор
+    имена = sorted(значения)
+    if новый:
+        con.execute("insert into %s(%s) values(%s)"
+                    % (таблица, ",".join(имена), ",".join("?" * len(имена))),
+                    [значения[k] for k in имена])
+        if вид == "commitment":
+            con.execute(
+                "insert into revisions(object_kind,object_id,version,changed_json,"
+                "actor_type,actor_id,reason,origin_event,occurred) "
+                "values(?,?,1,?,?,?,?,?,?)",
+                (вид, oid, json.dumps({k: [None, v] for k, v in значения.items()
+                                       if v is not None and k != "id"},
+                                      ensure_ascii=False),
+                 actor_type, actor_id, причина, значения.get("origin_event"),
+                 mi.now_iso()))
+        return
+    старое = dict(con.execute("select * from %s where id=?" % таблица, (oid,)).fetchone())
+    изменилось = {k: [старое.get(k), v] for k, v in значения.items()
+                  if k != "id" and старое.get(k) != v}
+    if not изменилось:
+        return
+    поля_sql = ", ".join("%s=?" % k for k in sorted(изменилось))
+    args = [изменилось[k][1] for k in sorted(изменилось)]
+    if вид == "commitment":
+        версия = (старое.get("version") or 1) + 1
+        когда = mi.now_iso()
+        con.execute("update %s set %s, version=?, updated=? where id=?"
+                    % (таблица, поля_sql), args + [версия, когда, oid])
+        con.execute(
+            "insert into revisions(object_kind,object_id,version,changed_json,"
+            "actor_type,actor_id,reason,origin_event,occurred) values(?,?,?,?,?,?,?,?,?)",
+            (вид, oid, версия, json.dumps(изменилось, ensure_ascii=False),
+             actor_type, actor_id, причина, значения.get("origin_event"), когда))
+    else:
+        con.execute("update %s set %s where id=?" % (таблица, поля_sql), args + [oid])
+
+
+def перенести_карточку(con, vault, rel, актор=ПЕРЕНОС_АКТОР):
     """Одна карточка по пути — для проектора, сразу после записи файла.
 
     Возвращает id объекта или None (не наш каталог, не читается, спорная).
@@ -318,7 +378,7 @@ def перенести_карточку(con, vault, rel):
         return None
     rel, fm, sha, текст = к
     вид, таблица, поля = вид
-    if _перенести(con, rel, fm, sha, текст, вид, таблица, поля) is None:
+    if _перенести(con, rel, fm, sha, текст, вид, таблица, поля, актор=актор) is None:
         return None
     return con.execute("select id from %s where source_native_id=?" % таблица,
                        (ключ(fm, rel),)).fetchone()[0]
@@ -457,10 +517,6 @@ def история(vault):
 # id, перенос не писал — это либо доменная команда Т2.5, либо строка от
 # прежней редакции журнала. Сверка такие считает и называет, но не трогает.
 ПРОСТРАНСТВО = uuid.UUID("6d617261-0000-5000-8000-6c6564676572")  # «mara…ledger»
-# Кто пишет строку «статус без следа»: не человек и не модель, а сам перенос.
-# Строка нужна, потому что после смены авторитета журнал в волте никто не
-# перечитает, и статус без строки в базе выглядел бы объяснённым.
-ПЕРЕНОС = "ledger_import"
 
 
 def _id_правки(oid, ключ):
