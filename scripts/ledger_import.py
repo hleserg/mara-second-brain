@@ -204,6 +204,21 @@ def run(con, vault=None, dry_run=False):
 ПЕРЕНОС_АКТОР = ("import", ПЕРЕНОС, "перенос из волта")
 
 
+def _id_занят(con, таблица, в_шапке):
+    """Ключ объекта, которому уже принадлежит id из шапки; None — свободен.
+
+    Копия карточки в Obsidian с убранным `source_id`, волт новее
+    восстановленной базы: вставка с таким id упала бы `UNIQUE constraint
+    failed` и унесла всё, что после по алфавиту (ревью PR #117, P2-5). Это
+    спор, как и остальные разошедшиеся ключи: говорим и не трогаем.
+    """
+    if not в_шапке:
+        return None
+    r = con.execute("select source_native_id from %s where id=?" % таблица,
+                    (в_шапке,)).fetchone()
+    return r[0] if r else None
+
+
 def _спор(con, rel, native, вид, таблица):
     """(строка по ключу, проекция по пути, текст спора или None).
 
@@ -292,6 +307,13 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
         print("ledger_import: %s несёт id %s, в реестре %s — верю реестру"
               % (rel, в_шапке, прежний), file=sys.stderr)
     новый = прежний is None
+    if новый and con is not None:
+        занят = _id_занят(con, таблица, в_шапке)
+        if занят:
+            print("ledger_import: %s несёт id %s, а в реестре он у объекта с "
+                  "ключом %s (здесь %s) — не сливаем"
+                  % (rel, в_шапке, занят, native), file=sys.stderr)
+            return None
     if dry_run:
         return новый, 0
     oid = прежний or в_шапке or mi.uuid7()
@@ -312,7 +334,26 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
     значения["origin_event"] = (
         событие(_строка(fm.get("origin"))) if вид == "commitment"
         else событие(_строка(fm.get("source_id"))))
-    _записать_объект(con, таблица, вид, oid, значения, новый, актор)
+    # Объект, ревизия, проекция и история — одной транзакцией (§5.2, Т2.1в):
+    # падение между `update … version=N` и строкой `revisions` оставляло бы
+    # версию без ревизии навсегда (ревью PR #117, P3-8). Если зовущий уже
+    # внутри транзакции — не вкладываемся, SQLite этого не умеет.
+    своя = not con.in_transaction
+    if своя:
+        con.execute("begin immediate")
+    try:
+        _записать_объект(con, таблица, вид, oid, значения, новый, актор)
+        правок = _проекция_и_история(con, rel, вид, oid, sha, fm, текст)
+    except BaseException:
+        if своя:
+            con.execute("rollback")
+        raise
+    if своя:
+        con.execute("commit")
+    return новый, правок
+
+
+def _проекция_и_история(con, rel, вид, oid, sha, fm, текст):
     # путь мог смениться при переименовании: у объекта ровно одна проекция
     con.execute("delete from projections where object_id=? and path<>?",
                 (oid, rel))
@@ -326,8 +367,7 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
                 "object_kind=excluded.object_kind, object_id=excluded.object_id, "
                 "content_sha256=excluded.content_sha256, written=excluded.written",
                 (rel, вид, oid, sha, mi.now_iso()))
-    правок = правки_в_базу(con, oid, fm, текст) if вид == "commitment" else 0
-    return новый, правок
+    return правки_в_базу(con, oid, fm, текст) if вид == "commitment" else 0
 
 
 def _записать_объект(con, таблица, вид, oid, значения, новый, актор):
@@ -429,7 +469,11 @@ def _с_id(текст, oid):
 def вписать_id(con, vault, dry_run=False):
     """Т2.2: id из реестра — в шапку каждой карточки, где его нет или он
     другой. Пишет волт, поэтому только под флоком и только с паузой
-    писателей на doctor. Возвращает (вписано, пропущено без строки)."""
+    писателей на doctor. Возвращает (вписано, пропущено без строки).
+
+    Пишется нормализованный текст: BOM снят, CRLF → LF (так читает
+    `_карточка`). Для карточки из винды или синка это правка байтов сверх
+    строки `id:`; откат — git волта, и в плане это названо (ревью P3-6)."""
     вписано, без_строки = 0, 0
     with locked(vault):
         for подкаталог, вид, таблица, _ in ВИДЫ:
@@ -458,8 +502,12 @@ def вписать_id(con, vault, dry_run=False):
                 # сверка сочтёт нашу же правку чужой
                 with open(p, "rb") as fh:
                     sha = hashlib.sha256(fh.read()).hexdigest()
-                con.execute("update projections set content_sha256=? where path=?",
-                            (sha, rel))
+                # по объекту, не по пути: переименованная до ночного переноса
+                # карточка держит проекцию под старым путём, и обновление по
+                # пути не нашло бы ни строки (ревью P3-6)
+                con.execute("update projections set content_sha256=?, path=? "
+                            "where object_id=? and object_kind=?",
+                            (sha, rel, row["id"], вид))
     return вписано, без_строки
 
 
@@ -691,6 +739,12 @@ def сверка(con, vault):
             continue
         видели[native] = rel
         if row is None:
+            занят = _id_занят(con, "commitments", (_строка(fm.get("id")) or "").strip())
+            if занят:
+                итог["спорных"] += 1
+                замечания.append("%s: спорная — id из шапки у объекта с ключом %s"
+                                 % (rel, занят))
+                continue
             итог["без строки"] += 1
             замечания.append("%s: строки в базе нет (ключ %s)" % (rel, native))
             continue
@@ -705,7 +759,10 @@ def сверка(con, vault):
         ожидаемые = {r["id"] for r in правки_из_карточки(row["id"], fm, текст)}
         # Отметки переноса о прежних состояниях шапки — своя история, не
         # чужая: статус менялся рукой дважды, и обе отметки верны про свой
-        # момент. Чужое — только то, чего перенос не писал никогда.
+        # момент. Чужое — только то, чего перенос не писал никогда. Маска по
+        # актору `import` накроет и отметки прежней редакции ключа (до
+        # ab1168d, без статуса в ключе) — на doctor их нет, перенос там ещё
+        # не запускался; появятся — считать своими, они про свой момент.
         строки_базы = con.execute(
             "select id, actor_type from corrections where object_kind='commitment' "
             "and object_id=?", (row["id"],)).fetchall()

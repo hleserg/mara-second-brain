@@ -932,6 +932,28 @@ class Идентичность(unittest.TestCase):
         li.run(self.con, self.vault)
         self.assertEqual(self.con.execute("select id from commitments").fetchone()[0], oid)
 
+    def test_id_из_шапки_занятый_другим_ключом_это_спор_а_не_падение(self):
+        """Ревью P2-5: копия карточки без `source_id` несла id первой, вставка
+        падала `UNIQUE constraint failed` и уносила всё после по алфавиту."""
+        карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        li.вписать_id(self.con, self.vault)
+        with open(os.path.join(self.vault, "kb/commitments/a.md"), encoding="utf-8") as fh:
+            копия = fh.read().replace("source_id: commitment/call_1/requests/1\n", "")
+        with open(os.path.join(self.vault, "kb/commitments/b-copy.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(копия)
+        карточка(self.vault, "kb/commitments/z.md", source_id="z")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = li.run(self.con, self.vault)
+        self.assertEqual((итог["спорных"], итог["обязательств"]), (1, 1), итог)
+        self.assertIn("не сливаем", поток.getvalue())
+        self.assertEqual(self.con.execute("select count(*) from commitments").fetchone()[0],
+                         2, "z.md после копии по алфавиту перенесена")
+        счёт, _ = li.сверка(self.con, self.vault)
+        self.assertEqual(счёт["спорных"], 1)
+
     def test_write_ids_без_строки_в_реестре_не_выдумывает(self):
         карточка(self.vault, "kb/commitments/a.md")
         self.assertEqual(li.вписать_id(self.con, self.vault), (0, 1))
@@ -1022,6 +1044,23 @@ class Версия(unittest.TestCase):
             fh.write(текст.replace("due: 2026-09-04", "due: 2026-09-05"))
         li.run(self.con, self.vault)
         self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 8)
+
+    def test_сбой_посреди_карточки_не_оставляет_версию_без_ревизии(self):
+        """Ревью P3-8: объект, ревизия, проекция и история — одна транзакция."""
+        import unittest.mock
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: proposed", "status: open"))
+        with unittest.mock.patch.object(li, "правки_в_базу", side_effect=RuntimeError("бум")):
+            with self.assertRaises(RuntimeError):
+                li.run(self.con, self.vault)
+        r = self.con.execute("select version, status from commitments").fetchone()
+        self.assertEqual((r["version"], r["status"]), (1, "proposed"), "откатилось целиком")
+        self.assertEqual(len(self.ревизии()), 1)
+        self.assertFalse(self.con.in_transaction)
 
     def test_перерисованный_created_не_ревизия(self):
         """Проектор ставит `created: now_iso()` при каждой перерисовке; это не

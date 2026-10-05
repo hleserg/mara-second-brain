@@ -344,6 +344,23 @@ class Идентичность(unittest.TestCase):
         self.assertEqual(con.execute("select count(*) from conversations").fetchone()[0], 2)
         self.assertEqual(con.execute("select count(*) from commitments").fetchone()[0], 4)
 
+    def test_одно_действие_просьбой_и_обещанием_даёт_два_файла(self):
+        """Ревью P2-6: один slug внутри одного прогона — второй файл затирал
+        первый молча, в реестре оставался один объект."""
+        root, vault, con = self.стенд()
+        extr = dict(EXTR, commitments=[dict(EXTR["requests"][0], promised_to="Анна")])
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone", "source_id": "a",
+                                    "occurred_at": EVENT["occurred"],
+                                    "ended_at": EVENT["ended"], "payload": EVENT["payload"]})
+        mi.write_json(mi.extraction_path(root, eid), extr)
+        written = cp.run(eid, vault, root)
+        обязательства = [r for r in written if r.startswith("kb/commitments/")]
+        self.assertEqual(len(обязательства), 2)
+        self.assertEqual(len(set(обязательства)), 2, "один путь выдан дважды")
+        self.assertTrue(any("--" in r for r in обязательства), обязательства)
+        self.assertEqual(con.execute("select count(*) from commitments").fetchone()[0], 2)
+        self.assertEqual(cp.run(eid, vault, root), written, "повтор — те же пути")
+
     def test_карточка_без_реестра_с_чужим_source_id_не_затирается(self):
         """Волт старше реестра: файл на пути есть, строки в `projections` нет."""
         root, vault, con = self.стенд()
