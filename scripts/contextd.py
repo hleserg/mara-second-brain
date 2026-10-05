@@ -406,6 +406,16 @@ def metrics(con, root=None, vault=None):
         ("mara_mobile_last_seen_seconds", mobile),
         *[('mara_device_last_seen_seconds{name="%s"}' % n.replace('\\', '\\\\').replace('"', '\\"'), a)
           for n, a in devices],
+        # Семантика (хвост #39, Т3.1): «записей обещано, но тела ещё нет».
+        # Считаются события в `new` с объявленным `blob_sha256` — телефон
+        # прислал событие звонка и заявил хеш, а `/v1/ingest/audio` до
+        # `stored` не довёл. Не считаются: `stale` (хеш не совпал — это
+        # `mara_ingest_stale_events`), `quarantined` (тело принято, но не
+        # звук), `stored` и дальше (тело есть), и `new` без хеша (сообщения,
+        # тела у них нет по определению). Телефон после 200 на событие
+        # ставит заливку в ту же очередь, поэтому в норме число живёт
+        # минутами; часами — повод смотреть находку `запись-не-долита`
+        # в сверке, она про то же, но с порогом по возрасту.
         ("mara_mobile_pending_uploads",
          q("select count(*) from events where state='new' and blob_sha256 is not null")),
         # брошенные: телефон объявил один хеш, а прислал байты с другим и

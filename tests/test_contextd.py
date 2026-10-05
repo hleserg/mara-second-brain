@@ -2309,6 +2309,32 @@ class ТестНюхСодержимого(unittest.TestCase):
                 if l.startswith("mara_ingest_quarantined_events ")]
         self.assertEqual(своя, ["mara_ingest_quarantined_events 1"], строки)
 
+    def test_pending_uploads_считает_только_обещанные_тела(self):
+        """Семантика `mara_mobile_pending_uploads` (хвост #39): событие с
+        заявленным хешем, тело которого до `stored` не дошло. Четыре соседних
+        состояния в счёт не идут — у каждого своя метрика или находка."""
+        каталог, con = self.стенд()
+        def метрика():
+            строки = contextd.metrics(con, каталог, None).splitlines()
+            return [l for l in строки if l.startswith("mara_mobile_pending_uploads ")]
+        # обещано, тела нет — считается
+        self.событие(con, b"\x00\x00\x00\x18ftypM4A waits", sid="ждёт")
+        # сообщение: хеша нет, тела не будет — не считается
+        mi.put_event(con, {"kind": "message", "source": "sms", "source_id": "s1",
+                           "payload": {"text": "x"}})
+        # тело принято — не считается
+        звук = b"\x00\x00\x00\x18ftypM4A stored"
+        eid, _ = self.событие(con, звук, sid="принято")
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(звук), len(звук))
+        # карантин: тело принято, но не звук — не считается
+        мусор = b"<html>not audio</html>"
+        eid, _ = self.событие(con, мусор, sid="карантин")
+        contextd.ingest_audio(con, каталог, eid, io.BytesIO(мусор), len(мусор))
+        # хеш не совпал — `stale`, своя метрика
+        eid, _ = self.событие(con, b"\x00\x00\x00\x18ftypM4A promised", sid="stale")
+        con.execute("update events set state='stale' where id=?", (eid,))
+        self.assertEqual(метрика(), ["mara_mobile_pending_uploads 1"])
+
     def test_карантин_не_считается_недолитым(self):
         """Иначе сверка через сутки завела бы вечное «телефон не долил».
 
