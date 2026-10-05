@@ -467,6 +467,11 @@ def self_check():
             "people_mentioned": ["Анна", "Серёж"], "projects_mentioned": []}
     path, text = conversation_card(event, extr, {"серёж": "sergey"})
     assert path == "kb/conversations/2026-09-02-1405-anna.md", path
+    # класс символов, а не один вход: на этом стоит потолок перечисления в
+    # сверке (`contextd_reconcile`, обход `kb/`) — точка, пробел, NFD и
+    # заглавные в имени карточки появиться не могут
+    assert re.fullmatch(r"[a-z0-9-]+", slug("Привет, Мир! №1 ёж.md / é")), slug(
+        "Привет, Мир! №1 ёж.md / é")
     assert "sensitive: true" in text and "cloud_allowed: false" in text
     assert "04:12" in text, "метка времени спана потерялась"
     people = [l for l in text.splitlines() if l.startswith("Люди: ")][0]

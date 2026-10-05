@@ -80,6 +80,11 @@ class Установщик(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         for u in ЮНИТЫ:
             self.assertTrue(os.path.exists(os.path.join(self.dest, u)), u)
+            # шим `sudo` снимает только `-o`/`-g`, `-m 0644` доезжает до
+            # настоящего `install` — и до этой строки его никто не проверял:
+            # мутация `-m 0600` была зелёной (#97 п.2)
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.dest, u)).st_mode),
+                             0o644, "%s поставлен не с режимом 0644" % u)
         self.assertIn("daemon-reload", self.вызовы())
 
     def test_установка_не_рестартует_сервис(self):

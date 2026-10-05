@@ -1526,6 +1526,11 @@ class ТестScopes(unittest.TestCase):
         путь = self.con.execute("select path from blobs where sha256=?",
                                 (sha,)).fetchone()["path"]
         self.assertTrue(путь.startswith(os.path.join(self.dir, "calls")), путь)
+        # В дереве блобов лежат записи звонков: режим каталога 0700 проверен
+        # той же мутацией, что у карантина (#99 п.1), — `0o700` → `0o755`
+        # в `os.makedirs` перед `mkstemp` этот ассерт роняет.
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(путь)).st_mode),
+                         0o700, "каталог записей открыт не только владельцу")
         # С нюхом содержимого (Т3.2) заявленное расширение не попадает в имя
         # **принятого** блоба: его даёт нюх. Дальше этого утверждение не идёт,
         # и первая редакция этого комментария («в путь не попадает вовсе»)
