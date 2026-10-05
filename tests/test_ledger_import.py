@@ -9,7 +9,7 @@
 второй запуск (ТЗ §4.3: id не меняется никогда), иначе первый же откат
 разъедется с волтом.
 """
-import os, sys, io, hashlib, contextlib, tempfile, unittest
+import os, sys, io, hashlib, contextlib, sqlite3, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -565,6 +565,19 @@ class Запуск(unittest.TestCase):
         self.assertEqual(код, 0)
         self.assertFalse(os.path.exists(self.root), "проба завела " + self.root)
         self.assertIn("обязательств 1", вывод)
+
+    def test_проба_на_живой_базе_не_мигрирует(self):
+        # `mi.connect` — это и есть миграция (Т0.8, migration-plan.md): проба
+        # через него на doctor докатила бы схему до кода дерева мимо Г4
+        mi.connect(self.root).execute("drop table digests")
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        код, вывод = self.запустить("--dry-run")
+        self.assertEqual(код, 0)
+        self.assertIn("обязательств 1", вывод)
+        con = sqlite3.connect(os.path.join(self.root, "contextd.db"))
+        self.assertIsNone(con.execute("select name from sqlite_master "
+                                      "where name='digests'").fetchone(),
+                          "проба прогнала схему")
 
     def test_спорная_карточка_даёт_единицу(self):
         карточка(self.vault, "kb/commitments/2026-09-03-a.md")

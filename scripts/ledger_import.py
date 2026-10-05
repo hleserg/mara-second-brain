@@ -18,7 +18,7 @@ Obsidian, и это не повод завести второе обязател
     python3 scripts/ledger_import.py               # перенести
     python3 scripts/ledger_import.py --self-check
 """
-import os, sys, glob, hashlib, argparse, importlib.util, tempfile
+import os, sys, glob, hashlib, argparse, importlib.util, sqlite3, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -283,8 +283,18 @@ def main():
     if без_базы:
         print("ledger_import: базы в %s нет — считаем всё новым" % a.root,
               file=sys.stderr)
-    итог = run(None if без_базы else mi.connect(a.root), a.vault,
-               dry_run=a.dry_run)
+    # Пробе и база нужна только на чтение: `mi.connect` прогоняет схему и
+    # миграции, то есть проба на doctor докатила бы базу до кода дерева мимо
+    # Г4 (docs/migration-plan.md).
+    if без_базы:
+        con = None
+    elif a.dry_run:
+        con = sqlite3.connect("file:%s?mode=ro" % os.path.join(
+            a.root, "contextd.db"), uri=True)
+        con.row_factory = sqlite3.Row
+    else:
+        con = mi.connect(a.root)
+    итог = run(con, a.vault, dry_run=a.dry_run)
     print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d, спорных %d"
           % (" (проба)" if a.dry_run else "", итог["обязательств"],
              итог["разговоров"], итог["обновлено"], итог["спорных"]))
