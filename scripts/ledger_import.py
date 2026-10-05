@@ -25,7 +25,18 @@ Obsidian, и это не повод завести второе обязател
 
     python3 scripts/ledger_import.py --dry-run     # посчитать, ничего не писать
     python3 scripts/ledger_import.py               # перенести
+    python3 scripts/ledger_import.py --write-ids   # Т2.2: id из реестра в шапки карточек
     python3 scripts/ledger_import.py --self-check
+
+Идентичность (Т2.2, ADR-0002). Id объекта рождается один раз и живёт в
+реестре; карточка несёт его копию полем `id:` в шапке. Откуда он берётся,
+по старшинству: строка реестра по `source_id` → поле `id:` карточки (волт,
+восстановленный без базы) → новый uuid7. Перенос и проектор зовут одну и ту
+же `перенести_карточку`, так что у карточки, которую `call_project` только
+что записал, строка в реестре появляется тем же вызовом, а не ночным кроном.
+`--write-ids` — разовый шаг на doctor с паузой писателей
+(`docs/migration-plan.md` §4 шаг 4): вписывает `id:` из реестра в карточки,
+у которых его нет; откат — git волта.
 """
 import os, re, sys, glob, json, uuid, hashlib, argparse, importlib.util, sqlite3, tempfile
 from collections import Counter
@@ -34,6 +45,7 @@ from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
+from vault_common import locked
 
 VAULT = os.environ.get("MARA_VAULT", os.environ.get("VAULT", "/srv/vault"))
 
@@ -101,24 +113,42 @@ def _строка(v):
     return str(v)
 
 
+def _карточка(vault, p):
+    """(rel, fm, sha256 файла, текст) одной карточки; None — не читается."""
+    try:
+        with open(p, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        # битый симлинк или каталог с именем `*.md`: перенос разовый и
+        # руками, останавливать его из-за одного мусорного имени незачем
+        print("ledger_import: %s не читается (%s) — пропущен"
+              % (os.path.relpath(p, vault), e), file=sys.stderr)
+        return None
+    # BOM от винды и CRLF из синка: без них `frontmatter` не матчит шапку
+    # вовсе и возвращает пустоту, а карточка молча заводится объектом со
+    # всеми полями NULL и ключом по пути
+    текст = raw.decode("utf-8", "replace").lstrip("\ufeff").replace("\r\n", "\n")
+    fm, _ = mb.frontmatter(текст)
+    return (os.path.relpath(p, vault), fm, hashlib.sha256(raw).hexdigest(), текст)
+
+
 def карточки(vault, подкаталог):
     for p in sorted(glob.glob(os.path.join(vault, подкаталог, "*.md"))):
-        try:
-            with open(p, "rb") as fh:
-                raw = fh.read()
-        except OSError as e:
-            # битый симлинк или каталог с именем `*.md`: перенос разовый и
-            # руками, останавливать его из-за одного мусорного имени незачем
-            print("ledger_import: %s не читается (%s) — пропущен"
-                  % (os.path.relpath(p, vault), e), file=sys.stderr)
-            continue
-        # BOM от винды и CRLF из синка: без них `frontmatter` не матчит шапку
-        # вовсе и возвращает пустоту, а карточка молча заводится объектом со
-        # всеми полями NULL и ключом по пути
-        текст = raw.decode("utf-8", "replace").lstrip("\ufeff").replace("\r\n", "\n")
-        fm, _ = mb.frontmatter(текст)
-        yield (os.path.relpath(p, vault), fm,
-               hashlib.sha256(raw).hexdigest(), текст)
+        к = _карточка(vault, p)
+        if к:
+            yield к
+
+
+def ключ(fm, rel):
+    """`source_native_id` карточки: объявленный `source_id`, иначе путь."""
+    return (_строка(fm.get("source_id")) or "").strip() or "vault:" + rel
+
+
+def вид_по_пути(rel):
+    for подкаталог, вид, таблица, поля in ВИДЫ:
+        if rel.startswith(подкаталог + "/"):
+            return вид, таблица, поля
+    return None
 
 
 def run(con, vault=None, dry_run=False):
@@ -141,7 +171,7 @@ def run(con, vault=None, dry_run=False):
                       file=sys.stderr)
                 итог["спорных"] += 1
                 continue
-            native = (_строка(fm.get("source_id")) or "").strip() or "vault:" + rel
+            native = ключ(fm, rel)
             # копия карточки в Obsidian наследует source_id. Молча заменить
             # первую строку второй — это ровно то схлопывание двух объектов
             # в один без доказательства, что это одно событие, — а его
@@ -152,101 +182,204 @@ def run(con, vault=None, dry_run=False):
                       "перенесён первый" % (видели[native], rel, native),
                       file=sys.stderr)
                 continue
-            row = con.execute("select id from %s where source_native_id=?" % таблица,
-                              (native,)).fetchone() if con else None
-            # Карточку могли завести без `source_id` — ключом тогда стал путь.
-            # Когда `source_id` наконец проставили, ключ сменился, и по одному
-            # `row` перенос завёл бы второй объект, а первый остался бы вообще
-            # без файла: `insert or replace into projections` перевесил бы
-            # проекцию на новый id. Поэтому спрашиваем ещё и проекцию по пути,
-            # вместе с ключом объекта, который за ней стоит.
-            #
-            # Соединение обычное, не `left`: у проекции, чью строку объекта
-            # снесли руками, ответа нет вовсе, и это правильный ответ. При
-            # `left join` вернулась бы пара из пустот, карточка спорила бы
-            # вечно — вместо того чтобы просто завестись заново. Мутант
-            # «join → left join» на этом и ловится.
-            проекция = con.execute(
-                "select o.id, o.source_native_id from projections p "
-                "join %s o on o.id = p.object_id "
-                "where p.path=? and p.object_kind=?" % таблица,
-                (rel, вид)).fetchone() if con else None
-            # Два точных ключа — объявленный `source_id` и путь — разошлись.
-            # Так выглядят сразу несколько случаев: карточке дописали
-            # `source_id`, карточку переименовали, на месте удалённой завели
-            # новую, `source_id` из карточки убрали. Развести их нечем.
-            #
-            # Первые две редакции этой правки пробовали слить объекты там, где
-            # «и так понятно»: сперва по одному пути, потом по пути и
-            # совпавшему заголовку. Оба раза ревью приводило вход, на котором
-            # слияние затирало строку ledger, которую `main` не терял, — а
-            # заголовок ещё и совпадает ровно в самом опасном случае: путь
-            # карточки складывается из даты и `slug(...)[:40]`
-            # (`call_project.py:159`, `:391`), то есть две карточки сходятся на
-            # одном пути как раз при одинаковом заголовке.
-            #
-            # Значит правило простое и без исключений: разошлись ключи —
-            # спорим. ТЗ §4.3, последний пункт (`TZ-master.md:229`): «две
-            # разные записи с одинаковым текстом не дедуплицируются без
-            # доказательства, что это одно событие». Доказательства здесь нет
-            # ни в базе, ни в файле, а цена ошибки несимметрична: на `main`
-            # терялась проекция и оставалась сирота, которую видно и можно
-            # пришить руками, а слияние стирает саму строку — и восстановить
-            # её нечем.
-            if проекция is None:
-                спор = None
-            elif row is None:
-                спор = "ключ сменился"
-            elif проекция["id"] != row["id"]:
-                спор = "по ключу стоит другой объект"
-            else:
-                спор = None
-            if спор:
+            исход = _перенести(con, rel, fm, sha, текст, вид, таблица, поля,
+                               dry_run)
+            if исход is None:
                 итог["спорных"] += 1
-                print("ledger_import: %s стоит за объектом %s (ключ %s), а "
-                      "карточка объявила source_id %s — %s, не сливаем" %
-                      (rel, проекция["id"], проекция["source_native_id"],
-                       native, спор), file=sys.stderr)
                 continue
             # Ниже заставы, а не выше: карточка, ушедшая в спор, не перенесена
             # ни во что, и сообщение «перенесён первый» о ней было бы ложью.
             видели[native] = rel
-            прежний = row["id"] if row else None
-            новый = прежний is None
+            новый, правок = исход
             итог[счётчик if новый else "обновлено"] += 1
-            if dry_run:
-                continue
-            oid = прежний or mi.uuid7()
-            значения = {k: (_строка(fm.get(k)) or None) for k in поля}
-            if "confidence" in значения:
-                сырое = значения["confidence"]
-                значения["confidence"] = _число(сырое)
-                # Пустой её делает `_число`, а не база: `real` в SQLite —
-                # affinity, и «высокая» легла бы в такую колонку как есть.
-                # Молчать нельзя, иначе карточка выглядит перенесённой
-                # целиком. И не спорная — одно поле, набранное руками, не
-                # повод ронять весь прогон.
-                if сырое is not None and значения["confidence"] is None:
-                    print("ledger_import: %s — confidence %r не число, "
-                          "перенесено пустым" % (rel, сырое), file=sys.stderr)
-            значения["id"] = oid
-            значения["source_native_id"] = native
-            значения["origin_event"] = (
-                событие(_строка(fm.get("origin"))) if вид == "commitment"
-                else событие(_строка(fm.get("source_id"))))
-            имена = sorted(значения)
-            con.execute("insert or replace into %s(%s) values(%s)"
-                        % (таблица, ",".join(имена), ",".join("?" * len(имена))),
-                        [значения[k] for k in имена])
-            # путь мог смениться при переименовании: у объекта ровно одна проекция
-            con.execute("delete from projections where object_id=? and path<>?",
-                        (oid, rel))
-            con.execute("insert or replace into projections"
-                        "(path,object_kind,object_id,content_sha256,written) "
-                        "values(?,?,?,?,?)", (rel, вид, oid, sha, mi.now_iso()))
-            if вид == "commitment":
-                итог["правок"] += правки_в_базу(con, oid, fm, текст)
+            итог["правок"] += правок
     return итог
+
+
+def _перенести(con, rel, fm, sha, текст, вид, таблица, поля, dry_run=False):
+    """Одна карточка → строка объекта, проекция, история.
+
+    Возвращает `(новый ли объект, записано строк истории)`, либо None, если
+    карточка спорная и не перенесена. Правила спора — ниже по тексту, они
+    писались кровью трёх кругов ревью и исключений не имеют.
+    """
+    native = ключ(fm, rel)
+    row = con.execute("select id from %s where source_native_id=?" % таблица,
+                      (native,)).fetchone() if con else None
+    # Карточку могли завести без `source_id` — ключом тогда стал путь.
+    # Когда `source_id` наконец проставили, ключ сменился, и по одному
+    # `row` перенос завёл бы второй объект, а первый остался бы вообще
+    # без файла: `insert or replace into projections` перевесил бы
+    # проекцию на новый id. Поэтому спрашиваем ещё и проекцию по пути,
+    # вместе с ключом объекта, который за ней стоит.
+    #
+    # Соединение обычное, не `left`: у проекции, чью строку объекта
+    # снесли руками, ответа нет вовсе, и это правильный ответ. При
+    # `left join` вернулась бы пара из пустот, карточка спорила бы
+    # вечно — вместо того чтобы просто завестись заново. Мутант
+    # «join → left join» на этом и ловится.
+    проекция = con.execute(
+        "select o.id, o.source_native_id from projections p "
+        "join %s o on o.id = p.object_id "
+        "where p.path=? and p.object_kind=?" % таблица,
+        (rel, вид)).fetchone() if con else None
+    # Два точных ключа — объявленный `source_id` и путь — разошлись.
+    # Так выглядят сразу несколько случаев: карточке дописали
+    # `source_id`, карточку переименовали, на месте удалённой завели
+    # новую, `source_id` из карточки убрали. Развести их нечем.
+    #
+    # Первые две редакции этой правки пробовали слить объекты там, где
+    # «и так понятно»: сперва по одному пути, потом по пути и
+    # совпавшему заголовку. Оба раза ревью приводило вход, на котором
+    # слияние затирало строку ledger, которую `main` не терял, — а
+    # заголовок ещё и совпадает ровно в самом опасном случае: путь
+    # карточки складывается из даты и `slug(...)[:40]`
+    # (`call_project.py`, `commitment_cards` и `_завести`), то есть две
+    # карточки сходятся на одном пути как раз при одинаковом заголовке.
+    #
+    # Значит правило простое и без исключений: разошлись ключи —
+    # спорим. ТЗ §4.3, последний пункт: «две разные записи с одинаковым
+    # текстом не дедуплицируются без доказательства, что это одно
+    # событие». Доказательства здесь нет ни в базе, ни в файле, а цена
+    # ошибки несимметрична: на `main` терялась проекция и оставалась
+    # сирота, которую видно и можно пришить руками, а слияние стирает
+    # саму строку — и восстановить её нечем.
+    if проекция is None:
+        спор = None
+    elif row is None:
+        спор = "ключ сменился"
+    elif проекция["id"] != row["id"]:
+        спор = "по ключу стоит другой объект"
+    else:
+        спор = None
+    if спор:
+        print("ledger_import: %s стоит за объектом %s (ключ %s), а "
+              "карточка объявила source_id %s — %s, не сливаем" %
+              (rel, проекция["id"], проекция["source_native_id"],
+               native, спор), file=sys.stderr)
+        return None
+    прежний = row["id"] if row else None
+    # Т2.2: id по старшинству — реестр, потом шапка карточки, потом новый.
+    # Шапка идёт второй ради волта, восстановленного без базы: id в ней —
+    # тот самый, что был в реестре, и выдать новый значило бы потерять его.
+    # Разошлись — верим реестру и говорим: шапку поправит `--write-ids`.
+    в_шапке = (_строка(fm.get("id")) or "").strip() or None
+    if прежний and в_шапке and в_шапке != прежний:
+        print("ledger_import: %s несёт id %s, в реестре %s — верю реестру"
+              % (rel, в_шапке, прежний), file=sys.stderr)
+    новый = прежний is None
+    if dry_run:
+        return новый, 0
+    oid = прежний or в_шапке or mi.uuid7()
+    значения = {k: (_строка(fm.get(k)) or None) for k in поля}
+    if "confidence" in значения:
+        сырое = значения["confidence"]
+        значения["confidence"] = _число(сырое)
+        # Пустой её делает `_число`, а не база: `real` в SQLite —
+        # affinity, и «высокая» легла бы в такую колонку как есть.
+        # Молчать нельзя, иначе карточка выглядит перенесённой
+        # целиком. И не спорная — одно поле, набранное руками, не
+        # повод ронять весь прогон.
+        if сырое is not None and значения["confidence"] is None:
+            print("ledger_import: %s — confidence %r не число, "
+                  "перенесено пустым" % (rel, сырое), file=sys.stderr)
+    значения["id"] = oid
+    значения["source_native_id"] = native
+    значения["origin_event"] = (
+        событие(_строка(fm.get("origin"))) if вид == "commitment"
+        else событие(_строка(fm.get("source_id"))))
+    имена = sorted(значения)
+    con.execute("insert or replace into %s(%s) values(%s)"
+                % (таблица, ",".join(имена), ",".join("?" * len(имена))),
+                [значения[k] for k in имена])
+    # путь мог смениться при переименовании: у объекта ровно одна проекция
+    con.execute("delete from projections where object_id=? and path<>?",
+                (oid, rel))
+    con.execute("insert or replace into projections"
+                "(path,object_kind,object_id,content_sha256,written) "
+                "values(?,?,?,?,?)", (rel, вид, oid, sha, mi.now_iso()))
+    правок = правки_в_базу(con, oid, fm, текст) if вид == "commitment" else 0
+    return новый, правок
+
+
+def перенести_карточку(con, vault, rel):
+    """Одна карточка по пути — для проектора, сразу после записи файла.
+
+    Возвращает id объекта или None (не наш каталог, не читается, спорная).
+    Тот же код, что у полного переноса: у карточки, которую `call_project`
+    только что записал, строка в реестре появляется этим вызовом, а не
+    ночным кроном, и id в её шапке — тот, что в реестре.
+    """
+    вид = вид_по_пути(rel)
+    if not вид:
+        return None
+    к = _карточка(vault, os.path.join(vault, rel))
+    if not к or not к[1]:
+        return None
+    rel, fm, sha, текст = к
+    вид, таблица, поля = вид
+    if _перенести(con, rel, fm, sha, текст, вид, таблица, поля) is None:
+        return None
+    return con.execute("select id from %s where source_native_id=?" % таблица,
+                       (ключ(fm, rel),)).fetchone()[0]
+
+
+ШАПКА = re.compile(r"^---\n(.*?)\n---\n", re.S)
+
+
+def _с_id(текст, oid):
+    """Текст карточки с `id: <oid>` в шапке: строка заменяется на месте, а
+    новой встаёт сразу за `title:` — остальные байты не трогаются, как в
+    `call_project._шапка`: Basic Memory дописывает в карточки свои ключи."""
+    m = ШАПКА.match(текст)
+    if not m:
+        return None
+    строки = m.group(1).split("\n")
+    for i, l in enumerate(строки):
+        if l.startswith("id:"):
+            строки[i] = "id: " + oid
+            break
+    else:
+        после = next((i for i, l in enumerate(строки) if l.startswith("title:")), -1)
+        строки.insert(после + 1, "id: " + oid)
+    return "---\n" + "\n".join(строки) + "\n---\n" + текст[m.end():]
+
+
+def вписать_id(con, vault, dry_run=False):
+    """Т2.2: id из реестра — в шапку каждой карточки, где его нет или он
+    другой. Пишет волт, поэтому только под флоком и только с паузой
+    писателей на doctor. Возвращает (вписано, пропущено без строки)."""
+    вписано, без_строки = 0, 0
+    with locked(vault):
+        for подкаталог, вид, таблица, _ in ВИДЫ:
+            for rel, fm, sha, текст in карточки(vault, подкаталог):
+                if not fm:
+                    continue
+                row = con.execute("select id from %s where source_native_id=?"
+                                  % таблица, (ключ(fm, rel),)).fetchone()
+                if row is None:
+                    без_строки += 1
+                    continue
+                if (_строка(fm.get("id")) or "").strip() == row["id"]:
+                    continue
+                новый = _с_id(текст, row["id"])
+                if новый is None:
+                    continue
+                вписано += 1
+                if dry_run:
+                    continue
+                p = os.path.join(vault, rel)
+                tmp = p + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write(новый)
+                os.replace(tmp, p)
+                # отпечаток проекции — на новые байты, иначе следующая
+                # сверка сочтёт нашу же правку чужой
+                with open(p, "rb") as fh:
+                    sha = hashlib.sha256(fh.read()).hexdigest()
+                con.execute("update projections set content_sha256=? where path=?",
+                            (sha, rel))
+    return вписано, без_строки
 
 
 # Строку журнала пишет `call_project._поправить`:
@@ -503,6 +636,7 @@ def self_check():
         root, vault = os.path.join(tmp, "b"), os.path.join(tmp, "v")
         os.makedirs(root)
         os.makedirs(os.path.join(vault, "kb/commitments"))
+        os.makedirs(os.path.join(vault, ".git"))        # флок `locked()` живёт там
         карточка = os.path.join(vault, "kb/commitments", "2026-09-03-smeta.md")
         шапка = ("title: прислать смету\nstatus: open\n"
                  "source_id: commitment/call_1/requests/1\norigin: call/call_1\n")
@@ -532,6 +666,14 @@ def self_check():
             "ТЗ §4.3: id не меняется"
         счёт, замечания = сверка(con, vault)
         assert сошлось(счёт) and not замечания, (dict(счёт), замечания)
+        # Т2.2: id из реестра попадает в шапку, и после этого перенос верит ей
+        assert вписать_id(con, vault) == (1, 0)
+        with open(карточка, encoding="utf-8") as fh:
+            assert "\nid: %s\n" % было in fh.read(), "id не вписан"
+        assert вписать_id(con, vault) == (0, 0), "второй раз вписывать нечего"
+        assert перенести_карточку(con, vault, "kb/commitments/2026-09-03-smeta.md") == было
+        счёт, _ = сверка(con, vault)
+        assert сошлось(счёт), dict(счёт)
 
         ids = [mi.uuid7() for _ in range(200)]
         assert ids == sorted(ids) and len(set(ids)) == 200, "uuid7 монотонен"
@@ -544,10 +686,24 @@ def main():
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--vault", default=VAULT)
     ap.add_argument("--dry-run", action="store_true", dest="dry_run")
+    ap.add_argument("--write-ids", action="store_true", dest="write_ids",
+                    help="Т2.2: вписать id из реестра в шапки карточек")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    if a.write_ids:
+        # Только после переноса и только всерьёз: без строк в реестре
+        # вписывать нечего, а проба тут — `--dry-run` вместе с флагом.
+        if not os.path.exists(os.path.join(a.root, "contextd.db")):
+            print("ledger_import --write-ids: базы в %s нет — сначала перенос"
+                  % a.root, file=sys.stderr)
+            return 2
+        con = mi.connect(a.root)
+        вписано, без_строки = вписать_id(con, a.vault, dry_run=a.dry_run)
+        print("ledger_import --write-ids%s: вписано %d, без строки в реестре %d"
+              % (" (проба)" if a.dry_run else "", вписано, без_строки))
+        return 0
     # Проба — вопрос «что бы перенеслось», а не команда завести каталог
     # блобов со схемой: `mi.connect` создаёт и то и другое (mara_ingest.py,
     # `def connect`). Базы нет — значит новым будет всё, и это правда.

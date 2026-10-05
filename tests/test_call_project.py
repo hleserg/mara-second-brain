@@ -1,8 +1,9 @@
 """Карточки разговора и обязательств (ТЗ §10)."""
-import os, sys, json, tempfile, unittest
+import os, sys, json, uuid, tempfile, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import call_project as cp
+import mara_ingest as mi
 
 EVENT = {"id": "call_1", "occurred": "2026-09-02T14:05:00+03:00",
          "ended": "2026-09-02T14:23:11+03:00", "classification": "personal",
@@ -259,6 +260,132 @@ class Правка(unittest.TestCase):
         self.assertIn("статус", cp.check_correction({"item": "x", "status": "готово"}))
         self.assertTrue(cp.check_correction({"item": ""}))
         self.assertIn("нечего", cp.check_correction({"item": "x"}))
+
+
+def _id(text):
+    return [l for l in text.split("---", 2)[1].splitlines() if l.startswith("id: ")][0][4:]
+
+
+def _текст(p):
+    with open(p, encoding="utf-8") as fh:
+        return fh.read()
+
+
+class Идентичность(unittest.TestCase):
+    """Т2.2, ADR-0002: у разговора и обязательства свой uuid7, он в шапке
+    полем, в реестре — ключом, и от имени файла не зависит."""
+
+    def стенд(self):
+        tmp = tempfile.mkdtemp()
+        root, vault = os.path.join(tmp, "b"), os.path.join(tmp, "v")
+        os.makedirs(root)
+        os.makedirs(os.path.join(vault, ".git"))
+        return root, vault, mi.connect(root)
+
+    def звонок(self, con, root, sid, occurred=EVENT["occurred"]):
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone", "source_id": sid,
+                                    "occurred_at": occurred, "ended_at": EVENT["ended"],
+                                    "payload": EVENT["payload"]})
+        mi.write_json(mi.extraction_path(root, eid), EXTR)
+        return eid
+
+    def test_карточки_несут_id_uuid7(self):
+        cards = cp.all_cards(EVENT, EXTR, {})
+        ids = [_id(text) for rel, text in cards if "/kb/" in "/" + rel]
+        self.assertEqual(len(ids), 3, "разговор и два обязательства")
+        self.assertEqual(len(set(ids)), 3, "id не повторяются")
+        for i in ids:
+            self.assertEqual(uuid.UUID(i).version, 7, i)
+        conv = [text for rel, text in cards if rel.startswith("kb/conversations/")][0]
+        self.assertRegex(conv, r"^---\ntitle: [^\n]+\nid: [0-9a-f-]{36}\ntype: conversation\n",
+                         "id стоит сразу за title")
+
+    def test_повторная_проекция_через_реестр_даёт_тот_же_id(self):
+        root, vault, con = self.стенд()
+        eid = self.звонок(con, root, "a")
+        first = cp.run(eid, vault, root)
+        ids1 = {rel: _id(_текст(os.path.join(vault, rel)))
+                for rel in first if rel.startswith("kb/")}
+        second = cp.run(eid, vault, root)
+        self.assertEqual(first, second, "пути не меняются")
+        ids2 = {rel: _id(_текст(os.path.join(vault, rel)))
+                for rel in second if rel.startswith("kb/")}
+        self.assertEqual(ids1, ids2, "id при повторной проекции другой")
+        # реестр знает объекты с первой проекции и теми же id
+        в_базе = {r[0] for r in con.execute("select id from commitments")}
+        в_базе |= {r[0] for r in con.execute("select id from conversations")}
+        self.assertEqual(в_базе, set(ids1.values()))
+        self.assertEqual(con.execute("select count(*) from projections").fetchone()[0], 3)
+        for rel, oid in ids1.items():
+            self.assertEqual(con.execute("select object_id from projections where path=?",
+                                         (rel,)).fetchone()[0], oid)
+
+    def test_два_звонка_в_одну_минуту_не_перезаписывают_друг_друга(self):
+        """Полевой тест R12 §16: два звонка одному контакту в одну минуту —
+        два разговора, два набора обязательств, ни одной перезаписи."""
+        root, vault, con = self.стенд()
+        a = self.звонок(con, root, "a")
+        b = self.звонок(con, root, "b")
+        first = cp.run(a, vault, root)
+        second = cp.run(b, vault, root)
+        self.assertFalse(set(first) & set(second), "второй звонок лёг на файлы первого")
+        conv2 = [r for r in second if r.startswith("kb/conversations/")][0]
+        oid2 = _id(_текст(os.path.join(vault, conv2)))
+        self.assertTrue(conv2.endswith("--%s.md" % oid2[-8:]), conv2)
+        comm2 = [r for r in second if r.startswith("kb/commitments/")]
+        for rel in comm2:
+            text = _текст(os.path.join(vault, rel))
+            self.assertIn("[[%s]]" % os.path.basename(conv2)[:-3], text,
+                          "обязательство ссылается не на свой разговор")
+        # повтор второго звонка — те же пути, не третий набор
+        self.assertEqual(cp.run(b, vault, root), second)
+        self.assertEqual(con.execute("select count(*) from conversations").fetchone()[0], 2)
+        self.assertEqual(con.execute("select count(*) from commitments").fetchone()[0], 4)
+
+    def test_карточка_без_реестра_с_чужим_source_id_не_затирается(self):
+        """Волт старше реестра: файл на пути есть, строки в `projections` нет."""
+        root, vault, con = self.стенд()
+        eid = self.звонок(con, root, "a")
+        rel = "kb/conversations/2026-09-02-1405-anna.md"
+        os.makedirs(os.path.join(vault, "kb/conversations"))
+        with open(os.path.join(vault, rel), "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: чужой\ntype: conversation\nsource_id: call/old\n---\n")
+        written = cp.run(eid, vault, root)
+        self.assertNotIn(rel, written)
+        self.assertIn("title: чужой", _текст(os.path.join(vault, rel)))
+
+    def test_правка_с_реестром_зеркалит_строку(self):
+        root, vault, con = self.стенд()
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        событие = {"id": "correction_1", "occurred_at": "2026-09-02T18:00:00+03:00",
+                   "payload": {"item": "покрасить забор", "status": "open"}}
+        out = cp.apply_correction(vault, событие, con)
+        text = _текст(os.path.join(vault, out["created"]))
+        row = con.execute("select id, status, source_native_id from commitments").fetchone()
+        self.assertEqual(row["id"], _id(text), "id в шапке и в реестре разные")
+        self.assertEqual((row["status"], row["source_native_id"]),
+                         ("open", "correction/correction_1"))
+        событие2 = dict(событие, id="correction_2",
+                        payload={"item": "покрасить забор", "status": "done"})
+        cp.apply_correction(vault, событие2, con)
+        self.assertEqual(con.execute("select status from commitments").fetchone()[0], "done")
+        self.assertEqual(con.execute("select count(*) from corrections").fetchone()[0], 1,
+                         "строка журнала «статус open → done» в истории")
+
+    def test_заведённая_правкой_на_занятом_пути_получает_различитель_из_id(self):
+        root, vault, con = self.стенд()
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        # на пути, который получит «забор», уже лежит чужая карточка с другим
+        # названием: похожей она не считается, значит правка заводит новую
+        занятый = "%s/%s-%s.md" % (cp.COMM_DIR, mi.now_iso()[:10], cp.slug("забор"))
+        with open(os.path.join(vault, занятый), "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: другое\ntype: commitment\nstatus: done\n---\n")
+        событие = {"id": "c1", "occurred_at": "2026-09-02T18:00:00+03:00",
+                   "payload": {"item": "забор", "status": "open"}}
+        новая = cp.apply_correction(vault, событие, con)["created"]
+        oid = _id(_текст(os.path.join(vault, новая)))
+        self.assertEqual(новая, занятый[:-3] + "--%s.md" % oid[-8:])
+        self.assertIn("title: другое", _текст(os.path.join(vault, занятый)))
 
 
 if __name__ == "__main__":

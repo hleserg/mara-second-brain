@@ -844,7 +844,7 @@ class Handler(BaseHTTPRequestHandler):
                 # ночного крона. Писатель карточек один — call_project.
                 try:
                     applied = call_project.apply_correction(self.server.vault,
-                                                            dict(data, id=eid))
+                                                            dict(data, id=eid), con)
                 except Exception as e:
                     print("correction %s: %s: %s" % (eid, type(e).__name__, e), flush=True)
                     applied = {"found": False,

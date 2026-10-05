@@ -821,5 +821,91 @@ class Запись(unittest.TestCase):
         self.assertIn("правок 2", вывод)
 
 
+class Идентичность(unittest.TestCase):
+    """Т2.2: id по старшинству — реестр, шапка, новый; `--write-ids`
+    вписывает его в карточки, у которых нет."""
+
+    ID = "01999999-0000-7000-8000-000000000001"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.vault = os.path.join(self.tmp.name, "vault")
+        os.makedirs(os.path.join(self.vault, ".git"))
+        self.con = mi.connect(self.root)
+
+    def test_id_из_шапки_попадает_в_реестр(self):
+        карточка(self.vault, "kb/commitments/a.md", id=self.ID)
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select id from commitments").fetchone()[0],
+                         self.ID)
+
+    def test_реестр_старше_шапки(self):
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        было = self.con.execute("select id from commitments").fetchone()[0]
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read().replace("title:", "id: %s\ntitle:" % self.ID, 1)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст)
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select id from commitments").fetchone()[0], было)
+        self.assertIn("верю реестру", поток.getvalue())
+
+    def test_write_ids_вписывает_и_обновляет_отпечаток(self):
+        p = карточка(self.vault, "kb/commitments/a.md")
+        карточка(self.vault, "kb/conversations/c.md", type="conversation",
+                 source_id="call/call_1", status=None, owner=None, due=None,
+                 promised_to=None, origin=None)
+        li.run(self.con, self.vault)
+        self.assertEqual(li.вписать_id(self.con, self.vault, dry_run=True), (2, 0))
+        with open(p, encoding="utf-8") as fh:
+            self.assertNotIn("\nid: ", fh.read(), "проба записала")
+        self.assertEqual(li.вписать_id(self.con, self.vault), (2, 0))
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        oid = self.con.execute("select id from commitments").fetchone()[0]
+        self.assertRegex(текст, r"^---\ntitle: [^\n]+\nid: %s\n" % oid)
+        self.assertEqual(self.con.execute(
+            "select content_sha256 from projections where path='kb/commitments/a.md'"
+        ).fetchone()[0], hashlib.sha256(текст.encode("utf-8")).hexdigest(),
+            "отпечаток проекции не обновлён — сверка сочтёт правку чужой")
+        self.assertEqual(li.вписать_id(self.con, self.vault), (0, 0))
+        # и перенос после этого верит шапке: id тот же
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select id from commitments").fetchone()[0], oid)
+
+    def test_write_ids_без_строки_в_реестре_не_выдумывает(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        self.assertEqual(li.вписать_id(self.con, self.vault), (0, 1))
+
+    def test_перенести_карточку_чужой_каталог_и_своя(self):
+        self.assertIsNone(li.перенести_карточку(self.con, self.vault, "entities/people/x.md"))
+        карточка(self.vault, "kb/commitments/a.md", id=self.ID)
+        self.assertEqual(li.перенести_карточку(self.con, self.vault, "kb/commitments/a.md"),
+                         self.ID)
+        self.assertEqual(self.con.execute("select count(*) from projections").fetchone()[0], 1)
+
+    def test_main_write_ids(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        self.con.close()
+        self.root = os.path.join(self.tmp.name, "нет-базы")
+        код, вывод = Запуск.запустить(self, "--write-ids")
+        self.assertEqual(код, 2, "без базы вписывать нечего: " + вывод)
+        self.assertFalse(os.path.exists(self.root), "--write-ids завёл базу")
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.assertEqual(Запуск.запустить(self)[0], 0)
+        код, вывод = Запуск.запустить(self, "--write-ids", "--dry-run")
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("(проба): вписано 1", вывод)
+        код, вывод = Запуск.запустить(self, "--write-ids")
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("вписано 1", вывод)
+        self.assertIn("вписано 0", Запуск.запустить(self, "--write-ids")[1])
+
+
 if __name__ == "__main__":
     unittest.main()

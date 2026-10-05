@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 import context_pack
+import ledger_import as li
 from vault_common import canon_map, linkify, locked, scrub, yaml_str
 
 OWNER = os.environ.get("MARA_OWNER", "sergey")
@@ -99,11 +100,68 @@ def body_of(card_text):
     return card_text.split("---", 2)[2].lstrip("\n")
 
 
-def conversation_card(event, extraction, canon):
+# --- идентичность карточки (Т2.2, ADR-0002) ---------------------------------
+#
+# У каждого разговора и обязательства — свой uuid7, и он не зависит ни от
+# имени файла, ни от заголовка: в шапке лежит полем `id:`, в реестре — ключом
+# строки. Кто выдаёт id, решает зовущий: чистым построителям карточек (тесты,
+# самопроверка) хватает `_новый`, проектору `run()` нужен `_из_реестра` —
+# иначе повторная проекция того же звонка выдала бы второй id, и стабильность
+# держалась бы на том, что проекцию не повторяют.
+
+def _новый(вид, native):
+    return mi.uuid7()
+
+
+def _из_реестра(con):
+    """Id по `source_id`, если объект уже есть в реестре; иначе новый."""
+    def ид(вид, native):
+        таблица = "commitments" if вид == "commitment" else "conversations"
+        row = con.execute("select id from %s where source_native_id=?" % таблица,
+                          (native,)).fetchone()
+        return row["id"] if row else mi.uuid7()
+    return ид
+
+
+def _свободный(vault, con):
+    """Путь карточки, который не затрёт чужую.
+
+    Два звонка одному человеку в одну минуту (полевой тест R12 §16) дают
+    один путь; §2.2 п.1 — именно эта перезапись. Различитель — последние
+    восемь знаков id, не первые (ADR-0002: первые — старшие биты миллисекунд,
+    у объектов одного прогона они одинаковы) и не позиционный `-2` (он
+    зависит от порядка обхода и переезжает при пересборке). Занят ли путь,
+    спрашиваем у реестра (`projections`), а до него — у файла: карточка,
+    которую реестр ещё не видел, тоже чужая, если у неё другой `source_id`.
+    """
+    def вольный(вид, rel, oid, native):
+        занят = False
+        if con is not None:
+            row = con.execute("select object_id from projections where path=?",
+                              (rel,)).fetchone()
+            if row:
+                занят = row["object_id"] != oid
+        if not занят and vault and os.path.exists(os.path.join(vault, rel)):
+            with open(os.path.join(vault, rel), encoding="utf-8") as fh:
+                fm, _ = context_pack.mb.frontmatter(fh.read())
+            занят = ((fm.get("id") or "") != oid
+                     and (fm.get("source_id") or "") != native)
+        return rel[:-3] + "--" + oid[-8:] + ".md" if занят else rel
+    return вольный
+
+
+def _как_есть(вид, rel, oid, native):
+    return rel
+
+
+def conversation_card(event, extraction, canon, ид=_новый, вольный=_как_есть):
     """(путь относительно волта, текст карточки) для одного разговора."""
     day, hhmm, human = when(event)
     who = contact(event)
-    path = "%s/%s-%s-%s.md" % (CONV_DIR, day, hhmm, slug(who))
+    native = "call/" + event["id"]
+    oid = ид("conversation", native)
+    path = вольный("conversation", "%s/%s-%s-%s.md" % (CONV_DIR, day, hhmm, slug(who)),
+                   oid, native)
 
     lines = []
     for key, title in SECTIONS:
@@ -124,9 +182,10 @@ def conversation_card(event, extraction, canon):
 
     fm = frontmatter(
         [("title", yaml_str("Звонок · %s · %s" % (who, human))),
+         ("id", oid),
          ("type", "conversation"),
          ("source", "phone"),
-         ("source_id", "call/" + event["id"]),
+         ("source_id", native),
          ("created", mi.now_iso()),
          ("occurred", event.get("occurred")),
          ("sensitive", "true"),
@@ -145,10 +204,16 @@ def conversation_card(event, extraction, canon):
     return path, fm + "\n" + body
 
 
-def commitment_cards(event, extraction, canon):
-    """Карточки обязательств: только то, что перешло порог и сказано прямо."""
+def commitment_cards(event, extraction, canon, ид=_новый, вольный=_как_есть,
+                     conv=None):
+    """Карточки обязательств: только то, что перешло порог и сказано прямо.
+
+    `conv` — имя файла разговора без расширения, на который ссылается
+    «Откуда»: его даёт `all_cards`, потому что у разговора путь мог получить
+    различитель, и ссылка обязана вести на него, а не на соседа.
+    """
     day, hhmm, _ = when(event)
-    conv = "%s-%s-%s" % (day, hhmm, slug(contact(event)))
+    conv = conv or "%s-%s-%s" % (day, hhmm, slug(contact(event)))
     who = contact(event)
     out = []
     for key in ("requests", "commitments", "changed_instructions"):
@@ -156,7 +221,11 @@ def commitment_cards(event, extraction, canon):
             if it.get("disposition") != "task":
                 continue                      # «возможно задача» живёт в дайджесте
             action = it.get("action") or it.get("new_state") or ""
-            path = "%s/%s-%s.md" % (COMM_DIR, day, slug(action)[:40])
+            native = "commitment/%s/%s/%d" % (event["id"], key, n)
+            oid = ид("commitment", native)
+            path = вольный("commitment",
+                           "%s/%s-%s.md" % (COMM_DIR, day, slug(action)[:40]),
+                           oid, native)
             owner = OWNER if key != "requests" else (it.get("owner") or OWNER)
             body = ["- Обещание: %s" % scrub(action),
                     "- Откуда: [[%s]] · %s" % (conv, stamp(it))]
@@ -171,9 +240,10 @@ def commitment_cards(event, extraction, canon):
             text = "\n".join(body).rstrip() + "\n"
             fm = frontmatter(
                 [("title", yaml_str(action[:80])),
+                 ("id", oid),
                  ("type", "commitment"),
                  ("source", "phone"),
-                 ("source_id", "commitment/%s/%s/%d" % (event["id"], key, n)),
+                 ("source_id", native),
                  ("created", mi.now_iso()),
                  ("occurred", event.get("occurred")),
                  ("sensitive", "true"),
@@ -227,13 +297,15 @@ def person_card(event, canon):
     return "entities/people/%s.md" % key, fm + "\n" + body
 
 
-def all_cards(event, extraction, canon):
+def all_cards(event, extraction, canon, ид=_новый, вольный=_как_есть):
     """Всё, что рождает один звонок: разговор и обязательства из него."""
-    cards = [conversation_card(event, extraction, canon)]
+    conv_path, conv_text = conversation_card(event, extraction, canon, ид, вольный)
+    cards = [(conv_path, conv_text)]
     person = person_card(event, canon)
     if person:
         cards.append(person)
-    return cards + commitment_cards(event, extraction, canon)
+    conv = os.path.basename(conv_path)[:-3]
+    return cards + commitment_cards(event, extraction, canon, ид, вольный, conv)
 
 
 def write_cards(vault, cards):
@@ -267,7 +339,12 @@ def run(event_id, vault, root=None):
     if blob:
         ev["payload"]["audio_until"] = blob["audio_until"]
     canon = canon_map(vault)
-    written = write_cards(vault, all_cards(ev, extraction, canon))
+    written = write_cards(vault, all_cards(ev, extraction, canon,
+                                           _из_реестра(con), _свободный(vault, con)))
+    # Реестр узнаёт о карточке тем же прогоном, а не ночным переносом: id
+    # в шапке и ключ строки — одно и то же с первой секунды (Т2.2).
+    for rel in written:
+        li.перенести_карточку(con, vault, rel)
     con.execute("update events set state='projected' where id=?", (event_id,))
     # пакет для Мары пересобираем сразу: обязательство, о котором она узнает
     # только после ночного крона, — это обязательство, о котором она не узнает
@@ -389,12 +466,15 @@ def _завести(vault, item, due, note, когда, event):
     """Новая задача словами Серёги. Поля те же, что у карточки из звонка, чтобы
     context_pack и сводки видели её как любую другую."""
     day, stem = когда[:10], slug(item)[:40]
-    rel, n = "%s/%s-%s.md" % (COMM_DIR, day, stem), 1
-    while os.path.exists(os.path.join(vault, rel)):
-        n += 1
-        rel = "%s/%s-%s-%d.md" % (COMM_DIR, day, stem, n)
+    oid = mi.uuid7()
+    rel = "%s/%s-%s.md" % (COMM_DIR, day, stem)
+    # занятый путь — различитель из id, как у проектора (ADR-0002), а не
+    # позиционный `-2`: тот переезжал при пересборке
+    if os.path.exists(os.path.join(vault, rel)):
+        rel = "%s/%s-%s--%s.md" % (COMM_DIR, day, stem, oid[-8:])
     fm = frontmatter(
         [("title", yaml_str(item[:80])),
+         ("id", oid),
          ("type", "commitment"),
          ("source", "mara"),
          ("source_id", "correction/%s" % event["id"]),
@@ -423,9 +503,14 @@ def _завести(vault, item, due, note, когда, event):
             "text": "завёл «%s»%s" % (item, " до " + due if due else "")}
 
 
-def apply_correction(vault, event):
+def apply_correction(vault, event, con=None):
     """Событие kind=correction → карточка. Возвращает, что сделано, с полем
-    `text` для Мары. Пакет для Мары пересобирается сразу, как после звонка."""
+    `text` для Мары. Пакет для Мары пересобирается сразу, как после звонка.
+
+    `con` — реестр: записанная или заведённая карточка тут же переносится
+    в него (`ledger_import.перенести_карточку`), чтобы строка и шапка не
+    расходились до ночного крона. Без `con` (тесты правки словами) волт
+    остаётся единственным, кого правка касается — как и до Т2.2."""
     p = event.get("payload") or {}
     item = scrub(str(p.get("item") or "").strip())
     status, due = p.get("status") or None, p.get("due") or None
@@ -448,6 +533,9 @@ def apply_correction(vault, event):
             out = {"found": False, "open": открытые,
                    "text": "не нашёл «%s» среди открытых: %s"
                            % (item, "; ".join(открытые) or "список пуст")}
+    rel = out.get("card") if out.get("changed") else out.get("created")
+    if con is not None and rel:
+        li.перенести_карточку(con, vault, rel)
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
     return out
