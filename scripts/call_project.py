@@ -538,6 +538,9 @@ def run(event_id, vault, root=None):
             пункт = пункты.get(fm.get("source_id"))
             if пункт is not None:
                 _evidence_в_реестр(con, oid, пункт, когда)
+            # §4.8: какой версией проектора нарисована проекция
+            con.execute("update projections set projector_version=? where path=?",
+                        (mi.PIPELINE_VERSION, rel))
     if спорные:
         # По построению `_свободный` сюда не попасть: путь либо свободен, либо
         # свой. Попали — значит реестр и волт разошлись так, как код не
@@ -863,6 +866,9 @@ def _в_реестр(con, vault, event, p, out, found, адреса, прове�
                 # `call_project.run` тот же None считает ошибкой.
                 raise RuntimeError("правка %s: карточка %s спорная, реестр её не принял"
                                    % (eid, rel))
+            # §4.8: карточку правки рисует тот же проектор — та же версия
+            con.execute("update projections set projector_version=? where path=?",
+                        (mi.PIPELINE_VERSION, rel))
             row = con.execute("select version from commitments where id=?",
                               (oid,)).fetchone()
             # id и версия в ответе — чтобы следующая правка пришла с ними
