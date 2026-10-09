@@ -38,6 +38,14 @@ OVERLAP_MS = int(os.environ.get("MARA_ASR_OVERLAP_MS", 2000))
 HTTP_TIMEOUT = 300
 
 
+def конфигурация():
+    """Ручки прогона, которые ложатся в `transcripts.config_json` (Т5.0,
+    ТЗ §9): при другом окне или перекрытии те же секунды режутся иначе, и
+    без записи переобработка неотличима от первой. Только то, что меняет
+    результат: таймаут HTTP — нет."""
+    return {"window_ms": WINDOW_MS, "overlap_ms": OVERLAP_MS}
+
+
 def slice_plan(duration_ms, window_ms=WINDOW_MS, overlap_ms=OVERLAP_MS):
     """Границы кусков в миллисекундах от начала записи."""
     if duration_ms <= 0:
@@ -102,7 +110,7 @@ def transcribe_spans(base_url, plan, cutter, движок=None):
     return segs
 
 
-def записать_сегменты(con, event_id, blob_sha256, segs, движок=None):
+def записать_сегменты(con, event_id, blob_sha256, segs, движок=None, конфиг=None):
     """Т5.1, ADR-0004 п.1: расшифровка и её сегменты — строки реестра.
 
     Каждый прогон ASR заводит **новый** `transcripts` с новыми сегментами
@@ -110,16 +118,21 @@ def записать_сегменты(con, event_id, blob_sha256, segs, движ
     приколоченным к той расшифровке, по которой его нашли). `seq` — номер
     из метки `s%04d`, по нему `call_extract` переводит метку модели в
     `segment_id`. Своя транзакция, а внутри чужой — её шаг (savepoint):
-    `run` держит одну на строки и переход события. Возвращает id
-    расшифровки."""
+    `run` держит одну на строки и переход события. `конфиг` — ручки
+    прогона (`конфигурация()`; по умолчанию — текущие), `pipeline_version` —
+    версия конвейера кода (Т5.0, ТЗ §9). Возвращает id расшифровки."""
     движок = движок or {}
     tid = mi.uuid7()
     with mi.транзакция(con):
         con.execute("insert into transcripts(id,event_id,blob_sha256,engine,model,"
-                    "language,created) values(?,?,?,?,?,?,?)",
+                    "language,created,config_json,pipeline_version) "
+                    "values(?,?,?,?,?,?,?,?,?)",
                     (tid, event_id, blob_sha256, движок.get("engine", "unknown"),
                      движок.get("model", "unknown"), движок.get("language"),
-                     mi.now_iso()))
+                     mi.now_iso(),
+                     json.dumps(конфигурация() if конфиг is None else конфиг,
+                                ensure_ascii=False, sort_keys=True),
+                     mi.PIPELINE_VERSION))
         for s in segs:
             con.execute("insert into transcript_segments(id,transcript_id,seq,start_ms,"
                         "end_ms,speaker,text) values(?,?,?,?,?,?,?)",

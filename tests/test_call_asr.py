@@ -128,6 +128,22 @@ class Реестр(unittest.TestCase):
         self.assertEqual((сег[3]["start_ms"], сег[3]["end_ms"], сег[3]["text"]),
                          (46000, 60000, "три"))
         self.assertEqual(len(сег[1]["id"]), 36)
+        # Т5.0, ТЗ §9: конфигурация прогона и версия конвейера — в строке
+        self.assertEqual((json.loads(t["config_json"]), t["pipeline_version"]),
+                         (call_asr.конфигурация(), mi.PIPELINE_VERSION))
+        self.assertEqual(call_asr.конфигурация(),
+                         {"window_ms": call_asr.WINDOW_MS, "overlap_ms": call_asr.OVERLAP_MS})
+
+    def test_конфигурация_прогона_своя_у_каждой_расшифровки(self):
+        """Переобработка с другим окном — другая строка с другим config_json;
+        по нему два прогона различимы (Т5.0)."""
+        a = call_asr.записать_сегменты(self.con, self.eid, None, self.segs)
+        b = call_asr.записать_сегменты(self.con, self.eid, None, self.segs,
+                                       конфиг={"window_ms": 15000, "overlap_ms": 1000})
+        к = {r["id"]: json.loads(r["config_json"]) for r in
+             self.con.execute("select id, config_json from transcripts")}
+        self.assertEqual(к[a]["window_ms"], call_asr.WINDOW_MS)
+        self.assertEqual(к[b], {"window_ms": 15000, "overlap_ms": 1000})
 
     def test_коробка_без_имени_движка_даёт_unknown(self):
         call_asr.записать_сегменты(self.con, self.eid, None, self.segs)

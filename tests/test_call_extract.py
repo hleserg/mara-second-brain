@@ -222,13 +222,33 @@ class Шаг(unittest.TestCase):
                          ("model", ce.MODEL, self.eid))
         self.assertEqual((д["why"], д["segment"], д["list"], д["item"], д["transcript_id"]),
                          ("нет такого сегмента", "s0007", "requests", 0, self.tid))
-        self.assertEqual(sorted(д), ["end_ms", "item", "list", "prompt_version", "segment",
-                                     "start_ms", "transcript_id", "why"])
+        self.assertEqual(sorted(д), ["end_ms", "item", "list", "prompt_version",
+                                     "rules_version", "segment", "start_ms",
+                                     "transcript_id", "why"])
         for r in рows:
             self.assertNotIn("смет", r["detail_json"], "содержимого в аудите нет (§6.2)")
             self.assertNotIn("цитат", r["detail_json"])
         self.assertEqual(self.con.execute("select state from events").fetchone()[0],
                          "extracted")
+
+    def test_происхождение_извлечения(self):
+        """Т5.0, ТЗ §9: в извлечении — версия правил, конфигурация прогона и
+        хеш входа (того текста, что ушёл модели)."""
+        import hashlib
+        extr = self.прогон({"requests": [
+            {"action": "прислать смету", "explicit": True, "confidence": 0.95,
+             "deadline_phrase": "", "evidence": [{"segment": "s0001"}]}]})
+        self.assertEqual((extr["rules_version"], extr["extractor"], extr["prompt_version"],
+                          extr["pipeline_version"]),
+                         (ce.RULES_VERSION, ce.MODEL, ce.PROMPT_VERSION,
+                          self.mi.PIPELINE_VERSION))
+        self.assertEqual(extr["config"], {"model": ce.MODEL, "options": ce.OPTIONS,
+                                          "task_min": ce.TASK_MIN,
+                                          "review_min": ce.REVIEW_MIN})
+        self.assertEqual(extr["input_sha256"], hashlib.sha256(
+            ce.transcript_text(self.segs).encode("utf-8")).hexdigest())
+        self.assertEqual(ce.конфигурация()["options"], {"temperature": 0, "num_ctx": 8192},
+                         "параметры запроса — те же, что уходят в ollama")
 
     def test_промпт_и_сверка_из_одной_расшифровки(self):
         """Codex по #121: файл и строки реестра разошлись (ASR умер между

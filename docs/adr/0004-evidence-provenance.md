@@ -37,7 +37,10 @@
   (константа `mara_ingest.PIPELINE_VERSION = 1`). Имя модели
   (`MARA_EXTRACT_MODEL`) и текст промпта `PROMPT` никуда не записываются;
   промпт версии не имеет. `transcripts.engine` и `transcripts.model` в схеме
-  есть, но `call_asr` в базу не пишет.
+  есть, но `call_asr` в базу не пишет. *(Снято Т5.1 и Т5.0: `engine`,
+  `model`, `config_json`, `pipeline_version` в строке расшифровки;
+  `extractor`, `prompt_version`, `rules_version`, `config`, `input_sha256`
+  в извлечении.)*
 
 Что завела миграция 2 (`mara_ingest.SCHEMA_2`, PR #116) и чего пока никто не
 заполняет: `transcripts(id, event_id, blob_sha256, engine, model, language)`,
