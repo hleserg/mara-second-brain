@@ -637,6 +637,11 @@ def write_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
+        # fsync до rename: манифест — результат, раньше которого база не
+        # вправе сказать «stored» (§5.2); без него после сбоя питания файл
+        # есть, а байт в нём нет
+        fh.flush()
+        os.fsync(fh.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
     return path

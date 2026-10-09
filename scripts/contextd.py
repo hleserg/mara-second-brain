@@ -976,12 +976,45 @@ def finish_stored(con, root, event_id):
     дайджест в телеграм. `rowcount` показывает, кто
     успел первым.
     """
-    if con.execute("update events set state='stored' "
-                   "where id=? and state in ('new','stale','quarantined')",
-                   (event_id,)).rowcount != 1:
+    if not con.execute("select 1 from events where id=? and state in "
+                       "('new','stale','quarantined')", (event_id,)).fetchone():
         return
+    # Манифест — до перехода: файл идемпотентен, а база обязана не говорить
+    # «stored» раньше, чем результат лежит на диске (§5.2). Переход и работа
+    # — одной транзакцией: смерть демона между ними оставляла звонок, который
+    # никто не расшифрует (ADR-0005; `tests/test_reconcile_stored.py`), и
+    # лечила его только сверка.
     mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
-    mi.add_job(con, event_id, "asr")
+    with транзакция(con):
+        if con.execute("update events set state='stored' "
+                       "where id=? and state in ('new','stale','quarantined')",
+                       (event_id,)).rowcount != 1:
+            return
+        mi.add_job(con, event_id, "asr")
+
+
+class транзакция:
+    """`begin immediate` … `commit`, откат на исключении (§5.2, Т2.1в).
+
+    Соединения contextd — в autocommit (`isolation_level=None`), и каждый
+    оператор был сам себе транзакцией. Вложенного `begin` SQLite не умеет,
+    поэтому внутри уже открытой транзакции зовущего блок — прозрачный: так
+    `finish_stored` работает и сам по себе, и внутри приёма блоба.
+    """
+
+    def __init__(self, con):
+        self.con, self.своя = con, False
+
+    def __enter__(self):
+        if not self.con.in_transaction:
+            self.con.execute("begin immediate")
+            self.своя = True
+        return self
+
+    def __exit__(self, тип, *_):
+        if self.своя:
+            self.con.execute("rollback" if тип else "commit")
+        return False
 
 
 def need_blob(con, root, event_id, sha256):
@@ -1130,6 +1163,11 @@ def ingest_audio(con, root, event_id, поток, n=None):
     try:
         with os.fdopen(fd, "wb") as fh:
             got, размер = слить(поток, n or 0, fh)
+            # на диск, а не в страничный кэш, до rename: §5.2 принимает
+            # метаданные блоба «после fsync/rename», и до этой строки
+            # «после rename» было, а «после fsync» — нет
+            fh.flush()
+            os.fsync(fh.fileno())
         if got != want:
             # Событие с этим хешем не долить уже некому: телефон на 409
             # пересчитывает файл с начала (`Core.kt:143-145`), а дописанный
@@ -1184,11 +1222,15 @@ def ingest_audio(con, root, event_id, поток, n=None):
         if os.path.exists(tmp):
             os.unlink(tmp)
     # or ignore, а не or replace: две параллельные загрузки одного аудио не
-    # повод обнулять pin и audio_until уже лежащей строки
-    con.execute("insert or ignore into blobs(sha256,path,bytes,mime,created,audio_until)"
-                " values(?,?,?,?,?,?)",
-                (want, path, размер, mime, mi.now_iso(), audio_until()))
-    finish_stored(con, root, event_id)
+    # повод обнулять pin и audio_until уже лежащей строки. Строка блоба,
+    # переход события и работа — одной транзакцией: файл уже на диске, и
+    # база либо знает о нём целиком, либо не знает вовсе — половину (блоб
+    # без события) чинила только сверка.
+    with транзакция(con):
+        con.execute("insert or ignore into blobs(sha256,path,bytes,mime,created,audio_until)"
+                    " values(?,?,?,?,?,?)",
+                    (want, path, размер, mime, mi.now_iso(), audio_until()))
+        finish_stored(con, root, event_id)
     return 200, {"event_id": event_id, "blob_sha256": want, "bytes": размер}
 
 
@@ -1351,9 +1393,21 @@ def worker(stop, root):
             stop.wait(5)
             continue
         ok, err = run_step(job["kind"], job["event_id"])
-        mi.finish_job(con, job["id"], ok, err)
+        закрыть_работу(con, job, ok, err)
         print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
                                       "ок" if ok else "сбой"), flush=True)
+
+
+def закрыть_работу(con, job, ok, err):
+    """Итог шага и следующая работа — одной транзакцией (§5.2).
+
+    Результат шага (расшифровка, извлечение, карточки) к этому моменту уже
+    на диске — его пишет подпроцесс до своего нулевого кода. Смерть воркера
+    между `finish_job` и `add_job` оставляла `done` без продолжения, и
+    цепочку доводила сверка (`транскрипт_без_извлечения`).
+    """
+    with транзакция(con):
+        mi.finish_job(con, job["id"], ok, err)
         if ok and job["kind"] in NEXT:
             mi.add_job(con, job["event_id"], NEXT[job["kind"]])
 

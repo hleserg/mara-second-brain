@@ -969,16 +969,23 @@ class ТестГонкаFinishStored(unittest.TestCase):
         второй = mi.connect(каталог)
 
         class Опережающий:
-            """Соединение, пускающее конкурента вперёд прямо перед update."""
+            """Соединение, пускающее конкурента вперёд между проверкой состояния
+            и переходом — ровно когда оба уже решили, что событие их.
+
+            Вклиниваться на самом `update` больше нельзя: с Т2.1в переход и
+            работа идут под `begin immediate`, и конкурент внутри чужой
+            транзакции того же потока ждал бы её до таймаута — а
+            последовательность он и так получает от самой транзакции."""
 
             def __init__(self, con):
                 self.con, self.сработал = con, False
 
             def execute(self, sql, args=()):
-                if "state='stored'" in sql and not self.сработал:
+                r = self.con.execute(sql, args)
+                if "select 1 from events" in sql and not self.сработал:
                     self.сработал = True
                     contextd.finish_stored(второй, каталог, eid)
-                return self.con.execute(sql, args)
+                return r
 
             def __getattr__(self, name):
                 return getattr(self.con, name)
