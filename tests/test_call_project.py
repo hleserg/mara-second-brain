@@ -502,6 +502,64 @@ class ПравкаПоКоду(unittest.TestCase):
         self.assertEqual(self.con.execute("select status from commitments").fetchone()[0],
                          "done", "карточка перенесена после правки")
 
+    def test_карточка_без_id_в_шапке_адресуется_id_из_ответа(self):
+        """Ревью P2: до `--write-ids` шапка без `id:`, а строка в реестре
+        есть — id из ответа обязан быть адресом, версия — проверяться."""
+        p = os.path.join(self.vault, "kb/commitments/x.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: забор\ntype: commitment\nstatus: open\n---\n")
+        out = self.правка(1, item="забор", due="2026-10-10")
+        oid = out["id"]
+        self.assertEqual(out["version"], 1)
+        with open(p, encoding="utf-8") as fh:
+            self.assertNotIn("\nid: ", fh.read(), "шапку перенос не правит")
+        out = self.правка(2, item="что угодно", status="done", id=oid, expected_version=1)
+        self.assertTrue(out["found"] and out["version_checked"])
+        self.assertEqual((out["id"], out["version"]), (oid, 2))
+        out = self.правка(3, item="забор", status="cancelled", expected_version=1)
+        self.assertEqual(out["error"], "version_conflict")
+
+    def test_уже_так_несёт_id_и_версию_и_не_конфликт(self):
+        """ADR-0003 п.5: правка без изменений — «уже так», даже со старой
+        версией; и адрес в ответе есть."""
+        oid, _ = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")      # версия 2
+        out = self.правка(3, item="покрасить забор", status="open", id=oid,
+                          expected_version=1)
+        self.assertNotIn("error", out)
+        self.assertIn("уже так", out["text"])
+        self.assertEqual((out["id"], out["version"]), (oid, 2))
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
+
+    def test_повтор_конфликта_не_плодит_тревог(self):
+        oid, _ = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")
+        a = self.правка(3, item="покрасить забор", status="done", id=oid, expected_version=1)
+        b = self.правка(4, item="покрасить забор", status="cancelled", id=oid,
+                        expected_version=1)
+        self.assertEqual(a["conflict_id"], b["conflict_id"])
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 1)
+
+    def test_код_в_верхнем_регистре_и_список_в_шапке(self):
+        oid, _ = self.завести("покрасить забор", 1)
+        out = self.правка(2, item="x", status="done", id="#" + oid[-8:].upper())
+        self.assertEqual(out["id"], oid)
+        p = os.path.join(self.vault, "kb/commitments/y.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: кривая\nid:\n  - a\n  - b\ntype: commitment\n"
+                     "status: open\n---\n")
+        out = self.правка(3, item="кривая", status="done", id="#" + oid[-8:])
+        self.assertEqual(out["id"], oid, "список в шапке не роняет и не ловится")
+
+    def test_два_совпадения_по_коду_несут_полные_id(self):
+        import unittest.mock
+        oid, _ = self.завести("забор", 1)
+        with unittest.mock.patch.object(cp, "_совпал", return_value=True):
+            self.завести("другое", 2)
+            out = self.правка(3, item="x", status="done", id="#" + oid[-8:])
+        self.assertIn("ambiguous_ids", out)
+        self.assertEqual(len(out["ambiguous_ids"]), 2)
+
     def test_граница_доверия_для_id_и_версии(self):
         self.assertIsNone(cp.check_correction({"item": "x", "status": "done",
                                                "id": "#5479d088", "expected_version": 3}))
@@ -512,6 +570,11 @@ class ПравкаПоКоду(unittest.TestCase):
                                            "expected_version": "много"}))
         self.assertIn("expected_version",
                       cp.check_correction({"item": "x", "status": "done", "expected_version": 0}))
+        self.assertIn("expected_version",
+                      cp.check_correction({"item": "x", "status": "done", "expected_version": "²"}))
+        self.assertIn("id", cp.check_correction({"item": "x", "status": "done", "id": ["a"]}))
+        self.assertIsNone(cp.check_correction({"item": "x", "status": "done",
+                                               "id": "#5479D088", "expected_version": "3"}))
 
 
 def когда():

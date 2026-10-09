@@ -183,7 +183,12 @@ class Брокер:
                                             "expected_version") if args.get(k)}
         # source_id — содержимое плюс минута: повтор вызова моделью в ту же
         # минуту — дубль, та же правка через час — новое событие
-        ключ = "|".join(str(payload.get(k) or "") for k in ("item", "status", "due", "note", "id"))
+        # `expected_version` в ключе обязателен: ответ на конфликт сам велит
+        # «повтори с expected_version=N», и без него повтор в ту же минуту
+        # дедупился бы в событие-конфликт и отвечал «уже принимал» (ревью
+        # PR #118, P1)
+        ключ = "|".join(str(payload.get(k) or "") for k in (
+            "item", "status", "due", "note", "id", "expected_version"))
         событие = {"kind": "correction", "source": "mara",
                    "source_id": hashlib.sha256(
                        (ключ + "|" + time.strftime("%Y-%m-%dT%H:%M")).encode("utf-8")).hexdigest(),
@@ -359,6 +364,17 @@ def _demo():
     текст = б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088",
                       "expected_version": 2})
     assert "конфликт версий" in текст and "версия 3" in текст, текст
+    # повтор «как велено», с другой версией, — другое событие, не дубль
+    ключи = []
+
+    def ловец(req, timeout=None):
+        ключи.append(json.loads(req.data)["source_id"])
+        return Ответ(json.dumps({"event_id": "c", "duplicate": False,
+                                 "applied": {"found": True, "text": "ок"}}).encode())
+    б._open = ловец
+    б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088", "expected_version": 2})
+    б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088", "expected_version": 3})
+    assert ключи[0] != ключи[1], "повтор с новой версией дедупился бы в конфликт"
 
     # register: хук и инструмент встают, без Hermes
     класс = {}

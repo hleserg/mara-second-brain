@@ -86,8 +86,8 @@ def строка(it):
         line += " — до %s" % it["due"]
     if it.get("promised_to"):
         line += " · %s" % mb.clean(it["promised_to"])
-    if it.get("id"):
-        line += " #%s" % str(it["id"])[-8:]
+    if isinstance(it.get("id"), str) and it["id"].strip():
+        line += " #%s" % it["id"].strip()[-8:]     # список в шапке — не id
     return line
 
 
