@@ -172,6 +172,16 @@ class Дрейф(unittest.TestCase):
         f, = [f for f in rc.run(self.con, self.root, vault=self.vault, bm_db=None, targets=[])
               if f["check"] == "проекция-разошлась"]
         self.assertEqual(f["count"], 1)
+        # переименование рукой тоже не прячет поломку (Codex, круг 2)
+        os.rename(self.card, self.card.replace(".md", "-x.md"))
+        итог, зам = self.дрейф()
+        self.assertEqual((итог["проекций без объекта"], итог["переименованы"],
+                          итог["проекций без файла"]), (1, 0, 0))
+        self.assertTrue(vd.расхождение(итог))
+        # и удаление рукой: «объект остался» — неправда, объекта нет
+        os.remove(self.card.replace(".md", "-x.md"))
+        итог, зам = self.дрейф()
+        self.assertEqual((итог["проекций без объекта"], итог["проекций без файла"]), (1, 0))
 
     def test_сверка_выносит_находку(self):
         self.assertEqual([f for f in rc.run(self.con, self.root, vault=self.vault, bm_db=None,
