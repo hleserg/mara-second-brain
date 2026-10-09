@@ -417,6 +417,27 @@ class Outbox(_СтендДоставки):
         self.assertEqual((r["state"], r["attempts"]), ("sent", 1))
         self.assertEqual((self.дайджест()["state"], self.состояние()), ("sent", "done"))
 
+    def test_шаг_падает_если_строку_забрали_и_не_довели(self):
+        """Codex по #120, круг 4: соперник захватил свежую строку и умер до
+        исхода — шаг не вправе выйти нулём (работа закрылась бы над висящей
+        строкой); ошибка держит работу в ретрае до конца аренды."""
+        звали = self.доставка("sent")
+        было = cd._разослать
+
+        def разослать(con, e, ид=None, продолжать=False):
+            другой = mi.connect(self.dir)
+            другой.execute("update outbox set state='sending', attempts=1, "
+                           "last_attempt=? where id=?", (mi.now_iso(), ид))
+            return было(con, e, ид=ид, продолжать=продолжать)
+        cd._разослать = разослать
+        self.addCleanup(setattr, cd, "_разослать", было)
+        with self.assertRaises(RuntimeError):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        self.assertEqual(звали, [], "шаг не слал")
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"]), ("sending", 1))
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("queued", "projected"))
+
     def test_outbox_продолжает_после_сбоя_одной_строки(self):
         """Ревью #120, P3-3: исключение транспорта на одной строке не
         прерывает очередь, строка ждёт с `error`, остальные уходят."""
