@@ -48,7 +48,7 @@ bind. Но из локалки он виден, и это осознанный �
 `call`.
 """
 import os, sys, io, re, json, time, socket, hashlib, secrets, argparse
-import threading, subprocess
+import threading, subprocess, sqlite3
 from datetime import datetime, timedelta
 import tempfile
 import urllib.parse
@@ -835,23 +835,57 @@ class Handler(BaseHTTPRequestHandler):
                 err = call_project.check_correction(data.get("payload") or {})
                 if err:
                     return self.say(400, {"error": err}, поля=data)
-            eid, dup = mi.put_event(con, data)
-            need = need_blob(con, self.server.root, eid,
-                             (data.get("blob") or {}).get("sha256"))
-            applied = None
-            if kind == "correction" and not dup:
-                # синхронно, а не через очередь: Серёга ждёт ответа Мары, а не
-                # ночного крона. Писатель карточек один — call_project.
-                try:
-                    applied = call_project.apply_correction(self.server.vault,
-                                                            dict(data, id=eid), con)
-                except Exception as e:
-                    print("correction %s: %s: %s" % (eid, type(e).__name__, e), flush=True)
-                    applied = {"found": False,
-                               "text": "не применил: %s" % type(e).__name__}
+            # Квитанция идемпотентности (ТЗ §4.4, Т2.9): клиент прислал
+            # `idempotency_key` — повтор с тем же ключом получает тот же
+            # ответ, что и первый, а не новый расчёт. Дедуп события это не
+            # заменяет: он гарантирует, что дубля нет, а не что ответ
+            # стабилен — `need_blob` у повтора после заливки уже `false`.
+            ключ = data.pop("idempotency_key", None)
+            if ключ is None:
+                ключ = self.headers.get("Idempotency-Key")
+            if ключ is not None and not (isinstance(ключ, str) and 0 < len(ключ) <= 128):
+                return self.say(400, {"error": "idempotency_key — строка до 128 знаков"},
+                                поля=data)
+            было = квитанция(con, data["device_id"], ключ) if ключ else None
+            if было is not None:
+                return self.say(200, было, ещё={"Idempotent-Replay": "true"})
+            try:
+                # событие и квитанция — одной транзакцией (§5.2 п.1)
+                with транзакция(con):
+                    eid, dup = mi.put_event(con, data)
+                    need = need_blob(con, self.server.root, eid,
+                                     (data.get("blob") or {}).get("sha256"))
+                    applied = None
+                    if kind == "correction" and not dup:
+                        # синхронно, а не через очередь: Серёга ждёт ответа
+                        # Мары, а не ночного крона. Писатель карточек один —
+                        # call_project.
+                        try:
+                            applied = call_project.apply_correction(
+                                self.server.vault, dict(data, id=eid), con)
+                        except Exception as e:
+                            print("correction %s: %s: %s" % (eid, type(e).__name__, e),
+                                  flush=True)
+                            applied = {"found": False,
+                                       "text": "не применил: %s" % type(e).__name__}
+                    ответ = {"event_id": eid, "duplicate": dup, "need_blob": need,
+                             "applied": applied}
+                    if ключ:
+                        con.execute(
+                            "insert into ingest_attempts(id,source,device_id,"
+                            "idempotency_key,received,outcome,event_id) "
+                            "values(?,?,?,?,?,?,?)",
+                            (mi.uuid7(), data.get("source"), data["device_id"], ключ,
+                             mi.now_iso(), json.dumps(ответ, ensure_ascii=False), eid))
+            except sqlite3.IntegrityError:
+                # два повтора с одним ключом разом: проиграл — отдаём квитанцию
+                # победителя, своё откатилось вместе с транзакцией
+                было = квитанция(con, data["device_id"], ключ) if ключ else None
+                if было is None:
+                    raise
+                return self.say(200, было, ещё={"Idempotent-Replay": "true"})
             print(log_line("POST", p.path, 200, data), flush=True)
-            return self.say(200, {"event_id": eid, "duplicate": dup,
-                                  "need_blob": need, "applied": applied})
+            return self.say(200, ответ)
         if p.path == "/v1/context/query":
             # пакетов по сущностям нет и не заводится, пока now.md влезает в
             # бюджет (docs/superpowers/specs/2026-09-02-context-broker-design.md).
@@ -936,6 +970,13 @@ def длина(handler):
     if not s:
         return 0
     return int(s) if s.isascii() and s.isdigit() and len(s) <= 19 else None
+
+
+def квитанция(con, device_id, ключ):
+    """Сохранённый ответ на приём с этим ключом у этого устройства, или None."""
+    row = con.execute("select outcome from ingest_attempts where device_id=? and "
+                      "idempotency_key=?", (device_id, ключ)).fetchone()
+    return json.loads(row["outcome"]) if row else None
 
 
 def blob_row(con, sha256):

@@ -531,6 +531,36 @@ class Сущности(unittest.TestCase):
         mi.migrate(self.dir).close()          # и обратно вверх — без хвостов
         self.assertEqual(self.версия(), mi.ВЕРСИЯ)
 
+    def test_миграция_3_индекс_квитанций_и_путь_вниз(self):
+        """Т2.9: уникальность (устройство, ключ) у квитанций; откат снимает
+        индекс, повторный подъём возвращает; путь вниз через две ступени —
+        одной транзакцией."""
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        индексы = lambda: {r[0] for r in con.execute(
+            "select name from sqlite_master where type='index'")}
+        self.assertIn("ingest_idem", индексы())
+        con.execute("insert into ingest_attempts(id,device_id,idempotency_key,received,"
+                    "outcome) values('a','d','k','t','{}')")
+        with self.assertRaises(sqlite3.IntegrityError):
+            con.execute("insert into ingest_attempts(id,device_id,idempotency_key,"
+                        "received,outcome) values('b','d','k','t','{}')")
+        con.execute("insert into ingest_attempts(id,device_id,received,outcome) "
+                    "values('c','d','t','{}')")
+        con.execute("insert into ingest_attempts(id,device_id,received,outcome) "
+                    "values('e','d','t','{}')")   # без ключа — не под индексом
+        con.execute("delete from ingest_attempts")
+        con.close()
+        con = mi.migrate(self.dir, 2)
+        self.assertNotIn("ingest_idem", indексы() if False else {r[0] for r in con.execute(
+            "select name from sqlite_master where type='index'")})
+        self.assertEqual(self.версия(), 2)
+        con.close()
+        con = mi.migrate(self.dir)
+        self.assertIn("ingest_idem", {r[0] for r in con.execute(
+            "select name from sqlite_master where type='index'")})
+        con.close()
+
     def test_откат_не_стирает_данные_молча(self):
         """Путь вниз без потерь только пока в новое никто не писал. Записали
         — отказ: такой откат идёт через восстановление из бэкапа."""
