@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 ИЗВЛЕЧЕНИЕ = {
     "requests": [{"action": "прислать смету", "requester": "Анна", "owner": "sergey",
                   "explicit": True, "confidence": 0.93, "deadline_phrase": "до пятницы",
-                  "evidence": [{"start_ms": 0, "end_ms": 25000}]}],
+                  "evidence": [{"segment": "s0001"}]}],
     "commitments": [], "decisions": [], "constraints": [], "open_questions": [],
     "changed_instructions": [], "followups": [],
     "people_mentioned": ["Анна"], "projects_mentioned": [],
@@ -99,8 +99,9 @@ class Сквозной(unittest.TestCase):
         })
         import mara_ingest as mi
         import contextd
+        import call_extract
         mi.ROOT = cls.blobs
-        cls.mi, cls.cd = mi, contextd
+        cls.mi, cls.cd, cls.ce = mi, contextd, call_extract
         cls.tmp = tempfile.mkdtemp(prefix="mara-fixture-")
         cls.audio = os.path.join(cls.tmp, "sample-call.m4a")
         subprocess.run(["bash", os.path.join(ROOT, "tests/fixtures/make_sample_call.sh"),
@@ -178,6 +179,20 @@ class Сквозной(unittest.TestCase):
                   encoding="utf-8") as fh:
             extr = json.load(fh)
         self.assertEqual(extr["requests"][0]["disposition"], "task")
+        # Т5.1 + Т2.4: сегменты легли в реестр, а evidence извлечения указывает
+        # на строку сегмента, а не на пересчитанные миллисекунды
+        con = self.mi.connect(self.blobs)
+        t = con.execute("select id, engine from transcripts where event_id=?",
+                        (self.event_id,)).fetchone()
+        self.assertIsNotNone(t, "расшифровки нет в реестре")
+        self.assertEqual(extr["transcript_id"], t["id"])
+        seg = con.execute("select id, start_ms, end_ms from transcript_segments where "
+                          "transcript_id=? and seq=1", (t["id"],)).fetchone()
+        ev, = extr["requests"][0]["evidence"]
+        self.assertEqual((ev["segment"], ev["segment_id"], ev["start_ms"], ev["end_ms"]),
+                         ("s0001", seg["id"], seg["start_ms"], seg["end_ms"]))
+        self.assertEqual((extr["extractor"], extr["prompt_version"]),
+                         (self.ce.MODEL, self.ce.PROMPT_VERSION))
 
     def test_карточка_разговора_в_волте(self):
         path = os.path.join(self.vault, "kb/conversations/2026-09-02-1405-anna.md")

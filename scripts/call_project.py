@@ -271,6 +271,9 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                  ("origin", "call/" + event["id"]),
                  ("classification", event.get("classification") or "personal"),
                  ("model_scope", "local-only"),
+                 # ADR-0004 п.4: чем и по какой версии извлечено
+                 ("extractor", extraction.get("extractor")),
+                 ("prompt_version", extraction.get("prompt_version")),
                  ("cloud_allowed", "false"),
                  ("confidence", "%.2f" % float(it.get("confidence") or 0)),
                  ("supersedes", yaml_str(it["supersedes"]) if it.get("supersedes") else None),

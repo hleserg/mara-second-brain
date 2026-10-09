@@ -31,7 +31,8 @@ OCC = "2026-09-02T14:05:00+03:00"
 class Живая(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.out = ce.normalize(ce.ask_model(ce.transcript_text(SEGS)), OCC)
+        cls.out = ce.normalize(ce.ask_model(ce.transcript_text(SEGS)), OCC,
+                               ce.сегменты_из(SEGS))
 
     def test_схема_соблюдена(self):
         for key in ce.LISTS + ce.NAMES:
