@@ -162,6 +162,16 @@ class Дрейф(unittest.TestCase):
         self.con.execute("delete from commitments")
         итог, зам = self.дрейф()
         self.assertEqual(итог["проекций без объекта"], 1)
+        # правка рукой поломку не прячет: объект проверяется раньше хеша (Codex)
+        with open(self.card, "a", encoding="utf-8") as fh:
+            fh.write("\nзаметка владельца\n")
+        итог, зам = self.дрейф()
+        self.assertEqual((итог["проекций без объекта"], итог["изменены после переноса"]),
+                         (1, 0))
+        self.assertTrue(vd.расхождение(итог), "без --strict тоже расхождение")
+        f, = [f for f in rc.run(self.con, self.root, vault=self.vault, bm_db=None, targets=[])
+              if f["check"] == "проекция-разошлась"]
+        self.assertEqual(f["count"], 1)
 
     def test_сверка_выносит_находку(self):
         self.assertEqual([f for f in rc.run(self.con, self.root, vault=self.vault, bm_db=None,
