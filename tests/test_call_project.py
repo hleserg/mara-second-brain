@@ -396,6 +396,24 @@ class Идентичность(unittest.TestCase):
                           ревизии[1]["reason"]), ("human", "owner", "correction/correction_2"))
         self.assertEqual(con.execute("select version from commitments").fetchone()[0], 2)
 
+    def test_правка_только_заметкой_доезжает_до_реестра(self):
+        """Codex по #117, P1: заметка без смены шапки давала `changed: {}`,
+        и карточка в реестр не переносилась."""
+        root, vault, con = self.стенд()
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        событие = {"id": "c1", "occurred_at": "2026-09-02T18:00:00+03:00",
+                   "payload": {"item": "забор", "status": "open"}}
+        oid = cp.apply_correction(vault, событие, con)["id"]
+        out = cp.apply_correction(vault, dict(событие, id="c2",
+                                              payload={"item": "забор", "note": "краска куплена"}),
+                                  con)
+        self.assertTrue(out.get("applied"))
+        self.assertEqual(out["id"], oid)
+        з = con.execute("select field, new_json from corrections where object_id=? "
+                        "and field='note'", (oid,)).fetchone()
+        self.assertIsNotNone(з, "заметка не дошла до corrections")
+        self.assertIn("краска куплена", з["new_json"])
+
     def test_заведённая_правкой_на_занятом_пути_получает_различитель_из_id(self):
         root, vault, con = self.стенд()
         os.makedirs(os.path.join(vault, "kb/commitments"))

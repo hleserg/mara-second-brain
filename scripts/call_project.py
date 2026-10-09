@@ -595,6 +595,7 @@ def _поправить(card, status, due, note, когда, event_id):
     text += "- %s, Мара, correction/%s: %s\n" % (когда[:16], event_id, "; ".join(журнал))
     _atomic(card["path"], text)
     out["text"] = "«%s»: %s" % (title, "; ".join(журнал))
+    out["applied"] = True        # записано — и журнал, даже если шапка та же
     return out
 
 
@@ -692,16 +693,24 @@ def apply_correction(vault, event, con=None):
             out = {"found": False, "open": открытые,
                    "text": "не нашёл «%s» среди открытых: %s"
                            % (item, "; ".join(открытые) or "список пуст")}
-    rel = out.get("card") if out.get("changed") else out.get("created")
-    if con is not None and rel:
-        # актор — владелец: правка словами это его решение, Мара лишь записала
-        oid = li.перенести_карточку(con, vault, rel, актор=(
-            "human", "owner", "correction/%s" % event.get("id")))
-        if oid:
-            row = con.execute("select version from commitments where id=?", (oid,)).fetchone()
-            # id и версия в ответе — чтобы следующая правка пришла с ними
-            # (ADR-0003 п.3: сперва id в ответ, потом expected_version обязателен)
-            out["id"], out["version"] = oid, row["version"] if row else None
+        # `applied`, а не `changed`: правка «только заметка» меняет журнал, а
+        # не шапку, и по `changed` реестр её не видел (Codex по #117, P1).
+        # Перенос — под тем же флоком, что и запись: иначе вторая правка
+        # успевала бы изменить файл до того, как первая прочитает его в
+        # реестр, и две правки ложились бы одной ревизией с чужим актором
+        # (Codex по #117, P2).
+        rel = out.get("card") if out.get("applied") else out.get("created")
+        if con is not None and rel:
+            # актор — владелец: правка словами это его решение, Мара лишь записала
+            oid = li.перенести_карточку(con, vault, rel, актор=(
+                "human", "owner", "correction/%s" % event.get("id")))
+            if oid:
+                row = con.execute("select version from commitments where id=?",
+                                  (oid,)).fetchone()
+                # id и версия в ответе — чтобы следующая правка пришла с ними
+                # (ADR-0003 п.3: сперва id в ответ, потом expected_version
+                # обязателен)
+                out["id"], out["version"] = oid, row["version"] if row else None
     if con is not None and "id" not in out and out.get("found") and len(found) == 1:
         # «уже так»: ничего не писали, но адрес и версия у карточки есть
         row = _строка_реестра(con, found[0], адреса)

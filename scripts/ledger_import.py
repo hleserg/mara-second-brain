@@ -716,7 +716,7 @@ def сверка(con, vault):
     доменные команды, и в обоих случаях не перенесённое.
     """
     итог, замечания = Counter(), []
-    видели = {}
+    видели, сошлись = {}, set()
     for rel, fm, _, текст in карточки(vault, "kb/commitments"):
         итог["карточек"] += 1
         if not fm:
@@ -752,6 +752,7 @@ def сверка(con, vault):
             continue
         row = con.execute("select id, status from commitments where id=?",
                           (row["id"],)).fetchone()
+        сошлись.add(row["id"])
         итог["строк"] += 1
         статус = _строка(fm.get("status")) or "proposed"
         if (row["status"] or "proposed") != статус:
@@ -777,10 +778,12 @@ def сверка(con, vault):
         if нет or чужие:
             замечания.append("%s: правок из журнала нет в базе %d, чужих в базе %d"
                              % (rel, len(нет), len(чужие)))
+    # Строки, за которыми в этом прогоне не встало ни одной карточки, — а не
+    # «без проекции»: у удалённой из волта карточки проекция остаётся, и по
+    # ней сверка зеленила объект, который проектор потом воскресил бы (Codex
+    # по #117, P1).
     итог["строк без карточки"] = con.execute(
-        "select count(*) from commitments where id not in "
-        "(select object_id from projections where object_kind='commitment')"
-    ).fetchone()[0]
+        "select count(*) from commitments").fetchone()[0] - len(сошлись)
     return итог, замечания
 
 
