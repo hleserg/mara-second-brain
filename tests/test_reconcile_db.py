@@ -35,9 +35,12 @@ class БазаЦела(unittest.TestCase):
         self.con.close()
         db = os.path.join(self.root, "contextd.db")
         size = os.path.getsize(db)
+        # портим всё, кроме первых двух страниц (заголовок и корень
+        # sqlite_master): одна страница посередине после миграции 3 могла
+        # оказаться свободной, и quick_check её не видел
         with open(db, "r+b") as fh:
-            fh.seek(size // 2)
-            fh.write(b"\xff" * 512)
+            fh.seek(4096 * 2)
+            fh.write(b"\xff" * max(size - 4096 * 2, 512))
         self.con = mi.connect(self.root)
         f = rc.база_цела(self.con, self.root)
         self.assertEqual(self.виды(f), ["база-повреждена"], f)
