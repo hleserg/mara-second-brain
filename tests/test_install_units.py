@@ -7,7 +7,7 @@ $DEST и пишет каждый свой вызов в файл — по нем
 `mara_ingest.connect` до `--migrate`, а миграция — гейт Г4, а не побочный
 эффект установщика.
 """
-import os, stat, shutil, tempfile, subprocess, unittest
+import glob, os, stat, shutil, tempfile, subprocess, unittest
 
 КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 УСТАНОВЩИК = os.path.join(КОРЕНЬ, "install", "install-units.sh")
@@ -80,6 +80,11 @@ class Установщик(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         for u in ЮНИТЫ:
             self.assertTrue(os.path.exists(os.path.join(self.dest, u)), u)
+            # шим `sudo` снимает только `-o`/`-g`, `-m 0644` доезжает до
+            # настоящего `install` — и до этой строки его никто не проверял:
+            # мутация `-m 0600` была зелёной (#97 п.2)
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.dest, u)).st_mode),
+                             0o644, "%s поставлен не с режимом 0644" % u)
         self.assertIn("daemon-reload", self.вызовы())
 
     def test_установка_не_рестартует_сервис(self):
@@ -198,6 +203,36 @@ class Установщик(unittest.TestCase):
         self.assertEqual(os.listdir(self.dest), [], "юнит всё-таки поставлен")
         self.assertEqual(self.вызовы(), [], "systemctl всё-таки позван")
 
+    def test_пропавший_шаблон_даёт_свой_код_а_не_двойку(self):
+        """`sed` на пропавшем файле выходит кодом 2 — тем же, что обещан за
+        неверный режим; `--check` сравнивал бы с пустым выводом и говорил
+        «расходится», уводя диагноз (#97 п.3)."""
+        tpl = os.path.join(self.tmp, "tpl")
+        os.makedirs(tpl)
+        shutil.copy(os.path.join(КОРЕНЬ, "install", ЮНИТЫ[0] + ".in"), tpl)
+        for режим in ("--check", "--apply"):
+            r = self.запуск(режим, TPL_DIR=tpl)
+            self.assertEqual(r.returncode, 5, режим + ": " + r.stdout + r.stderr)
+            self.assertIn("шаблона", r.stderr)
+            self.assertIn(ЮНИТЫ[1] + ".in", r.stderr)
+        self.assertEqual(os.listdir(self.dest), [], "что-то поставлено без шаблона")
+
+    def test_отказ_install_на_втором_юните_называет_себя(self):
+        """Первый уже стоит, второй не встал: без строки об этом скрипт умирал по
+        `set -e` молча, и состояние «один из двух» никто не называл (#97 п.4)."""
+        bin_ = os.path.join(self.tmp, "bin")
+        # настоящий `install`, но на втором юните — отказ
+        self.шим(bin_, "install",
+                 'case "$*" in *%s*) echo "install: отказ" >&2; exit 1;; esac\n'
+                 'exec /usr/bin/install "$@"\n' % ЮНИТЫ[1])
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("поставлено 1 из 2", r.stderr)
+        self.assertIn("daemon-reload не вызван", r.stderr)
+        self.assertNotIn("daemon-reload", self.вызовы())
+        self.assertTrue(os.path.exists(os.path.join(self.dest, ЮНИТЫ[0])))
+        self.assertFalse(os.path.exists(os.path.join(self.dest, ЮНИТЫ[1])))
+
     def test_под_root_с_явными_значениями_работает(self):
         """Отказ — про угаданные значения, а не про root как таковой."""
         bin_ = os.path.join(self.tmp, "bin")
@@ -215,7 +250,12 @@ class Установщик(unittest.TestCase):
         формы: в `User=` шаблона стоит подстановка, а не логин, и в путях нет
         ничего похожего на домашний каталог.
         """
-        for u in ЮНИТЫ:
+        # все шаблоны каталога, не константа: третий `*.service.in` иначе
+        # остался бы без сторожа, и никто бы не узнал (#97 п.1)
+        шаблоны = sorted(os.path.basename(p)[:-3] for p in glob.glob(
+            os.path.join(КОРЕНЬ, "install", "*.service.in")))
+        self.assertEqual(sorted(ЮНИТЫ), шаблоны, "список юнитов разошёлся с install/")
+        for u in шаблоны:
             with open(os.path.join(КОРЕНЬ, "install", u + ".in")) as fh:
                 строки = fh.read().splitlines()
             with self.subTest(юнит=u):

@@ -27,9 +27,15 @@ denylisted из Git, R2 и бэкапов. Восстановление ядра
 зеркала. Без этого мы бы узнали о порче в единственный неподходящий день.
 Каждый новый файл зеркала читается с носителя обратно сразу после записи и на
 каждом носителе: разворачиваем мы один, а пишем на все.
+
+Манифест внутри архива (`manifest.json`) — опись копии: sha256 и размер
+каждого файла, время, хост, класс хранения и версия схемы (ТЗ §5.3). Сверяет
+её с содержимым `сверить_манифест`: зовут и ночное учение, и ручной `--verify
+<архив или каталог копии>` — тот работает без носителей, корня и живой базы,
+то есть и на чистой машине посреди восстановления (§17.3 п.4).
 """
 import os, sys, json, glob, time, shutil, hashlib, sqlite3, tarfile
-import argparse, tempfile, subprocess, io, contextlib
+import argparse, tempfile, subprocess, io, contextlib, socket
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
@@ -48,6 +54,16 @@ import mara_ingest as mi
            "job_attempts", "audit_events", "provider_health", "alerts",
            "compute_nodes")
 ПРОБА = 3                                              # столько блобов сверяем
+# Версия манифеста внутри архива. 1 — то, что писалось с PR #5: `files` с
+# sha256, `counts`, `created`, `root`, `db_bytes`, `excluded`. 2 (Т3б.3) —
+# аддитивно к ней: `bytes` на каждый файл, `host`, `retention`,
+# `schema_version`. Архив версии 1 читается и сверяется тем же кодом: чего в
+# манифесте нет, о том отчёт говорит «нет», а не падает и не молчит.
+МАНИФЕСТ_ВЕРСИЯ = 2
+# Класс хранения по §5.3. Он сегодня один: суточный архив с ротацией по
+# счёту (`--keep`). GFS-поколений нет (Т3б.5), и писать в манифест «weekly»
+# или «monthly» значило бы обещать то, чего ротация не делает.
+КЛАСС_ХРАНЕНИЯ = "daily"
 # Причина живёт одной строкой на два пути: её печатает ночь и её же
 # кладёт в итог ручное учение. Двумя литералами они расходились бы молча,
 # а сверяет их только человек, читающий отчёт.
@@ -158,12 +174,42 @@ def мелочь(root):
     return sorted(out)
 
 
-def архив(root, снимок_db, манифест, dst):
-    """tar.gz: база, манифест и метаданные. Список файлов — allowlist."""
+def собрать_манифест(root, копия, keep, файлы_мелочи=None):
+    """Опись копии по §5.3: что лежит в архиве и чем это проверить.
+
+    `files` — sha256 каждого файла, `bytes` — его размер; оба по одному и тому
+    же списку, так что сверка размеров не держится на отдельном обходе. База
+    хешируется по снимку, а не по боевому файлу: в архив уезжает снимок.
+    `host` — `socket.gethostname()`, без литералов: имя машины владельца в
+    публичный репозиторий попадать не должно. `schema_version` — то же
+    `pragma user_version`, что лежит в `counts`, только под своим именем из
+    ТЗ: восстанавливающий ищет его там, а не внутри счётчиков таблиц.
+    `db_bytes` остаётся ради читателей манифеста версии 1.
+
+    `файлы_мелочи` — тот же список, что уйдёт в `архив`: обход один, иначе
+    файл, положенный воркером между двумя обходами, попадал в тар, но не в
+    опись, и ночное учение падало на «лишнем файле» (ревью PR #117, P2-4)."""
+    сч = счётчики(копия)
+    файлы = {"contextd.db": sha(копия)}
+    размеры = {"contextd.db": os.path.getsize(копия)}
+    for rel, p in (мелочь(root) if файлы_мелочи is None else файлы_мелочи):
+        файлы[rel] = sha(p)
+        размеры[rel] = os.path.getsize(p)
+    return {"manifest_version": МАНИФЕСТ_ВЕРСИЯ, "created": mi.now_iso(),
+            "host": socket.gethostname(), "root": root, "counts": сч,
+            "schema_version": сч["user_version"], "files": файлы,
+            "bytes": размеры, "excluded": list(СЕКРЕТЫ),
+            "db_bytes": размеры["contextd.db"],
+            "retention": {"class": КЛАСС_ХРАНЕНИЯ, "keep": keep}}
+
+
+def архив(root, снимок_db, манифест, dst, файлы_мелочи=None):
+    """tar.gz: база, манифест и метаданные. Список файлов — allowlist, и
+    ровно тот, по которому собран манифест (см. `собрать_манифест`)."""
     with tarfile.open(dst, "w:gz") as tf:
         tf.add(снимок_db, arcname="contextd.db")
         tf.add(манифест, arcname="manifest.json")
-        for rel, p in мелочь(root):
+        for rel, p in (мелочь(root) if файлы_мелочи is None else файлы_мелочи):
             tf.add(p, arcname=rel)
 
 
@@ -297,17 +343,16 @@ def проверка(target, пароль, root, имя=None, без_зерка�
         raise RuntimeError("проверка: в %s нет архивов ядра" % target)
     tmp = tempfile.mkdtemp(prefix="mara-core-restore.")
     try:
-        дешифр(src, os.path.join(tmp, "core.tar.gz"), пароль)
-        with tarfile.open(os.path.join(tmp, "core.tar.gz")) as tf:
-            члены = tf.getnames()
-            # filter="data": свой же архив, но распаковка тара — это место, где
-            # чужое имя вида ../../ уводит запись мимо каталога
-            tf.extractall(tmp, filter="data")
+        # Распаковываем в подкаталог, а не рядом с `core.tar.gz`: сверка с
+        # манифестом ищет в копии лишние файлы, и расшифрованный тар сам
+        # оказался бы первым из них.
+        копия = os.path.join(tmp, "копия")
+        члены = развернуть(src, копия, пароль)
         for d in СЕКРЕТЫ:
             утечка = [m for m in члены if m == d or m.startswith(d + "/")]
             if утечка:
                 raise RuntimeError("проверка: в архиве секреты %s" % утечка[:3])
-        db = os.path.join(tmp, "contextd.db")
+        db = os.path.join(копия, "contextd.db")
         if not os.path.exists(db):
             # именно до connect: после него файл уже создан, и проверять нечего
             raise RuntimeError("проверка: в архиве нет contextd.db")
@@ -325,21 +370,201 @@ def проверка(target, пароль, root, имя=None, без_зерка�
             con.close()
         if ц != "ok":
             raise RuntimeError("проверка: база битая — %s" % ц)
-        м = json.load(open(os.path.join(tmp, "manifest.json"), encoding="utf-8"))
+        м = json.load(open(os.path.join(копия, "manifest.json"),
+                           encoding="utf-8"))
         было = счётчики(db)
         if было != м["counts"]:
             raise RuntimeError("проверка: счётчики разошлись %s != %s"
                                % (было, м["counts"]))
-        for rel, ожидаемый in list(м["files"].items()):
-            факт = os.path.join(tmp, rel)
-            if not os.path.exists(факт) or sha(факт) != ожидаемый:
-                raise RuntimeError("проверка: %s не совпал с манифестом" % rel)
+        # Та же сверка, что у `--verify`: хеш и размер каждого файла из
+        # описи, ни одного лишнего и ни одного пропавшего. Ночью она роняет
+        # учение, а не возвращает отчёт: архив, не сошедшийся со своей же
+        # описью, разворачивать некуда.
+        опись = сверить_манифест(копия, м)
+        if опись["итог"] != "ок":
+            raise RuntimeError("проверка: %s" % "; ".join(
+                опись["расхождения"] or ["в манифесте нет хешей"]))
         аудио = ({"аудио_не_сверялось": без_зеркала} if без_зеркала else
                  {"аудио_сверено": проверить_аудио(db, root, target, пароль)})
         return {"архив": os.path.basename(src), "носитель": target,
-                "файлов": len(м["files"]), "счётчики": было, **аудио}
+                "файлов": опись["файлов"], "счётчики": было,
+                "манифест": {k: опись[k] for k in
+                             ("версия", "host", "retention", "schema_version",
+                              "сверено_размеров")},
+                **аудио}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def развернуть(src, куда, пароль):
+    """Расшифровать (если зашифрован) и распаковать архив в `куда`.
+
+    Возвращает имена членов тара — по ним `проверка` ищет секреты до того,
+    как заглянет в содержимое. Голый `.tar.gz` тоже принимается: шаг 2
+    рунбука оставляет такой в `/var/tmp`, и сверять его удобнее, чем
+    расшифровывать второй раз."""
+    os.makedirs(куда, mode=0o700)
+    if src.endswith(".gpg"):
+        tar = os.path.join(os.path.dirname(куда), "core.tar.gz")
+        дешифр(src, tar, пароль)
+    else:
+        tar = src
+    with tarfile.open(tar) as tf:
+        члены = tf.getnames()
+        # filter="data": свой же архив, но распаковка тара — это место, где
+        # чужое имя вида ../../ уводит запись мимо каталога
+        tf.extractall(куда, filter="data")
+    return члены
+
+
+def сверить_манифест(каталог, м):
+    """Сверить развёрнутую копию с её описью. Отчёт, а не исключение.
+
+    Четыре вопроса к каждой паре «опись — каталог»: у каждого названного
+    файла тот ли sha256, тот ли размер, нет ли в каталоге файлов, которых в
+    описи нет, и нет ли в описи файлов, которых нет в каталоге. Сам
+    `manifest.json` в описи не числится — он и есть опись.
+
+    Отчёт различает «сошлось», «разошлось» и «проверить нечем» — три итога,
+    а не два. Манифест без `files` (хешей нет) не падает и не зеленеет:
+    `итог` — «хешей нет», и вызывающий решает сам, чем это считать. Манифест
+    версии 1 без `bytes` сверяется по хешам, а про размеры честно говорит
+    «нет в манифесте»: хеш сильнее размера, и терять его из-за отсутствия
+    слабого сторожа незачем.
+
+    `host` не сравнивается ни с чем: восстановление по определению идёт на
+    другой машине. `schema_version` сравнивается с `pragma user_version`
+    базы в копии — это единственное, что отличает копию, снятую до миграции,
+    от копии после неё, когда счётчиков под рукой нет."""
+    файлы = м.get("files")
+    размеры = м.get("bytes")
+    if размеры is None and "db_bytes" in м and isinstance(файлы, dict):
+        # Версия 1 знала размер одной только базы — им и пользуемся.
+        размеры = {"contextd.db": м["db_bytes"]}
+    в_копии = []
+    for корень, _, имена in os.walk(каталог):
+        for f in имена:
+            rel = os.path.relpath(os.path.join(корень, f), каталог)
+            if rel != "manifest.json":
+                в_копии.append(rel)
+    в_копии.sort()
+    отчёт = {"версия": м.get("manifest_version", 1),
+             "created": м.get("created"), "host": м.get("host"),
+             "retention": м.get("retention"),
+             "schema_version": м.get("schema_version"),
+             "файлов": len(файлы) if isinstance(файлы, dict) else 0,
+             "в_копии": len(в_копии), "сверено_хешей": 0,
+             "сверено_размеров": 0,
+             "размеров": "есть" if размеры else "нет в манифесте",
+             "расхождения": []}
+    if not isinstance(файлы, dict):
+        отчёт["итог"] = "хешей нет"
+        return отчёт
+    for rel in sorted(файлы):
+        факт = os.path.join(каталог, rel)
+        if not os.path.isfile(факт):
+            отчёт["расхождения"].append("нет файла: %s" % rel)
+            continue
+        беды = []
+        if размеры and rel in размеры:
+            размер = os.path.getsize(факт)
+            if размер != размеры[rel]:
+                беды.append("размер %d вместо %d" % (размер, размеры[rel]))
+            else:
+                отчёт["сверено_размеров"] += 1
+        if sha(факт) != файлы[rel]:
+            беды.append("sha256")
+        else:
+            отчёт["сверено_хешей"] += 1
+        if беды:
+            # Слова «не совпал с манифестом» держат самопроверку: по ним она
+            # опознаёт сторож хеша среди соседних.
+            отчёт["расхождения"].append("%s не совпал с манифестом (%s)"
+                                       % (rel, ", ".join(беды)))
+    for rel in в_копии:
+        if rel not in файлы:
+            отчёт["расхождения"].append("лишний файл: %s" % rel)
+    db = os.path.join(каталог, "contextd.db")
+    if м.get("schema_version") is not None and os.path.isfile(db):
+        try:
+            con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+            try:
+                в_базе = con.execute("pragma user_version").fetchone()[0]
+            finally:
+                con.close()
+        except sqlite3.DatabaseError as e:
+            в_базе = "не читается (%s)" % e
+        if в_базе != м["schema_version"]:
+            отчёт["расхождения"].append("schema_version %s, в базе %s"
+                                       % (м["schema_version"], в_базе))
+    отчёт["итог"] = "расхождения" if отчёт["расхождения"] else "ок"
+    return отчёт
+
+
+def проверить_манифест(путь, пароль):
+    """`--verify`: сверить копию с её манифестом, где бы копия ни лежала.
+
+    Отдельная команда, а не ветка `--drill-only`, по трём причинам. Учение
+    требует смонтированный носитель, корень с живым аудио и базу: оно
+    отвечает на вопрос «развернётся ли то, что лежит на носителе». Сверка
+    манифеста отвечает на другой — «то ли это, что записали» — и нужна там,
+    где у учения нет ни одного из его условий: на чистой машине посреди
+    восстановления (шаг 2 рунбука), на архиве, унесённом на ноутбук, на
+    каталоге, который уже распаковали. Третья причина — сторожа внутри
+    учения роняют его первым же расхождением; здесь нужен полный список,
+    чтобы было с чего начинать разбирательство. Ночь при этом ту же сверку
+    делает сама — внутри `проверка`.
+
+    `путь` — зашифрованный архив `core-*.tar.gz.gpg`, расшифрованный
+    `core.tar.gz`, каталог носителя (берётся свежайший архив) или каталог
+    уже развёрнутой копии с `manifest.json`. Рядом с архивом на носителе
+    лежит сайдкар `core-*.manifest.json`; если он есть, шифротекст сверяется
+    и с ним — это единственное, что про архив можно проверить, не открывая
+    его, и расхождение здесь значит, что архив подменили или дописали."""
+    отчёт = {"источник": путь}
+    if os.path.isdir(путь) and os.path.isfile(os.path.join(путь, "manifest.json")):
+        with open(os.path.join(путь, "manifest.json"), encoding="utf-8") as fh:
+            м = json.load(fh)
+        отчёт.update(сверить_манифест(путь, м))
+        return отчёт
+    if os.path.isdir(путь):
+        архивы = sorted(glob.glob(os.path.join(путь, "core-*.tar.gz.gpg")))
+        if not архивы:
+            raise RuntimeError("verify: в %s нет ни manifest.json, ни архивов "
+                               "ядра" % путь)
+        путь = архивы[-1]
+    if not os.path.isfile(путь):
+        raise RuntimeError("verify: %s не архив и не каталог копии" % путь)
+    отчёт["архив"] = os.path.basename(путь)
+    сайдкар = путь.replace(".tar.gz.gpg", ".manifest.json")
+    if путь.endswith(".tar.gz.gpg") and os.path.isfile(сайдкар):
+        with open(сайдкар, encoding="utf-8") as fh:
+            с = json.load(fh)
+        беды = []
+        if с.get("sha256") != sha(путь):
+            беды.append("sha256")
+        if с.get("байт") != os.path.getsize(путь):
+            беды.append("размер")
+        отчёт["сайдкар"] = ("сошёлся" if not беды
+                            else "не сошёлся: " + ", ".join(беды))
+    else:
+        отчёт["сайдкар"] = "нет"
+    tmp = tempfile.mkdtemp(prefix="mara-core-verify.")
+    try:
+        копия = os.path.join(tmp, "копия")
+        развернуть(путь, копия, пароль)
+        if not os.path.isfile(os.path.join(копия, "manifest.json")):
+            raise RuntimeError("verify: в архиве нет manifest.json")
+        with open(os.path.join(копия, "manifest.json"), encoding="utf-8") as fh:
+            м = json.load(fh)
+        отчёт.update(сверить_манифест(копия, м))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if отчёт["сайдкар"].startswith("не сошёлся"):
+        отчёт["расхождения"].insert(0, "сайдкар " + отчёт["сайдкар"])
+        if отчёт["итог"] == "ок":
+            отчёт["итог"] = "расхождения"
+    return отчёт
 
 
 def проверить_аудио(db, root, target, пароль):
@@ -433,17 +658,14 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
     try:
         копия = os.path.join(stage, "contextd.db")
         снимок(db, копия)
-        сч = счётчики(копия)
-        файлы = {"contextd.db": sha(копия)}
-        for rel, p in мелочь(root):
-            файлы[rel] = sha(p)
-        м = {"created": mi.now_iso(), "root": root, "counts": сч, "files": файлы,
-             "excluded": list(СЕКРЕТЫ), "db_bytes": os.path.getsize(копия)}
+        список = мелочь(root)             # один обход на опись и на тар
+        м = собрать_манифест(root, копия, keep, список)
+        сч = м["counts"]
         путь_м = os.path.join(stage, "manifest.json")
         with open(путь_м, "w", encoding="utf-8") as fh:
             json.dump(м, fh, ensure_ascii=False, indent=1, sort_keys=True)
         tar = os.path.join(stage, "core.tar.gz")
-        архив(root, копия, путь_м, tar)
+        архив(root, копия, путь_м, tar, список)
         enc = os.path.join(stage, имя)
         шифр(tar, enc, пароль)
         сводка = {"архив": имя, "байт": os.path.getsize(enc),
@@ -1624,10 +1846,32 @@ def main():
                     help="без проверки восстановления (не рекомендуется)")
     ap.add_argument("--drill-only", action="store_true",
                     help="только развернуть свежий архив с первого носителя")
+    ap.add_argument("--verify", metavar="ПУТЬ",
+                    help="сверить копию с её манифестом: архив, каталог "
+                         "носителя или развёрнутая копия; код 1 — разошлось, "
+                         "2 — хешей нет, 3 — не смог открыть")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
         return самопроверка()
+    if a.verify:
+        # Носители и корень тут ни при чём: сверяется то, на что указали, и
+        # команда обязана работать на машине, где ни того ни другого ещё нет.
+        try:
+            r = проверить_манифест(a.verify, a.pass_file)
+        except (RuntimeError, OSError, subprocess.CalledProcessError,
+                tarfile.TarError, ValueError) as e:
+            # «не смог открыть» — не «разошлось»: трейсбек и единица
+            # сливали бы их в одно (ревью PR #117, P3-3)
+            print("core-backup --verify: не смог открыть %s: %s: %s"
+                  % (a.verify, type(e).__name__, e), file=sys.stderr)
+            raise SystemExit(3)
+        print(json.dumps(r, ensure_ascii=False, indent=1, sort_keys=True))
+        # Ноль только за «сошлось». Копия, которую проверить нечем, — не
+        # проверенная копия, и зелёный код про неё был бы тем же молчанием,
+        # против которого весь этот файл; свой код у неё затем, чтобы
+        # «разошлось» и «нечем» не слились в одно.
+        raise SystemExit({"ок": 0, "расхождения": 1}.get(r["итог"], 2))
     try:
         targets = mi.носители(a.targets)
     except ValueError as e:

@@ -9,7 +9,7 @@
 второй запуск (ТЗ §4.3: id не меняется никогда), иначе первый же откат
 разъедется с волтом.
 """
-import os, sys, io, hashlib, contextlib, sqlite3, tempfile, unittest
+import os, sys, io, json, hashlib, contextlib, sqlite3, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -259,7 +259,7 @@ class Перенос(unittest.TestCase):
     def test_пустой_волт_не_падает(self):
         self.assertEqual(self.перенести(),
                          {"обязательств": 0, "разговоров": 0, "обновлено": 0,
-                          "спорных": 0})
+                          "спорных": 0, "правок": 0})
 
 
     def test_обязательство_из_поправки_помнит_событие(self):
@@ -580,6 +580,15 @@ class Запуск(unittest.TestCase):
                                       "where name='digests'").fetchone(),
                           "проба прогнала схему")
 
+    def test_проба_поверх_базы_до_миграции_2_не_падает_на_истории(self):
+        # на doctor база останется версии 1 до Т2.8, а пробу гоняют и до него
+        mi.migrate(self.root, 1).close()
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        код, вывод = self.запустить("--dry-run")
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("нет таблицы corrections", вывод)
+        self.assertEqual(mi._версия(mi._открыть(self.root)), 1, "проба мигрировала")
+
     def test_спорная_карточка_даёт_единицу(self):
         карточка(self.vault, "kb/commitments/2026-09-03-a.md")
         карточка(self.vault, "kb/commitments/2026-09-03-b.md")
@@ -656,6 +665,453 @@ class История(unittest.TestCase):
         self.assertEqual(итог["разошлось"], 1)          # d: журнал говорит open
         self.assertEqual(итог["без правок"], 1)         # e
         self.assertTrue(any("d.md" in z and "разошлось" in z for z in замечания))
+
+
+class Запись(unittest.TestCase):
+    """Т2.0, шаг 3а: журнал «Правки:» ложится в `corrections`, статус без
+    объяснения получает отметку, сверка говорит, сошлось ли."""
+
+    ПУТЬ = ("- 2026-09-21T15:08, Мара, correction/correction_1: статус proposed → open; "
+            "срок не был → 2026-10-01; позвонить сначала")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.vault = os.path.join(self.tmp.name, "vault")
+        self.con = mi.connect(self.root)
+
+    def правки(self, **где):
+        q = "select * from corrections"
+        if где:
+            q += " where " + " and ".join("%s=?" % k for k in где)
+        return [dict(r) for r in self.con.execute(q, list(где.values()))]
+
+    def test_строка_журнала_раскладывается_по_полям(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open",
+                            due="2026-10-01"), self.ПУТЬ)
+        итог = li.run(self.con, self.vault)
+        self.assertEqual(итог["правок"], 2, "статус и срок — две строки")
+        oid = self.con.execute("select id from commitments").fetchone()[0]
+        статус, = self.правки(field="status")
+        self.assertEqual((статус["object_kind"], статус["object_id"]), ("commitment", oid))
+        self.assertEqual((json.loads(статус["old_json"]), json.loads(статус["new_json"])),
+                         ("proposed", "open"))
+        self.assertEqual(статус["origin_event"], "correction_1")
+        self.assertEqual((статус["actor_type"], статус["actor_id"]), ("human", "Мара"))
+        self.assertIn("позвонить сначала", статус["reason"], "заметка — это «почему»")
+        self.assertEqual(статус["occurred"], "2026-09-21T15:08:00+03:00",
+                         "сдвиг возвращён (§5.1)")
+        срок, = self.правки(field="due")
+        self.assertIsNone(срок["old_json"], "«не был» — это пустота, а не строка")
+        self.assertEqual(json.loads(срок["new_json"]), "2026-10-01")
+
+    def test_повтор_переноса_не_удваивает_историю(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        li.run(self.con, self.vault)
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 0)
+        self.assertEqual(len(self.правки()), 2)
+
+    def test_заметка_рукой_без_события(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md"),
+                   "- 2026-09-21T18:30, Мара: почистить всё")
+        li.run(self.con, self.vault)
+        з, = self.правки()
+        self.assertEqual((з["field"], json.loads(з["new_json"])), ("note", "почистить всё"))
+        self.assertIsNone(з["origin_event"])
+        self.assertIn("рукой", з["reason"])
+
+    def test_статус_без_следа_получает_отметку_переноса(self):
+        карточка(self.vault, "kb/commitments/a.md", status="cancelled",
+                 valid_from="2026-09-28T12:00:00+03:00")
+        li.run(self.con, self.vault)
+        о, = self.правки()
+        self.assertEqual((о["field"], о["old_json"], json.loads(о["new_json"])),
+                         ("status", None, "cancelled"))
+        self.assertEqual((о["actor_type"], о["actor_id"]), ("import", li.ПЕРЕНОС))
+        self.assertIn("без строки в журнале", о["reason"])
+        # `valid_from` карточки ставит только `_поправить`; у статуса без
+        # журнала настоящего времени нет, и дата создания карточки им не
+        # является (ревью P2-3) — честнее момент переноса с оговоркой
+        self.assertIn("момент переноса", о["reason"])
+        self.assertEqual(о["occurred"][:10], mi.now_iso()[:10])
+        self.assertNotEqual(о["occurred"], "2026-09-28T12:00:00+03:00")
+
+    def test_статус_сменили_рукой_повторно_и_отметка_новая_а_сверка_сходится(self):
+        """Ревью P2-1: ключ отметки без статуса оставлял в базе прежнюю
+        отметку, а сверка по множеству id зеленила историю, которой нет."""
+        p = карточка(self.vault, "kb/commitments/a.md", status="cancelled")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: cancelled", "status: done"))
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 1, "новая отметка")
+        отметки = sorted(json.loads(о["new_json"]) for о in self.правки(actor_type="import"))
+        self.assertEqual(отметки, ["cancelled", "done"], "обе отметки — история")
+        self.assertEqual(self.con.execute("select status from commitments").fetchone()[0],
+                         "done")
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertTrue(li.сошлось(счёт), (dict(счёт), замечания))
+        self.assertEqual(счёт["правок чужих"], 0, "своя прежняя отметка — не чужая")
+
+    def test_повтор_не_сбрасывает_колонки_проектора_в_projections(self):
+        """Ревью P2-2: `insert or replace` заводил строку проекции заново и
+        обнулял `ledger_version`/`projector_version`/`manifest_hash`."""
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        self.con.execute("update projections set ledger_version=3, projector_version=1, "
+                         "manifest_hash='h'")
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: proposed", "status: open"))
+        li.run(self.con, self.vault)
+        r = self.con.execute("select ledger_version, projector_version, manifest_hash, "
+                             "content_sha256 from projections").fetchone()
+        self.assertEqual(tuple(r)[:3], (3, 1, "h"))
+        self.assertEqual(r["content_sha256"],
+                         hashlib.sha256(текст.replace("status: proposed", "status: open")
+                                        .encode("utf-8")).hexdigest(),
+                         "а отпечаток — свежий")
+
+    def test_сверка_называет_спорную_карточку_а_не_чужое_расхождение(self):
+        """Ревью P3-1: дубль source_id сравнивался с объектом первой карточки
+        и выглядел как расхождение переноса."""
+        карточка(self.vault, "kb/commitments/a.md", status="open")
+        карточка(self.vault, "kb/commitments/a2.md", status="done")
+        li.run(self.con, self.vault)
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertEqual((счёт["спорных"], счёт["статус разошёлся"], счёт["правок чужих"]),
+                         (1, 0, 0), (dict(счёт), замечания))
+        self.assertFalse(li.сошлось(счёт))
+        self.assertTrue(any("a2.md: спорная" in z for z in замечания), замечания)
+
+    def test_разошлось_шапка_с_журналом_помечено(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="done"),
+                   self.ПУТЬ)
+        li.run(self.con, self.vault)
+        отметки = self.правки(actor_type="import")
+        self.assertEqual(len(отметки), 1)
+        self.assertIn("журнал говорит open", отметки[0]["reason"])
+        self.assertEqual(json.loads(отметки[0]["new_json"]), "done",
+                         "в базе статус шапки — она сегодня авторитет")
+
+    def test_proposed_и_заведённая_правкой_отметки_не_получают(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        карточка(self.vault, "kb/commitments/b.md", status="open", source_id="b",
+                 origin="correction/c9")
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 0)
+
+    def test_проба_истории_не_пишет(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        self.assertEqual(li.run(self.con, self.vault, dry_run=True)["правок"], 0)
+        self.assertEqual(self.правки(), [])
+
+    def test_сверка_сходится_после_переноса(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        карточка(self.vault, "kb/commitments/b.md", status="cancelled", source_id="b")
+        li.run(self.con, self.vault)
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertTrue(li.сошлось(счёт), (dict(счёт), замечания))
+        self.assertEqual((счёт["карточек"], счёт["строк"], счёт["правок ожидается"]),
+                         (2, 2, 3))
+        self.assertEqual(замечания, [])
+
+    def test_сверка_видит_карточку_без_строки_и_чужую_правку(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        li.run(self.con, self.vault)
+        # карточка появилась после переноса
+        карточка(self.vault, "kb/commitments/b.md", status="open", source_id="b")
+        # строка, которой перенос не писал: правка журнала руками задним числом
+        oid = self.con.execute("select id from commitments").fetchone()[0]
+        self.con.execute("insert into corrections(id,object_kind,object_id,field,"
+                         "new_json,occurred) values('x','commitment',?,'note','\"\"',"
+                         "'2026-10-01T00:00:00+03:00')", (oid,))
+        счёт, замечания = li.сверка(self.con, self.vault)
+        self.assertFalse(li.сошлось(счёт))
+        self.assertEqual((счёт["без строки"], счёт["правок чужих"]), (1, 1))
+        self.assertEqual(len(замечания), 2, замечания)
+
+    def test_сверка_видит_статус_и_строку_без_карточки(self):
+        p = карточка(self.vault, "kb/commitments/a.md", status="open")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: open", "status: done"))
+        self.con.execute("insert into commitments(id, source_native_id, status) "
+                         "values('сирота', 'vault:нет', 'open')")
+        счёт, _ = li.сверка(self.con, self.vault)
+        self.assertEqual((счёт["статус разошёлся"], счёт["строк без карточки"]), (1, 1))
+
+    def test_правка_строки_журнала_руками_оставляет_старую_строку_чужой(self):
+        p = карточка(self.vault, "kb/commitments/a.md", status="open")
+        с_журналом(p, self.ПУТЬ)
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("позвонить сначала", "позвонить потом"))
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 2,
+                         "изменённая строка — новые id")
+        счёт, _ = li.сверка(self.con, self.vault)
+        self.assertEqual((счёт["правок нет в базе"], счёт["правок чужих"]), (0, 2))
+
+    def test_main_после_переноса_печатает_сверку_и_падает_на_расхождении(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="open"),
+                   self.ПУТЬ)
+        код, вывод = Запуск.запустить(self)
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("правок 2", вывод)
+        self.assertIn("сверка Т2.0: карточек 1, строк 1", вывод)
+        self.con.execute("delete from corrections")
+        код, вывод = Запуск.запустить(self)
+        self.assertEqual(код, 0, "повтор дописывает недостающее и сходится")
+        self.assertIn("правок 2", вывод)
+
+
+class Идентичность(unittest.TestCase):
+    """Т2.2: id по старшинству — реестр, шапка, новый; `--write-ids`
+    вписывает его в карточки, у которых нет."""
+
+    ID = "01999999-0000-7000-8000-000000000001"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.vault = os.path.join(self.tmp.name, "vault")
+        os.makedirs(os.path.join(self.vault, ".git"))
+        self.con = mi.connect(self.root)
+
+    def test_id_из_шапки_попадает_в_реестр(self):
+        карточка(self.vault, "kb/commitments/a.md", id=self.ID)
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select id from commitments").fetchone()[0],
+                         self.ID)
+
+    def test_реестр_старше_шапки(self):
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        было = self.con.execute("select id from commitments").fetchone()[0]
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read().replace("title:", "id: %s\ntitle:" % self.ID, 1)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст)
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select id from commitments").fetchone()[0], было)
+        self.assertIn("верю реестру", поток.getvalue())
+
+    def test_write_ids_вписывает_и_обновляет_отпечаток(self):
+        p = карточка(self.vault, "kb/commitments/a.md")
+        карточка(self.vault, "kb/conversations/c.md", type="conversation",
+                 source_id="call/call_1", status=None, owner=None, due=None,
+                 promised_to=None, origin=None)
+        li.run(self.con, self.vault)
+        self.assertEqual(li.вписать_id(self.con, self.vault, dry_run=True), (2, 0))
+        with open(p, encoding="utf-8") as fh:
+            self.assertNotIn("\nid: ", fh.read(), "проба записала")
+        self.assertEqual(li.вписать_id(self.con, self.vault), (2, 0))
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        oid = self.con.execute("select id from commitments").fetchone()[0]
+        self.assertRegex(текст, r"^---\ntitle: [^\n]+\nid: %s\n" % oid)
+        self.assertEqual(self.con.execute(
+            "select content_sha256 from projections where path='kb/commitments/a.md'"
+        ).fetchone()[0], hashlib.sha256(текст.encode("utf-8")).hexdigest(),
+            "отпечаток проекции не обновлён — сверка сочтёт правку чужой")
+        self.assertEqual(li.вписать_id(self.con, self.vault), (0, 0))
+        # и перенос после этого верит шапке: id тот же
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select id from commitments").fetchone()[0], oid)
+
+    def test_id_из_шапки_занятый_другим_ключом_это_спор_а_не_падение(self):
+        """Ревью P2-5: копия карточки без `source_id` несла id первой, вставка
+        падала `UNIQUE constraint failed` и уносила всё после по алфавиту."""
+        карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        li.вписать_id(self.con, self.vault)
+        with open(os.path.join(self.vault, "kb/commitments/a.md"), encoding="utf-8") as fh:
+            копия = fh.read().replace("source_id: commitment/call_1/requests/1\n", "")
+        with open(os.path.join(self.vault, "kb/commitments/b-copy.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(копия)
+        карточка(self.vault, "kb/commitments/z.md", source_id="z")
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            итог = li.run(self.con, self.vault)
+        self.assertEqual((итог["спорных"], итог["обязательств"]), (1, 1), итог)
+        self.assertIn("не сливаем", поток.getvalue())
+        self.assertEqual(self.con.execute("select count(*) from commitments").fetchone()[0],
+                         2, "z.md после копии по алфавиту перенесена")
+        счёт, _ = li.сверка(self.con, self.vault)
+        self.assertEqual(счёт["спорных"], 1)
+
+    def test_write_ids_обходит_спорную_карточку(self):
+        """Ревью P3-11: карточка на пути удалённой соседки (её проекция
+        осталась) — спор для переноса; `--write-ids` падал на ключе
+        `projections.path` посреди прогона."""
+        карточка(self.vault, "kb/commitments/a.md", source_id="a")
+        карточка(self.vault, "kb/commitments/b.md", source_id="b")
+        карточка(self.vault, "kb/commitments/c.md", source_id="c")
+        li.run(self.con, self.vault)
+        os.remove(os.path.join(self.vault, "kb/commitments/b.md"))
+        os.rename(os.path.join(self.vault, "kb/commitments/a.md"),
+                  os.path.join(self.vault, "kb/commitments/b.md"))
+        self.assertEqual(li.вписать_id(self.con, self.vault), (1, 1), "c вписана, b пропущена")
+        with open(os.path.join(self.vault, "kb/commitments/b.md"), encoding="utf-8") as fh:
+            self.assertNotIn("\nid: ", fh.read())
+
+    def test_write_ids_без_строки_в_реестре_не_выдумывает(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        self.assertEqual(li.вписать_id(self.con, self.vault), (0, 1))
+
+    def test_перенести_карточку_чужой_каталог_и_своя(self):
+        self.assertIsNone(li.перенести_карточку(self.con, self.vault, "entities/people/x.md"))
+        карточка(self.vault, "kb/commitments/a.md", id=self.ID)
+        self.assertEqual(li.перенести_карточку(self.con, self.vault, "kb/commitments/a.md"),
+                         self.ID)
+        self.assertEqual(self.con.execute("select count(*) from projections").fetchone()[0], 1)
+
+    def test_main_write_ids(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        self.con.close()
+        self.root = os.path.join(self.tmp.name, "нет-базы")
+        код, вывод = Запуск.запустить(self, "--write-ids")
+        self.assertEqual(код, 2, "без базы вписывать нечего: " + вывод)
+        self.assertFalse(os.path.exists(self.root), "--write-ids завёл базу")
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.assertEqual(Запуск.запустить(self)[0], 0)
+        код, вывод = Запуск.запустить(self, "--write-ids", "--dry-run")
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("(проба): вписано 1", вывод)
+        код, вывод = Запуск.запустить(self, "--write-ids")
+        self.assertEqual(код, 0, вывод)
+        self.assertIn("вписано 1", вывод)
+        self.assertIn("вписано 0", Запуск.запустить(self, "--write-ids")[1])
+
+
+class Версия(unittest.TestCase):
+    """ADR-0003 п.1–2: `version` растёт на принятое изменение, `revisions`
+    хранит только изменившиеся поля; перерисовка без изменений версию не
+    трогает и ревизии не плодит."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "blobs")
+        self.vault = os.path.join(self.tmp.name, "vault")
+        self.con = mi.connect(self.root)
+
+    def ревизии(self):
+        return [dict(r) for r in self.con.execute(
+            "select * from revisions order by version")]
+
+    def test_новый_объект_версия_1_и_ревизия_1(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        r = self.con.execute("select version from commitments").fetchone()
+        self.assertEqual(r["version"], 1)
+        рев, = self.ревизии()
+        self.assertEqual((рев["version"], рев["actor_type"], рев["actor_id"]),
+                         (1, "import", li.ПЕРЕНОС))
+        self.assertEqual(json.loads(рев["changed_json"])["status"], [None, "proposed"])
+
+    def test_повтор_без_изменений_версию_не_трогает(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
+        self.assertEqual(len(self.ревизии()), 1)
+
+    def test_изменение_поля_поднимает_версию_и_пишет_дифф(self):
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: proposed", "status: done"))
+        li.run(self.con, self.vault)
+        r = self.con.execute("select version, status, updated from commitments").fetchone()
+        self.assertEqual((r["version"], r["status"]), (2, "done"))
+        self.assertIsNotNone(r["updated"])
+        рев = self.ревизии()[-1]
+        self.assertEqual(рев["version"], 2)
+        self.assertEqual(json.loads(рев["changed_json"]), {"status": ["proposed", "done"]},
+                         "только изменившееся поле, до и после")
+
+    def test_перерисовка_не_откатывает_версию_на_единицу(self):
+        """`insert or replace` делал ровно это — заводил строку заново с
+        `version` по умолчанию."""
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        self.con.execute("update commitments set version=7")
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("due: 2026-09-04", "due: 2026-09-05"))
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 8)
+
+    def test_сбой_посреди_карточки_не_оставляет_версию_без_ревизии(self):
+        """Ревью P3-8: объект, ревизия, проекция и история — одна транзакция."""
+        import unittest.mock
+        p = карточка(self.vault, "kb/commitments/a.md")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: proposed", "status: open"))
+        with unittest.mock.patch.object(li, "правки_в_базу", side_effect=RuntimeError("бум")):
+            with self.assertRaises(RuntimeError):
+                li.run(self.con, self.vault)
+        r = self.con.execute("select version, status from commitments").fetchone()
+        self.assertEqual((r["version"], r["status"]), (1, "proposed"), "откатилось целиком")
+        self.assertEqual(len(self.ревизии()), 1)
+        self.assertFalse(self.con.in_transaction)
+
+    def test_перерисованный_created_не_ревизия(self):
+        """Проектор ставит `created: now_iso()` при каждой перерисовке; это не
+        изменение объекта, и версия от него расти не должна."""
+        p = карточка(self.vault, "kb/commitments/a.md", created="2026-09-03T01:00:00+03:00")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("2026-09-03T01:00:00+03:00", "2026-10-05T09:00:00+03:00"))
+        li.run(self.con, self.vault)
+        r = self.con.execute("select version, created from commitments").fetchone()
+        self.assertEqual((r["version"], r["created"]), (1, "2026-09-03T01:00:00+03:00"))
+        self.assertEqual(len(self.ревизии()), 1)
+
+    def test_актор_ревизии_от_зовущего(self):
+        карточка(self.vault, "kb/commitments/a.md")
+        li.перенести_карточку(self.con, self.vault, "kb/commitments/a.md",
+                              актор=("human", "owner", "correction/c1"))
+        рев, = self.ревизии()
+        self.assertEqual((рев["actor_type"], рев["actor_id"], рев["reason"]),
+                         ("human", "owner", "correction/c1"))
+
+    def test_у_разговора_версии_нет_и_обновление_проходит(self):
+        p = карточка(self.vault, "kb/conversations/c.md", type="conversation",
+                     source_id="call/call_1", status=None, owner=None, due=None,
+                     promised_to=None, origin=None, title="Звонок")
+        li.run(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("title: Звонок", "title: Звонок с Анной"))
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select title from conversations").fetchone()[0],
+                         "Звонок с Анной")
+        self.assertEqual(self.ревизии(), [])
 
 
 if __name__ == "__main__":

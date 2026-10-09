@@ -13,7 +13,7 @@
 #   install-units.sh --apply    поставить и перечитать юниты
 #
 # Коды: 0 сошлось, 1 расхождение, 2 неверный режим, 3 дырка в шаблоне,
-# 4 запущен под root без явных USER_NAME/STATE/VENV_TDLIB.
+# 4 запущен под root без явных USER_NAME/STATE/VENV_TDLIB, 5 шаблона нет.
 #
 # Переменные: REPO (куда смотрит юнит), TPL_DIR (откуда взять шаблоны, по
 # умолчанию REPO/install), USER_NAME, STATE, VENV_TDLIB, DEST.
@@ -88,6 +88,18 @@ case "$mode" in
   *) echo "использование: $0 [--check|--apply]" >&2; exit 2 ;;
 esac
 
+# Шаблон на месте — до рендера, своим кодом (#97 п.3). Иначе `sed` на
+# пропавшем файле выходит двойкой: в `дырки()` её съедал `|| true` и
+# пропавший шаблон читался как «дырок нет», в `--check` сравнение шло с пустым
+# выводом и говорило «расходится», а в `--apply` `set -e` ронял скрипт кодом
+# 2 — тем самым, что в шапке обещан за неверный режим.
+for u in "${UNITS[@]}"; do
+  if [ ! -f "$TPL_DIR/$u.in" ]; then
+    echo "== шаблона $TPL_DIR/$u.in нет — переименовали или TPL_DIR не тот" >&2
+    exit 5
+  fi
+done
+
 for u in "${UNITS[@]}"; do
   leftover=$(дырки "$u")
   if [ -n "$leftover" ]; then
@@ -119,11 +131,24 @@ fi
 # Собираем в свой временный файл и только потом ставим: рендерить прямо в
 # $DEST нельзя — там нет прав без sudo, а `sudo sh -c 'sed … > файл'` отдал бы
 # root'у всю строку целиком.
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
+# Сначала собираем все юниты, потом ставим (#97 п.4): отказ рендера на
+# втором не оставит первый уже поставленным. Отказ самого `install` на
+# втором такое состояние оставить может — тогда скрипт называет его вслух,
+# а не умирает по `set -e` молча: `daemon-reload` не вызван, systemd видит
+# старые файлы, и переустановка — просто повторный `--apply`.
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
 for u in "${UNITS[@]}"; do
-  рендер "$u" > "$tmp"
-  sudo install -m 0644 -o root -g root "$tmp" "$DEST/$u"
+  рендер "$u" > "$tmpdir/$u"
+done
+placed=0
+for u in "${UNITS[@]}"; do
+  if ! sudo install -m 0644 -o root -g root "$tmpdir/$u" "$DEST/$u"; then
+    echo "== $u не поставлен; поставлено $placed из ${#UNITS[@]}," \
+         "daemon-reload не вызван — состояние промежуточное, повтори --apply" >&2
+    exit 1
+  fi
+  placed=$((placed + 1))
   echo "== $u поставлен"
 done
 sudo systemctl daemon-reload

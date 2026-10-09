@@ -24,7 +24,7 @@ RESTRUCTURE = os.environ.get("RESTRUCTURE", "f3e9766")
 SKIP_TOP = {".git", ".obsidian", "raw", "copilot", "Excalidraw", "_system"}
 
 # порядок ключей из §4; всё незнакомое (permalink) уезжает в хвост
-ORDER = ["title", "type", "source", "source_id", "created", "occurred",
+ORDER = ["title", "id", "type", "source", "source_id", "created", "occurred",
          "learned", "project", "tags", "sensitive", "distilled", "relations",
          # разговоры и обязательства (ТЗ ambient memory §10): без них новые
          # ключи уезжали бы в хвост к permalink и перетасовывались при каждой
