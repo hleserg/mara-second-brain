@@ -321,7 +321,9 @@ def run(event_id, root=None):
     # по #121). Файл — только для расшифровок, сделанных до Т5.1: строк нет,
     # сверка по нему, без segment_id.
     tid, в_реестре = call_asr.сегменты_события(con, event_id)
-    if в_реестре:
+    # по `tid`, не по числу строк: расшифровка из одной тишины — тоже
+    # расшифровка, и файл при ней не авторитет (Codex по #121, круг 2)
+    if tid is not None:
         segs = [{"segment_id": "s%04d" % seq, "start_ms": r["start_ms"],
                  "end_ms": r["end_ms"], "speaker": r["speaker"], "text": r["text"]}
                 for seq, r in в_реестре.items()]

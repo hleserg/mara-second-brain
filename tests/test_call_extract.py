@@ -241,6 +241,25 @@ class Шаг(unittest.TestCase):
         self.assertIn("пришлю смету", видела[0])
         self.assertNotIn("ЧУЖОЙ", видела[0], "файл при живых строках не читается")
 
+    def test_пустая_расшифровка_в_реестре_тоже_авторитет(self):
+        """Codex по #121, круг 2: расшифровка из одной тишины (ноль строк) —
+        всё равно расшифровка; файл при ней не читается, иначе evidence
+        цеплялось бы к тексту, которого в ней нет."""
+        self.con.execute("delete from transcript_segments")
+        видела = []
+        было = ce.ask_model
+        ce.ask_model = lambda text, base_url=None, model=None: видела.append(text) or {
+            "requests": [{"action": "прислать смету", "explicit": True, "confidence": 0.95,
+                          "deadline_phrase": "", "evidence": [{"segment": "s0001"}]}]}
+        try:
+            ce.run(self.eid, self.dir)
+        finally:
+            ce.ask_model = было
+        self.assertEqual(видела, [""], "модели показан пустой транскрипт, не файл")
+        with open(self.mi.extraction_path(self.dir, self.eid), encoding="utf-8") as fh:
+            extr = json.load(fh)
+        self.assertEqual((extr["requests"], extr["transcript_id"]), ([], self.tid))
+
     def test_строка_вместо_метки_в_аудит_не_попадает(self):
         """Codex по #121: `segment` — строка по схеме, и модель может вернуть
         в ней цитату; в аудит метка идёт только по шаблону `sNNNN`."""
