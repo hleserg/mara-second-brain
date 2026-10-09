@@ -15,7 +15,7 @@
     python3 scripts/call_extract.py --event call_<uuid>
     python3 scripts/call_extract.py --self-check
 """
-import os, sys, re, json, argparse, urllib.request
+import os, sys, re, json, hashlib, argparse, urllib.request
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +36,27 @@ MODEL = os.environ.get("MARA_EXTRACT_MODEL", "qwen3.5:9b")
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))
 REVIEW_MIN = float(os.environ.get("MARA_REVIEW_MIN", 0.60))
 HTTP_TIMEOUT = 900
+# Параметры запроса к модели. Температура ноль — ответ воспроизводим; окно
+# контекста — сколько расшифровки модель видит целиком.
+OPTIONS = {"temperature": 0, "num_ctx": 8192}
+# Версия правил после модели (Т5.0, ТЗ §9.3 «versioned prompts/rules»):
+# `normalize`, `сверить_evidence`, `parse_deadline`, пороги `disposition`.
+# Поднимать при любой правке их поведения, как `PROMPT_VERSION` — при правке
+# промпта; иначе два извлечения с одной моделью и одним промптом, но разными
+# правилами выглядят одинаково, и корпус Т5.5 сравнивает несравнимое.
+RULES_VERSION = 1
+
+
+def конфигурация():
+    """Ручки прогона извлечения, которые ложатся в `extractions/<event>.json`
+    (Т5.0, ТЗ §9): модель, параметры запроса, пороги и хеш схемы ответа —
+    `format: SCHEMA` меняет выход так же, как текст промпта, и правка схемы
+    без поднятия `PROMPT_VERSION` иначе была бы невидима. Таймаут HTTP
+    результат не меняет — его тут нет."""
+    return {"model": MODEL, "options": dict(OPTIONS),
+            "task_min": TASK_MIN, "review_min": REVIEW_MIN,
+            "schema_sha256": hashlib.sha256(json.dumps(
+                SCHEMA, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()}
 
 LISTS = ("requests", "commitments", "decisions", "constraints",
          "open_questions", "changed_instructions", "followups")
@@ -85,9 +106,11 @@ SCHEMA = {"type": "object",
                              [(k, {"type": "array", "items": {"type": "string"}})
                               for k in NAMES])}
 
-# ADR-0004 п.4: версия промпта поднимается при любой правке его текста —
-# иначе регрессионный корпус (Т5.5) сравнивает несравнимое. Ложится в
-# извлечение и в карточку рядом с именем модели.
+# ADR-0004 п.4: версия промпта поднимается при любой правке его текста и
+# схемы ответа `SCHEMA`/`ITEM` (она уходит в запрос как `format` и меняет
+# выход так же) — иначе регрессионный корпус (Т5.5) сравнивает
+# несравнимое. Ложится в извлечение и в карточку рядом с именем модели;
+# хеш схемы — в `config` извлечения (`конфигурация`).
 PROMPT_VERSION = 2
 PROMPT = """Ты разбираешь расшифровку телефонного разговора Сергея.
 
@@ -299,7 +322,7 @@ def ask_model(text, base_url=None, model=None):
         "format": SCHEMA,
         "stream": False,
         "think": False,
-        "options": {"temperature": 0, "num_ctx": 8192},
+        "options": OPTIONS,
     }, ensure_ascii=False).encode("utf-8")
     адрес = base_url or OLLAMA or vault_common.нужен_адрес(
         "MARA_LLM_URL", "коробка с ollama")
@@ -341,7 +364,8 @@ def run(event_id, root=None):
             raise RuntimeError("нет транскрипта %s" % tpath)
         segs = call_asr.read_jsonl(tpath)
         сегменты = сегменты_из(segs)
-    raw = ask_model(transcript_text(segs))
+    текст = transcript_text(segs)
+    raw = ask_model(текст)
     data = normalize(raw, occurred, сегменты)
     отклонено = data.pop("evidence_rejected")
     data["event_id"] = event_id
@@ -350,13 +374,20 @@ def run(event_id, root=None):
     data["transcript_id"] = tid
     data["extractor"] = MODEL          # ADR-0004 п.4: чем и по какой версии
     data["prompt_version"] = PROMPT_VERSION
+    # Т5.0, ТЗ §9: правила — версией, конфигурация прогона и хеш входа —
+    # того текста, который ушёл модели (у legacy-расшифровки без строк
+    # `transcript_id` пустой, и хеш — единственный след входа)
+    data["rules_version"] = RULES_VERSION
+    data["config"] = конфигурация()
+    data["input_sha256"] = hashlib.sha256(текст.encode("utf-8")).hexdigest()
     out = mi.write_json(mi.extraction_path(root, event_id), data)
     # отказ по evidence — строка аудита (ADR-0004 п.3): что прислала модель,
     # без текста расшифровки; одной транзакцией с переходом события
     with mi.транзакция(con):
         for о in отклонено:
             mi.audit(con, "evidence_rejected", ("model", MODEL), "event", event_id,
-                     dict(о, transcript_id=tid, prompt_version=PROMPT_VERSION))
+                     dict(о, transcript_id=tid, prompt_version=PROMPT_VERSION,
+                          rules_version=RULES_VERSION))
         con.execute("update events set state='extracted' where id=?", (event_id,))
     if отклонено:
         print("call_extract: %s — отклонено ссылок evidence: %d" % (event_id, len(отклонено)),

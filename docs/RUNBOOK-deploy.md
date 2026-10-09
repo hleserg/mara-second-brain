@@ -457,6 +457,7 @@ checkout» перестаёт быть ложью: извлечённое и п�
 
 ```bash
 ssh doctor 'cd ~/mara-second-brain && MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate'
+```
 
 Миграция 3 (Т2.9) ставит уникальный индекс на `ingest_attempts(device_id,
 idempotency_key)`. Если она отказала с `UNIQUE constraint failed` — в
@@ -467,7 +468,11 @@ idempotency_key)`. Если она отказала с `UNIQUE constraint failed
 Миграция 4 (Т2.5) заводит таблицу `outbox` — пустую, аддитивно; отказать
 ей нечем. Откат 4 → 3 проходит только при пустом outbox: строка в нём —
 след отправленного или ждущего сообщения, стирать его командой нельзя.
-```
+
+Миграция 5 (Т5.0) добавляет `transcripts.config_json` и
+`transcripts.pipeline_version` — аддитивно, у старых расшифровок они пусты.
+Откат 5 → 4 проходит, пока ни одна расшифровка их не заполнила (то есть до
+первого `call_asr` новым кодом); потом — только восстановлением из копии.
 
 Ждём `contextd.db: версия N → M, integrity_check: ok, foreign_key_check: ok`
 и `rc=0`. `N = M` —

@@ -99,9 +99,9 @@ class Сквозной(unittest.TestCase):
         })
         import mara_ingest as mi
         import contextd
-        import call_extract
+        import call_extract, call_asr
         mi.ROOT = cls.blobs
-        cls.mi, cls.cd, cls.ce = mi, contextd, call_extract
+        cls.mi, cls.cd, cls.ce, cls.asr = mi, contextd, call_extract, call_asr
         cls.tmp = tempfile.mkdtemp(prefix="mara-fixture-")
         cls.audio = os.path.join(cls.tmp, "sample-call.m4a")
         subprocess.run(["bash", os.path.join(ROOT, "tests/fixtures/make_sample_call.sh"),
@@ -193,6 +193,15 @@ class Сквозной(unittest.TestCase):
                          ("s0001", seg["id"], seg["start_ms"], seg["end_ms"]))
         self.assertEqual((extr["extractor"], extr["prompt_version"]),
                          (self.ce.MODEL, self.ce.PROMPT_VERSION))
+        # Т5.0, ТЗ §9: у расшифровки — конфигурация нарезки и версия конвейера,
+        # у извлечения — версия правил, конфигурация и хеш входа
+        t = con.execute("select config_json, pipeline_version from transcripts where id=?",
+                        (t["id"],)).fetchone()
+        self.assertEqual((json.loads(t["config_json"]), t["pipeline_version"]),
+                         (self.asr.конфигурация(), self.mi.PIPELINE_VERSION))
+        self.assertEqual((extr["rules_version"], extr["config"]["model"],
+                          len(extr["input_sha256"])),
+                         (self.ce.RULES_VERSION, self.ce.MODEL, 64))
         # ADR-0004 п.5: ссылка обязательства — строка evidence_refs на тот же сегмент
         ref = con.execute("select e.segment_id, c.id from evidence_refs e join commitments c "
                           "on c.id=e.object_id where c.origin_event=?",

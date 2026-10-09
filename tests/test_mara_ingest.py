@@ -561,6 +561,33 @@ class Сущности(unittest.TestCase):
             "select name from sqlite_master where type='index'")})
         con.close()
 
+    def test_миграция_5_происхождение_расшифровки_и_путь_вниз(self):
+        """Т5.0: `transcripts.config_json`/`pipeline_version`; откат 5 → 4
+        проходит только при пустых колонках, иначе отказ с именем таблицы."""
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        колонки = lambda: {r[1] for r in con.execute("pragma table_info(transcripts)")}
+        self.assertLessEqual({"config_json", "pipeline_version"}, колонки())
+        con.execute("insert into events(id,kind,source,source_id,occurred,received,"
+                    "dedupe_key,state) values('e1','call','phone','d','t','t','k','new')")
+        con.execute("insert into transcripts(id,event_id,created,config_json,"
+                    "pipeline_version) values('t1','e1','t','{\"window_ms\":25000}',1)")
+        con.close()
+        with self.assertRaises(RuntimeError) as e:
+            mi.migrate(self.dir, 4)
+        self.assertIn("transcripts", str(e.exception))
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ)
+        con = mi.migrate(self.dir)
+        con.execute("delete from transcripts")
+        con.close()
+        con = mi.migrate(self.dir, 4)
+        self.assertFalse({"config_json", "pipeline_version"} & колонки())
+        self.assertEqual(self.версия(), 4)
+        con.close()
+        con = mi.migrate(self.dir)
+        self.assertLessEqual({"config_json", "pipeline_version"}, колонки())
+        con.close()
+
     def test_откат_не_стирает_данные_молча(self):
         """Путь вниз без потерь только пока в новое никто не писал. Записали
         — отказ: такой откат идёт через восстановление из бэкапа."""
