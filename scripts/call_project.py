@@ -400,7 +400,67 @@ def check_correction(payload):
         return "срок нужен как YYYY-MM-DD"
     if not (payload.get("status") or payload.get("due") or payload.get("note")):
         return "нечего править: ни статуса, ни срока, ни заметки"
+    ид = str(payload.get("id") or "").strip().lstrip("#")
+    if payload.get("id") and not (ид and len(ид) <= 36 and КОД.match(ид)):
+        return "id — код #xxxxxxxx из списка или полный id карточки"
+    if payload.get("expected_version") not in (None, ""):
+        if not str(payload["expected_version"]).isdigit() or int(payload["expected_version"]) < 1:
+            return "expected_version — целое число от 1"
     return None
+
+
+КОД = re.compile(r"^[0-9a-f-]{8,36}$")
+
+
+def _по_коду(cards, ид):
+    """Карточки по id: полный или последние восемь знаков (код из пакета).
+
+    Код короткий — восемь шестнадцатеричных знаков хвоста uuid7 (ADR-0002:
+    хвост случайный, в отличие от головы с миллисекундами). Два совпадения
+    на один код среди сотен карточек маловероятны, но возможны — тогда это
+    тот же «подходят несколько», что и по словам.
+    """
+    ид = ид.lstrip("#").lower()
+    return [c for c in cards
+            if (c["fm"].get("id") or "").lower() == ид
+            or (len(ид) >= 8 and (c["fm"].get("id") or "").lower().endswith(ид))]
+
+
+def _строка_реестра(con, card):
+    oid = card["fm"].get("id")
+    return con.execute("select version, title, status, due from commitments "
+                       "where id=?", (oid,)).fetchone() if oid else None
+
+
+def _конфликт(con, card, ожидали, payload, когда):
+    """ADR-0003 п.4: версия в реестре не та, что ждал вызывающий.
+
+    Возвращает ответ формы §4.5 или None, если конфликта нет. Проверять есть
+    по чему только у карточки с id и строкой в реестре: без строки честно
+    говорим `version_checked: False` и правим как раньше (п.3 ADR, legacy).
+    Очередь ревью — таблица `alerts` (kind `version_conflict`, state `open`):
+    своей таблицы конфликтов в схеме нет, а `alerts` для того и заведена,
+    чтобы Control Plane показал открытое и дал владельцу разобрать.
+    """
+    oid = card["fm"].get("id")
+    row = _строка_реестра(con, card)
+    if row is None or row["version"] == ожидали:
+        return None
+    текущее = {"title": row["title"], "status": row["status"], "due": row["due"]}
+    cid = mi.uuid7()
+    con.execute("insert into alerts(id,kind,severity,state,object_kind,object_id,"
+                "opened,detail_json) values(?,?,?,?,?,?,?,?)",
+                (cid, "version_conflict", "warn", "open", "commitment", oid, когда,
+                 json.dumps({"expected_version": ожидали, "current_version": row["version"],
+                             "current": текущее, "attempted_patch": payload},
+                            ensure_ascii=False)))
+    return {"found": True, "error": "version_conflict", "entity_id": oid,
+            "card": card["rel"], "title": row["title"],
+            "expected_version": ожидали, "current_version": row["version"],
+            "current": текущее, "attempted_patch": payload, "conflict_id": cid,
+            "text": "«%s» уже изменилась: версия %d, а не %d (статус %s) — не правил, "
+                    "конфликт %s в очереди ревью"
+                    % (row["title"], row["version"], ожидали, row["status"], cid[-8:])}
 
 
 def _карточки(vault):
@@ -538,16 +598,30 @@ def apply_correction(vault, event, con=None):
     item = scrub(str(p.get("item") or "").strip())
     status, due = p.get("status") or None, p.get("due") or None
     note = scrub(str(p.get("note") or "").strip()) or None
+    ид = str(p.get("id") or "").strip()
+    ожидали = int(p["expected_version"]) if str(p.get("expected_version") or "").isdigit() else None
     когда = mi.now_iso()
     with locked(vault):
         cards = _карточки(vault)
-        found = _похожие(item, cards)
-        if len(found) > 1:
+        # код из пакета — точный адрес, поиск по словам ему не нужен; нет
+        # такого кода — не угадываем по словам, а говорим
+        found = _по_коду(cards, ид) if ид else _похожие(item, cards)
+        конфликт, проверено = None, False
+        if len(found) == 1 and ожидали is not None and con is not None:
+            проверено = _строка_реестра(con, found[0]) is not None
+            конфликт = _конфликт(con, found[0], ожидали, dict(p), когда)
+        if конфликт:
+            out = конфликт
+        elif len(found) > 1:
             names = [c["fm"].get("title") for c in found]
             out = {"found": False, "ambiguous": names,
                    "text": "подходят несколько, уточни: " + "; ".join(names)}
         elif found:
             out = _поправить(found[0], status, due, note, когда, event.get("id"))
+            # ADR-0003 п.3: без строки в реестре версию проверить нечем
+            out["version_checked"] = проверено
+        elif ид:
+            out = {"found": False, "text": "не нашёл карточку с кодом #%s" % ид.lstrip("#")}
         elif status == "open":
             out = _завести(vault, item, due, note, когда, event)
         else:
@@ -559,8 +633,13 @@ def apply_correction(vault, event, con=None):
     rel = out.get("card") if out.get("changed") else out.get("created")
     if con is not None and rel:
         # актор — владелец: правка словами это его решение, Мара лишь записала
-        li.перенести_карточку(con, vault, rel, актор=(
+        oid = li.перенести_карточку(con, vault, rel, актор=(
             "human", "owner", "correction/%s" % event.get("id")))
+        if oid:
+            row = con.execute("select version from commitments where id=?", (oid,)).fetchone()
+            # id и версия в ответе — чтобы следующая правка пришла с ними
+            # (ADR-0003 п.3: сперва id в ответ, потом expected_version обязателен)
+            out["id"], out["version"] = oid, row["version"] if row else None
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
     return out

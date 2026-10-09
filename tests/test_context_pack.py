@@ -45,6 +45,18 @@ class Состав(unittest.TestCase):
         self.assertIn("прислать смету", text)
         self.assertEqual(len(items), 1)
 
+    def test_код_карточки_едет_в_пакет_хвостом_id(self):
+        """Т2.3: код #xxxxxxxx — адрес для `mara_correction`, не личные данные."""
+        v = волт()
+        карточка(v, "a.md", id="01999999-0000-7000-8000-00005479d088")
+        text, items = cp.собрать(v)
+        self.assertIn("прислать смету · Анна #5479d088", text)
+        self.assertNotIn("01999999-0000-7000", text, "полный id в пакет не нужен")
+        self.assertIn("mara_correction", text, "шапка говорит, что это за код")
+        карточка(v, "b.md", title="без кода", id=None)
+        text, _ = cp.собрать(v)
+        self.assertIn("- без кода · Анна\n", text, "карточка без id — строка без кода")
+
     def test_закрытое_обязательство_не_в_пакете(self):
         v = волт(пусто=True)
         карточка(v, "a.md", status="done", due="2026-09-04")
