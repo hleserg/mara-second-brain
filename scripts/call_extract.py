@@ -236,9 +236,12 @@ def normalize(raw, occurred_at, сегменты=None):
                 # (формулировка модели о сказанном), ни сырого объекта —
                 # модель кладёт в него и лишние ключи вроде цитаты
                 e = о["evidence"] if isinstance(о["evidence"], dict) else {}
+                # метка — только если она метка: строка не по шаблону может
+                # оказаться цитатой из разговора (Codex по #121)
+                метка = МЕТКА.fullmatch(str(e.get("segment") or ""))
                 out["evidence_rejected"].append({
                     "list": key, "item": len(items), "why": о["why"],
-                    "segment": e.get("segment") if isinstance(e.get("segment"), str) else None,
+                    "segment": метка.group(0) if метка else None,
                     "start_ms": e.get("start_ms") if type(e.get("start_ms")) is int else None,
                     "end_ms": e.get("end_ms") if type(e.get("end_ms")) is int else None})
             if not валидные:
@@ -309,16 +312,27 @@ def run(event_id, root=None):
     root = root or mi.ROOT
     con = mi.connect(root)
     ev = mi.event_row(con, event_id)
-    tpath = mi.transcript_path(root, event_id)
-    if not os.path.exists(tpath):
-        raise RuntimeError("нет транскрипта %s" % tpath)
-    segs = call_asr.read_jsonl(tpath)
     occurred = ev["occurred"] or mi.now_iso()
-    # сегменты для сверки — из реестра (Т5.1); расшифровка, сделанная до
-    # того, как ASR стал писать строки, сверяется по файлу, без segment_id
+    # Промпт и сверка — из одного источника. Есть расшифровка в реестре
+    # (Т5.1) — модели показываются её строки, по ним же сверяется evidence;
+    # файл `transcripts/<event>.jsonl` при этом не читается: ASR, умерший
+    # между записью файла и фиксацией строк, оставлял бы файл одного прогона
+    # и строки другого, и метка `s0001` цеплялась бы к чужому тексту (Codex
+    # по #121). Файл — только для расшифровок, сделанных до Т5.1: строк нет,
+    # сверка по нему, без segment_id.
     tid, в_реестре = call_asr.сегменты_события(con, event_id)
-    сегменты = ({seq: {"start_ms": r["start_ms"], "end_ms": r["end_ms"], "id": r["id"]}
-                 for seq, r in в_реестре.items()} if в_реестре else сегменты_из(segs))
+    if в_реестре:
+        segs = [{"segment_id": "s%04d" % seq, "start_ms": r["start_ms"],
+                 "end_ms": r["end_ms"], "speaker": r["speaker"], "text": r["text"]}
+                for seq, r in в_реестре.items()]
+        сегменты = {seq: {"start_ms": r["start_ms"], "end_ms": r["end_ms"], "id": r["id"]}
+                    for seq, r in в_реестре.items()}
+    else:
+        tpath = mi.transcript_path(root, event_id)
+        if not os.path.exists(tpath):
+            raise RuntimeError("нет транскрипта %s" % tpath)
+        segs = call_asr.read_jsonl(tpath)
+        сегменты = сегменты_из(segs)
     raw = ask_model(transcript_text(segs))
     data = normalize(raw, occurred, сегменты)
     отклонено = data.pop("evidence_rejected")

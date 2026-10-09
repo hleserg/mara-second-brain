@@ -218,6 +218,40 @@ class Шаг(unittest.TestCase):
         self.assertEqual(self.con.execute("select state from events").fetchone()[0],
                          "extracted")
 
+    def test_промпт_и_сверка_из_одной_расшифровки(self):
+        """Codex по #121: файл и строки реестра разошлись (ASR умер между
+        записью файла и фиксацией строк) — модель видит строки реестра, и
+        метка цепляется к их тексту, а не к чужому из файла."""
+        self.asr.write_jsonl(self.mi.transcript_path(self.dir, self.eid),
+                             [{"segment_id": "s0001", "start_ms": 0, "end_ms": 25000,
+                               "speaker": "unknown-A", "text": "ЧУЖОЙ ТЕКСТ ДРУГОГО ПРОГОНА"}])
+        видела = []
+        было = ce.ask_model
+
+        def ответ(text, base_url=None, model=None):
+            видела.append(text)
+            return {"requests": [{"action": "прислать смету", "explicit": True,
+                                  "confidence": 0.95, "deadline_phrase": "",
+                                  "evidence": [{"segment": "s0001"}]}]}
+        ce.ask_model = ответ
+        try:
+            ce.run(self.eid, self.dir)
+        finally:
+            ce.ask_model = было
+        self.assertIn("пришлю смету", видела[0])
+        self.assertNotIn("ЧУЖОЙ", видела[0], "файл при живых строках не читается")
+
+    def test_строка_вместо_метки_в_аудит_не_попадает(self):
+        """Codex по #121: `segment` — строка по схеме, и модель может вернуть
+        в ней цитату; в аудит метка идёт только по шаблону `sNNNN`."""
+        self.прогон({"requests": [
+            {"action": "прислать смету", "explicit": True, "confidence": 0.95,
+             "deadline_phrase": "", "evidence": [{"segment": "пришлю смету до пятницы"}]}]})
+        r, = self.con.execute("select detail_json from audit_events where "
+                              "action='evidence_rejected'").fetchall()
+        self.assertIsNone(json.loads(r[0])["segment"])
+        self.assertNotIn("смету", r[0])
+
     def test_расшифровка_без_строк_сверяется_по_файлу(self):
         """Звонок, расшифрованный до Т5.1: строк нет, сверка — по файлу,
         `segment_id` пустой, `transcript_id` пустой."""
