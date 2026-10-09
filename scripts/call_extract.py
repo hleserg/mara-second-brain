@@ -65,12 +65,13 @@ ITEM = {
         "new_state": {"type": "string"},
         # ADR-0004 п.2: модель называет сегмент, а не миллисекунды — аудит
         # показал, что секунды из промпта она пересчитывает, а не копирует.
-        # Подынтервал внутри сегмента необязателен и проверяется по границам.
+        # Подынтервала в схеме нет нарочно: ollama с `format` склоняет модель
+        # заполнять и необязательные ключи, и «00:00–00:25» вернулось бы
+        # как 0–25 мс (ревью PR #121). Подынтервал придёт от пословных меток
+        # или от человека (п.1 ADR); `сверить_evidence` его проверяет.
         "evidence": {"type": "array", "items": {
             "type": "object",
-            "properties": {"segment": {"type": "string"},
-                           "start_ms": {"type": "integer"},
-                           "end_ms": {"type": "integer"}},
+            "properties": {"segment": {"type": "string"}},
             "required": ["segment"]}},
     },
     # explicit и deadline_phrase в обязательных не для красоты: необязательное
@@ -197,7 +198,8 @@ def сверить_evidence(item, сегменты):
         if a is None and b is None:
             a, b = seg["start_ms"], seg["end_ms"]
         else:
-            if not (isinstance(a, int) and isinstance(b, int)
+            # `type is int`, не `isinstance`: `True`/`False` — тоже int
+            if not (type(a) is int and type(b) is int
                     and seg["start_ms"] <= a <= b <= seg["end_ms"]):
                 отклонённые.append({"evidence": e, "why": "подынтервал за границами сегмента"})
                 continue
@@ -229,9 +231,16 @@ def normalize(raw, occurred_at, сегменты=None):
             if not has_evidence(it):
                 continue
             валидные, отклонённые = сверить_evidence(it, сегменты)
-            for о in отклонённые:
-                out["evidence_rejected"].append(dict(о, list=key,
-                                                    action=str(it.get("action") or "")[:80]))
+            for n, о in enumerate(отклонённые):
+                # в аудит — только адрес и причина (ТЗ §6.2): ни `action`
+                # (формулировка модели о сказанном), ни сырого объекта —
+                # модель кладёт в него и лишние ключи вроде цитаты
+                e = о["evidence"] if isinstance(о["evidence"], dict) else {}
+                out["evidence_rejected"].append({
+                    "list": key, "item": len(items), "why": о["why"],
+                    "segment": e.get("segment") if isinstance(e.get("segment"), str) else None,
+                    "start_ms": e.get("start_ms") if type(e.get("start_ms")) is int else None,
+                    "end_ms": e.get("end_ms") if type(e.get("end_ms")) is int else None})
             if not валидные:
                 continue
             it["evidence"] = валидные

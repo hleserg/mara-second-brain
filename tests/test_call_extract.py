@@ -116,8 +116,9 @@ class Evidence(unittest.TestCase):
         out = self.пункт([{"segment": "s0009"}])
         self.assertEqual(out["requests"], [])
         о, = out["evidence_rejected"]
-        self.assertEqual((о["list"], о["why"], о["evidence"]),
-                         ("requests", "нет такого сегмента", {"segment": "s0009"}))
+        self.assertEqual((о["list"], о["why"], о["segment"]),
+                         ("requests", "нет такого сегмента", "s0009"))
+        self.assertNotIn("action", о, "формулировка модели в аудит не идёт")
 
     def test_частично_отклонённый_пункт_идёт_в_ревью(self):
         out = self.пункт([{"segment": "s0001"}, {"segment": "s0042"}])
@@ -134,6 +135,8 @@ class Evidence(unittest.TestCase):
         self.assertEqual(out["evidence_rejected"][0]["why"], "подынтервал за границами сегмента")
         out = self.пункт([{"segment": "s0002", "start_ms": 30000, "end_ms": 25000}])
         self.assertEqual(out["requests"], [], "конец раньше начала")
+        out = self.пункт([{"segment": "s0002", "start_ms": False, "end_ms": True}])
+        self.assertEqual(out["requests"], [], "bool — не миллисекунды")
 
     def test_миллисекунды_без_метки_не_evidence(self):
         """Старая форма ответа — просто спан — теперь ничего не подтверждает."""
@@ -149,6 +152,8 @@ class Evidence(unittest.TestCase):
     def test_схема_просит_сегмент_а_не_миллисекунды(self):
         ev = ce.ITEM["properties"]["evidence"]["items"]
         self.assertEqual(ev["required"], ["segment"])
+        self.assertEqual(list(ev["properties"]), ["segment"],
+                         "миллисекунды у модели не спрашиваются вовсе (ADR п.2)")
         self.assertIn("segment", ce.PROMPT)
         self.assertNotIn("start_ms", ce.PROMPT)
         self.assertGreaterEqual(ce.PROMPT_VERSION, 2)
@@ -188,8 +193,9 @@ class Шаг(unittest.TestCase):
         extr = self.прогон({"requests": [
             {"action": "прислать смету", "explicit": True, "confidence": 0.95,
              "deadline_phrase": "", "evidence": [{"segment": "s0001"}, {"segment": "s0007"}]},
-            {"action": "выдумка", "explicit": True, "confidence": 0.95,
-             "deadline_phrase": "", "evidence": [{"segment": "s0009"}]}]})
+            {"action": "выдумка со сметой", "explicit": True, "confidence": 0.95,
+             "deadline_phrase": "",
+             "evidence": [{"segment": "s0009", "quote": "цитата про смету"}]}]})
         self.assertEqual([it["action"] for it in extr["requests"]], ["прислать смету"])
         self.assertEqual(extr["requests"][0]["disposition"], "needs-review")
         self.assertEqual(extr["requests"][0]["evidence"][0]["segment_id"],
@@ -202,10 +208,13 @@ class Шаг(unittest.TestCase):
         д = json.loads(рows[0]["detail_json"])
         self.assertEqual((рows[0]["actor_type"], рows[0]["actor_id"], рows[0]["object_id"]),
                          ("model", ce.MODEL, self.eid))
-        self.assertEqual((д["why"], д["evidence"], д["transcript_id"]),
-                         ("нет такого сегмента", {"segment": "s0007"}, self.tid))
-        self.assertNotIn("смету", рows[0]["detail_json"].replace("прислать смету", ""),
-                         "текста расшифровки в аудите нет")
+        self.assertEqual((д["why"], д["segment"], д["list"], д["item"], д["transcript_id"]),
+                         ("нет такого сегмента", "s0007", "requests", 0, self.tid))
+        self.assertEqual(sorted(д), ["end_ms", "item", "list", "prompt_version", "segment",
+                                     "start_ms", "transcript_id", "why"])
+        for r in рows:
+            self.assertNotIn("смет", r["detail_json"], "содержимого в аудите нет (§6.2)")
+            self.assertNotIn("цитат", r["detail_json"])
         self.assertEqual(self.con.execute("select state from events").fetchone()[0],
                          "extracted")
 

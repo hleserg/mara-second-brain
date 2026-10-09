@@ -33,8 +33,9 @@ class Склейка(unittest.TestCase):
             def do_POST(self):
                 self.rfile.read(int(self.headers["Content-Length"]))
                 outer.calls += 1
-                body = json.dumps({"text": "кусок %d" % outer.calls,
-                                   "sec": 25}).encode("utf-8")
+                body = json.dumps(dict(getattr(outer, "ответ", {}),
+                                       text="кусок %d" % outer.calls,
+                                       sec=25)).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -56,6 +57,11 @@ class Склейка(unittest.TestCase):
         движок = {}
         call_asr.transcribe_spans(self.base, [(0, 1000)], lambda a, b: b"wav", движок)
         self.assertEqual(движок, {}, "коробка про движок молчит — не догадываемся")
+        self.ответ = {"engine": "whisper.cpp", "model": "large-v3", "language": "ru"}
+        движок = {}
+        call_asr.transcribe_spans(self.base, [(0, 1000), (1000, 2000)],
+                                  lambda a, b: b"wav", движок)
+        self.assertEqual(движок, self.ответ, "сказала — записали, ровно как сказала")
 
     def test_сегменты_получают_спаны_в_координатах_записи(self):
         segs = call_asr.transcribe_spans(self.base, [(0, 25000), (23000, 48000)],
