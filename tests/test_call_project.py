@@ -898,15 +898,44 @@ class EvidenceВРеестре(unittest.TestCase):
                                             "start_ms": 0, "end_ms": 25000}]
         extr["commitments"][0]["evidence"][0]["end_ms"] = 999999      # за границами
         mi.write_json(mi.extraction_path(self.root, self.eid), extr)
-        cp.run(self.eid, self.vault, self.root)
+        written = cp.run(self.eid, self.vault, self.root)
         self.assertEqual(self.строки(), [])
+        # ADR п.3: пункт с отклонённой ссылкой — в ревью, карточки нет; в
+        # волте только разговор, и никакой карточки с чужим кодом сегмента
+        self.assertEqual([w for w in written if w.startswith("kb/commitments/")], [],
+                         "карточка не рисует то, что реестр отверг")
         аудит = [dict(r) for r in self.con.execute(
-            "select * from audit_events where action='evidence_rejected'")]
+            "select * from audit_events where action='evidence_rejected' order by id")]
         self.assertEqual(len(аудит), 2)
-        self.assertEqual((аудит[0]["actor_type"], аудит[0]["actor_id"], аудит[0]["object_kind"]),
-                         ("rule", "call_project", "commitment"))
-        self.assertNotIn("чужое", аудит[0]["detail_json"])
-        self.assertNotIn("смета", аудит[0]["detail_json"])
+        self.assertEqual((аудит[0]["actor_type"], аудит[0]["actor_id"], аудит[0]["object_kind"],
+                          аудит[0]["object_id"]), ("rule", "call_project", "event", self.eid))
+        д = json.loads(аудит[0]["detail_json"])
+        self.assertEqual((д["list"], д["item"], д["segment_id"]), ("requests", 1, чужой))
+        self.assertEqual(sorted(д), ["end_ms", "item", "list", "segment_id", "start_ms", "why"])
+        for r in аудит:
+            self.assertNotIn("чужое", r["detail_json"])
+            self.assertNotIn("смета", r["detail_json"])
+
+    def test_ссылка_без_интервала_равна_сегменту(self):
+        """ADR п.1: подынтервал необязателен — без него ссылка равна сегменту."""
+        extr = self.извлечение()
+        extr["requests"][0]["evidence"] = [{"segment": "s0011", "segment_id": self.сег[11]}]
+        mi.write_json(mi.extraction_path(self.root, self.eid), extr)
+        written = cp.run(self.eid, self.vault, self.root)
+        r = [x for x in self.строки() if x["segment_id"] == self.сег[11]][0]
+        self.assertEqual((r["start_ms"], r["end_ms"]), (250000, 275000))
+        text = _текст(os.path.join(self.vault, [w for w in written if "prislat" in w][0]))
+        self.assertIn("· 04:10–04:35 · #%s" % self.сег[11][-8:], text)
+
+    def test_список_evidence_читается_парсером(self):
+        """Список во фронтматтере — машиночитаемый на деле: парсер карточек
+        отдаёт его списком, а не пустой строкой (ревью PR #122)."""
+        self.извлечение()
+        written = cp.run(self.eid, self.vault, self.root)
+        text = _текст(os.path.join(self.vault, [w for w in written if "prislat" in w][0]))
+        fm, _ = cp.context_pack.mb.frontmatter(text)
+        self.assertEqual(fm["evidence"], ["%s 252000-260000" % self.сег[11]])
+        self.assertEqual(fm["audience"], ["mara"])
 
 
 if __name__ == "__main__":

@@ -56,10 +56,13 @@ def frontmatter(text):
         return {}, text
     fm, key = {}, None
     for line in m.group(1).splitlines():
-        if line.startswith("- ") and key is not None:
+        # элементы списка проектор пишет с отступом («  - mara»), руками —
+        # и без; оба читаются (ревью PR #122: `audience` и `evidence`
+        # иначе разбирались в пустую строку)
+        if line.lstrip().startswith("- ") and key is not None:
             if not isinstance(fm[key], list):
                 fm[key] = []
-            fm[key].append(line[2:].strip().strip("'\""))
+            fm[key].append(line.lstrip()[2:].strip().strip("'\""))
         elif line and not line[0].isspace() and ":" in line:
             key, _, val = line.partition(":")
             key, val = key.strip(), val.strip().strip("'\"")

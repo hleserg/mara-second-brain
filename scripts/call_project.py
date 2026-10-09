@@ -79,13 +79,53 @@ def _evidence_список(item):
             if isinstance(e.get("segment_id"), str) and e.get("segment_id")]
 
 
-def _evidence_в_реестр(con, oid, event_id, item, когда):
-    """ADR-0004 п.1, п.3: строки `evidence_refs` обязательства — по одной на
-    ссылку с `segment_id`. Сохраняется только ссылка, чей сегмент принадлежит
-    расшифровке того же события и чей интервал лежит в границах сегмента;
-    остальное — `audit_events` (`evidence_rejected`, актор `rule`). Повтор
-    проекции заменяет строки с `producer = model`, а не кладёт рядом. Старые
-    извлечения без `segment_id` строк не дают: ссылка без референта — не
+def _сверить_с_реестром(con, event_id, extraction):
+    """ADR-0004 п.3 и п.5 на пути проекции: до рендера каждая ссылка с
+    `segment_id` сверяется с реестром — сегмент принадлежит расшифровке
+    этого события, интервал (если есть) в его границах; без интервала
+    ссылка равна сегменту целиком (п.1). Возвращает копию извлечения, в
+    которой у пунктов остались только принятые ссылки (`evidence`), а
+    отклонённые отложены в `evidence_rejected`; пункт `task` с хотя бы одной
+    отклонённой уходит в `needs-review` (п.3) и карточки не получает.
+    Карточка рисуется по принятому — а не по тексту модели, который реестр
+    мог отвергнуть (ревью PR #122). Ссылки без `segment_id` (извлечения до
+    Т2.4) сверить нечем — остаются как есть, строк реестра не дают."""
+    out = json.loads(json.dumps(extraction))
+    for key in ("requests", "commitments", "changed_instructions"):
+        for it in out.get(key) or []:
+            принятые, отклонённые = [], []
+            for e in it.get("evidence") or []:
+                sid = e.get("segment_id") if isinstance(e, dict) else None
+                if not isinstance(sid, str) or not sid:
+                    принятые.append(e)                  # legacy — не сверяем
+                    continue
+                seg = con.execute(
+                    "select s.start_ms, s.end_ms from transcript_segments s join transcripts t "
+                    "on t.id=s.transcript_id where s.id=? and t.event_id=?",
+                    (sid, event_id)).fetchone()
+                a, b = e.get("start_ms"), e.get("end_ms")
+                if seg is not None and a is None and b is None:
+                    a, b = seg["start_ms"], seg["end_ms"]
+                if (seg is None or type(a) is not int or type(b) is not int
+                        or not seg["start_ms"] <= a <= b <= seg["end_ms"]):
+                    отклонённые.append({"segment_id": sid,
+                                        "start_ms": a if type(a) is int else None,
+                                        "end_ms": b if type(b) is int else None})
+                    continue
+                принятые.append(dict(e, start_ms=a, end_ms=b))
+            it["evidence"], it["evidence_rejected"] = принятые, отклонённые
+            if отклонённые and it.get("disposition") == "task":
+                it["disposition"] = "needs-review"
+    return out
+
+
+def _evidence_в_реестр(con, oid, item, когда):
+    """ADR-0004 п.1, п.5: строки `evidence_refs` обязательства — по одной на
+    принятую ссылку с `segment_id` (сверка — `_сверить_с_реестром`, до
+    рендера; отклонённые уже в аудите). Повтор проекции заменяет строки с `producer =
+    model`, а не кладёт рядом; их `id` при этом выдаются заново — на них
+    никто не ссылается, стабильный id (ADR-0002) у объекта, а не у ссылки.
+    Ссылки без `segment_id` строк не дают: ссылка без референта — не
     evidence. Возвращает число записанных."""
     con.execute("delete from evidence_refs where object_kind='commitment' and object_id=? "
                 "and producer='model'", (oid,))
@@ -94,20 +134,10 @@ def _evidence_в_реестр(con, oid, event_id, item, когда):
         sid = e.get("segment_id")
         if not isinstance(sid, str) or not sid:
             continue
-        a, b = e.get("start_ms"), e.get("end_ms")
-        свой = type(a) is int and type(b) is int and con.execute(
-            "select 1 from transcript_segments s join transcripts t on t.id=s.transcript_id "
-            "where s.id=? and t.event_id=? and s.start_ms<=? and ?<=? and ?<=s.end_ms",
-            (sid, event_id, a, a, b, b)).fetchone()
-        if not свой:
-            mi.audit(con, "evidence_rejected", ("rule", "call_project"), "commitment", oid,
-                     {"why": "сегмент не из расшифровки события или интервал за границами",
-                      "segment_id": sid, "start_ms": a if type(a) is int else None,
-                      "end_ms": b if type(b) is int else None}, когда)
-            continue
         con.execute("insert into evidence_refs(id,object_kind,object_id,kind,segment_id,"
                     "start_ms,end_ms,producer,created) values(?,?,?,?,?,?,?,?,?)",
-                    (mi.uuid7(), "commitment", oid, "audio", sid, a, b, "model", когда))
+                    (mi.uuid7(), "commitment", oid, "audio", sid, e["start_ms"], e["end_ms"],
+                     "model", когда))
         n += 1
     return n
 
@@ -423,6 +453,20 @@ def run(event_id, vault, root=None):
     if blob:
         ev["payload"]["audio_until"] = blob["audio_until"]
     canon = canon_map(vault)
+    # evidence сверяется с реестром до рендера: карточка рисует только
+    # принятые ссылки, пункт с отклонённой — в ревью, не в карточку (ADR п.3)
+    extraction = _сверить_с_реестром(con, event_id, extraction)
+    когда = mi.now_iso()
+    # каждая отклонённая ссылка — строка аудита (ADR п.3), и у пункта, который
+    # из-за неё карточки не получил, тоже: объекта нет, адрес — событие
+    with mi.транзакция(con):
+        for key in ("requests", "commitments", "changed_instructions"):
+            for n, it in enumerate(extraction.get(key) or [], 1):
+                for о in it.get("evidence_rejected") or []:
+                    mi.audit(con, "evidence_rejected", ("rule", "call_project"), "event",
+                             event_id, dict(о, list=key, item=n, why="сегмент не из "
+                                            "расшифровки события или интервал за границами"),
+                             когда)
     cards = all_cards(ev, extraction, canon, _из_реестра(con), _свободный(vault, con))
     written = write_cards(vault, cards)
     # Реестр узнаёт о карточке тем же прогоном, а не ночным переносом: id
@@ -431,7 +475,7 @@ def run(event_id, vault, root=None):
     # транзакцией с переносом, по пункту извлечения, из которого карточка.
     пункты = _пункты(dict(extraction, event_id=event_id))
     тексты = dict(cards)
-    спорные, когда = [], mi.now_iso()
+    спорные = []
     for rel in written:
         if not li.вид_по_пути(rel):
             continue
@@ -444,7 +488,7 @@ def run(event_id, vault, root=None):
             fm, _ = context_pack.mb.frontmatter(тексты.get(rel, ""))
             пункт = пункты.get(fm.get("source_id"))
             if пункт is not None:
-                _evidence_в_реестр(con, oid, event_id, пункт, когда)
+                _evidence_в_реестр(con, oid, пункт, когда)
     if спорные:
         # По построению `_свободный` сюда не попасть: путь либо свободен, либо
         # свой. Попали — значит реестр и волт разошлись так, как код не
