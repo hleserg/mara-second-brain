@@ -200,18 +200,19 @@ def _разослать(con, e, ид=None, продолжать=False):
     `error` (только с `продолжать`) — исключение транспорта, строка тоже
     ждёт; в `digests` он не пишется: там это по-прежнему `queued`."""
     итоги = []
-    for oid, исход in mi.из_outbox(con, _отправитель(e), kind=ВИД, ид=ид,
-                                   продолжать=продолжать):
-        row = con.execute("select object_id, payload_json from outbox where id=?",
-                          (oid,)).fetchone()
+
+    def итог(row, исход):
+        # внутри транзакции, переводящей строку outbox в конечное состояние
         did = json.loads(row["payload_json"])["digest_id"]
-        if исход != "error":
-            with mi.транзакция(con):
-                con.execute("update digests set state=? where id=?", (исход, did))
-                if исход == "sent":
-                    con.execute("update events set state='done' where id=?",
-                                (row["object_id"],))
+        con.execute("update digests set state=? where id=?", (исход, did))
+        if исход == "sent":
+            con.execute("update events set state='done' where id=?", (row["object_id"],))
         итоги.append((did, исход))
+    for oid, исход in mi.из_outbox(con, _отправитель(e), kind=ВИД, ид=ид,
+                                   продолжать=продолжать, итог=итог):
+        if исход == "error":
+            row = con.execute("select payload_json from outbox where id=?", (oid,)).fetchone()
+            итоги.append((json.loads(row["payload_json"])["digest_id"], исход))
     return итоги
 
 

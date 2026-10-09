@@ -1,5 +1,5 @@
 """Формат дайджеста (ТЗ §16). Рендер без модели и без сети."""
-import contextlib, io, os, sys, json, tempfile, subprocess, unittest, datetime
+import contextlib, io, os, sys, json, tempfile, subprocess, unittest, datetime, sqlite3
 from unittest import mock
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -485,6 +485,23 @@ class Outbox(_СтендДоставки):
         self.assertEqual(len(self.строки()), 1)
         self.assertEqual(self.дайджест()["id"], было)
         self.assertEqual(звали, [])
+
+    def test_исход_и_строка_outbox_ложатся_вместе(self):
+        """Codex по #120, P1: нет окна, где outbox уже `sent`, а дайджест ещё
+        `queued` — тогда строку не взял бы никто, а ретрай послал бы снова."""
+        self.доставка("sent")
+        # сорвём запись `digests` после отправки — как смерть процесса между
+        # пометкой outbox и исходом: триггер роняет транзакцию целиком
+        self.con.execute("create trigger обрыв before update on digests begin "
+                         "select raise(abort, 'смоделированный обрыв после отправки'); end")
+        self.addCleanup(self.con.execute, "drop trigger if exists обрыв")
+        with self.assertRaises(sqlite3.IntegrityError):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        self.con.execute("drop trigger обрыв")
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"]), ("sending", 1),
+                         "строка не конечная — уйдёт по аренде, а не потеряется")
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("queued", "projected"))
 
     def test_outbox_в_командной_строке(self):
         r = subprocess.run([sys.executable, os.path.join(СКРИПТЫ, "call_digest.py"),

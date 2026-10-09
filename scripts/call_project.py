@@ -640,6 +640,18 @@ def _завести(vault, item, due, note, когда, event):
             "text": "завёл «%s»%s" % (item, " до " + due if due else "")}
 
 
+def _вернуть_карточку(vault, out, found):
+    """Снять с диска то, что записала правка: заведённую карточку убрать,
+    поправленной вернуть прежний текст (он в `found[0]["text"]`)."""
+    if out.get("created"):
+        try:
+            os.remove(os.path.join(vault, out["created"]))
+        except FileNotFoundError:
+            pass
+    elif out.get("applied") and found:
+        _atomic(found[0]["path"], found[0]["text"])
+
+
 def _в_реестр(con, vault, event, p, out, found, адреса, проверено, слияние, когда):
     """Хвост правки в реестре: перенос записанной карточки и событие аудита —
     одной транзакцией (§5.2, Т2.5: «след правки сохраняется»). Аудит пишется
@@ -764,7 +776,15 @@ def apply_correction(vault, event, con=None):
                    "text": "не нашёл «%s» среди открытых: %s"
                            % (item, "; ".join(открытые) or "список пуст")}
         if con is not None:
-            _в_реестр(con, vault, event, p, out, found, адреса, проверено, слияние, когда)
+            try:
+                _в_реестр(con, vault, event, p, out, found, адреса, проверено, слияние, когда)
+            except BaseException:
+                # Реестр откатился — откатываем и файл: иначе карточка уже
+                # с правкой, а строки нет, и повтор видит «уже так», так что
+                # реестр не догонит никогда (Codex по #120, P1). Файл — не
+                # транзакция, поэтому возвращаем прежний текст руками.
+                _вернуть_карточку(vault, out, found)
+                raise
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
     return out

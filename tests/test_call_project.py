@@ -726,6 +726,31 @@ class СледПравки(_СтендПравки):
         self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
         self.assertEqual(self.con.execute("select count(*) from revisions").fetchone()[0], 1)
 
+    def test_сбой_реестра_возвращает_карточку(self):
+        """Codex по #120, P1: реестр откатился — файл тоже, иначе повтор
+        видит «уже так», и реестр не догонит никогда."""
+        oid, rel = self.завести("покрасить забор", 1)
+        p = os.path.join(self.vault, rel)
+        with open(p, encoding="utf-8") as fh:
+            было_текст = fh.read()
+        было = mi.audit
+        mi.audit = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("сбой аудита"))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.правка(2, item="покрасить забор", status="done", note="заметка")
+            with self.assertRaises(RuntimeError):
+                self.правка(3, item="заменить крышу", status="open")
+        finally:
+            mi.audit = было
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), было_текст, "правленая карточка возвращена")
+        self.assertEqual(os.listdir(os.path.join(self.vault, "kb/commitments")),
+                         [os.path.basename(rel)], "заведённая карточка снята")
+        # и повтор правки после починки — настоящая правка, не «уже так»
+        out = self.правка(4, item="покрасить забор", status="done")
+        self.assertTrue(out["applied"])
+        self.assertEqual(out["version"], 2)
+
     def test_тревога_конфликта_и_её_аудит_одной_транзакцией(self):
         """Ревью #120, P3-1: упал аудит — нет и тревоги."""
         oid, _ = self.завести("покрасить забор", 1)

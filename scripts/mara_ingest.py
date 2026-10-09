@@ -731,8 +731,15 @@ def в_outbox(con, kind, payload, object_kind=None, object_id=None, когда=N
 
 
 def из_outbox(con, отправить, kind=None, object_id=None, ид=None, limit=100,
-              продолжать=False):
+              продолжать=False, итог=None):
     """Разослать ждущие строки outbox. Возвращает список `(id, исход)`.
+
+    `итог(row, исход)` — что вызывающий ведёт рядом со строкой (состояние
+    дайджеста, события): зовётся внутри той же транзакции, что переводит
+    строку в конечное состояние, — чтобы не было окна, где outbox уже
+    `sent`, а результат ещё нет: такую строку `--outbox` не взял бы
+    никогда, а ретрай шага послал бы второй раз (Codex по #120, P1).
+    Сорвался `итог` — строка остаётся `sending` и уйдёт по аренде.
 
     `отправить(kind, payload)` → исход: `sent`, `failed`, либо любая другая
     строка — «не сейчас» (нет транспорта, адресат не тот): строка
@@ -782,15 +789,18 @@ def из_outbox(con, отправить, kind=None, object_id=None, ид=None, l
                 raise
             итоги.append((r["id"], "error"))
             continue
-        if исход == "sent":
-            con.execute("update outbox set state='sent', sent=?, error=null where id=?",
-                        (когда, r["id"]))
-        elif исход == "failed":
-            con.execute("update outbox set state='failed', error=? where id=?",
-                        (исход, r["id"]))
-        else:
-            con.execute("update outbox set state='pending', error=? where id=?",
-                        (исход, r["id"]))
+        with транзакция(con):
+            if исход == "sent":
+                con.execute("update outbox set state='sent', sent=?, error=null "
+                            "where id=?", (когда, r["id"]))
+            elif исход == "failed":
+                con.execute("update outbox set state='failed', error=? where id=?",
+                            (исход, r["id"]))
+            else:
+                con.execute("update outbox set state='pending', error=? where id=?",
+                            (исход, r["id"]))
+            if итог is not None:
+                итог(r, исход)
         итоги.append((r["id"], исход))
     return итоги
 
