@@ -85,7 +85,7 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
             "id": {"type": "string",
                    "description": "код #xxxxxxxx из списка или полный id карточки; "
                                   "с ним правка ложится точно в неё, без поиска по словам"},
-            "expected_version": {"type": "integer",
+            "expected_version": {"type": "integer", "minimum": 1,
                                  "description": "версия карточки из прошлого ответа, если "
                                                 "есть; разошлась — сервер не правит, а "
                                                 "возвращает конфликт"},
@@ -179,8 +179,12 @@ class Брокер:
 
     def правка(self, args):
         """Инструмент mara_correction: одно событие на doctor, ответ — строкой."""
+        # по наличию, не по истинности: `expected_version: 0` обязан доехать
+        # до сервера и получить отказ, а не молча стать правкой без проверки
+        # (Codex по #118)
         payload = {k: args.get(k) for k in ("item", "status", "due", "note", "id",
-                                            "expected_version") if args.get(k)}
+                                            "expected_version")
+                   if args.get(k) not in (None, "")}
         # source_id — содержимое плюс минута: повтор вызова моделью в ту же
         # минуту — дубль, та же правка через час — новое событие
         # `expected_version` в ключе обязателен: ответ на конфликт сам велит
@@ -221,7 +225,12 @@ class Брокер:
                        applied.get("expected_version"),
                        (applied.get("current") or {}).get("status"),
                        applied.get("current_version")))
-        return applied.get("text") or json.dumps(applied, ensure_ascii=False)
+        текст = applied.get("text") or json.dumps(applied, ensure_ascii=False)
+        # id и версия — в ответ Маре словами: иначе ей неоткуда взять
+        # expected_version для следующей правки (Codex по #118)
+        if applied.get("id") and applied.get("version") is not None:
+            текст += " [id #%s, версия %s]" % (str(applied["id"])[-8:], applied["version"])
+        return текст
 
 
 def register(ctx) -> None:
@@ -336,6 +345,16 @@ def _demo():
     б._свежесть = time.monotonic()
     assert б.правка({"item": "прислать смету", "status": "done"}) == \
         "«прислать смету»: статус proposed → done"
+    # id и версия из ответа доезжают до Мары словами; ноль версии — до сервера
+    def с_версией(req, timeout=None):
+        тело = json.loads(req.data)
+        assert тело["payload"].get("expected_version") == 0, тело
+        return Ответ(json.dumps({"event_id": "c", "duplicate": False, "applied": {
+            "found": True, "text": "ок", "id": "01999999-0000-7000-8000-00005479d088",
+            "version": 2}}).encode())
+    б._open = с_версией
+    assert б.правка({"item": "x", "status": "done", "expected_version": 0}) == \
+        "ок [id #5479d088, версия 2]"
     assert б._свежесть is None, "после правки пакет считаем устаревшим"
     б._open = мёртвый
     assert б.правка({"item": "x", "status": "done"}).startswith("не дозвонился"), \
