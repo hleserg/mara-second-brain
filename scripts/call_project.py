@@ -655,9 +655,10 @@ def _в_реестр(con, vault, event, p, out, found, адреса, прове�
     eid = event.get("id")
     rel = out.get("card") if out.get("applied") else out.get("created")
     причина = "correction/%s" % eid
-    # ADR-0003 п.3: правка, найденная по словам или без `expected_version`,
-    # записывается с `legacy_title_match` в причине ревизии — долг виден в
-    # данных, а не только в ответе (`version_checked`)
+    # ADR-0003 п.3: правка, версию которой проверить было нечем или не
+    # просили (нет `expected_version` или строки в реестре), записывается с
+    # `legacy_title_match` в причине ревизии — долг виден в данных, а не
+    # только в ответе (`version_checked`)
     if out.get("applied") and not проверено:
         причина += "; legacy_title_match"
     with mi.транзакция(con):
@@ -721,7 +722,8 @@ def apply_correction(vault, event, con=None):
             # конфликт, а «уже так»; версию проверяем только у настоящего
             # изменения. Заметка — коммутативна: только `status` и `due`
             # двигают версию, а с ними она не пересекается, так что правка
-            # «одна заметка» на версию N-1 принимается, а не идёт в ревью.
+            # «одна заметка» на несовпавшую версию принимается, а не идёт
+            # в ревью.
             меняет_шапку = ((status and status != fm.get("status"))
                             or (due and due != fm.get("due")))
             row = _строка_реестра(con, found[0], адреса)
