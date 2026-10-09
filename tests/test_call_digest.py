@@ -438,6 +438,38 @@ class Outbox(_СтендДоставки):
         self.assertEqual((r["state"], r["attempts"]), ("sending", 1))
         self.assertEqual((self.дайджест()["state"], self.состояние()), ("queued", "projected"))
 
+    def test_шаг_падает_если_соперник_вернул_строку_в_очередь(self):
+        """Codex по #120, круг 5: соперник захватил строку, упал на
+        транспорте и вернул её в `pending` — исхода нет, дайджест `queued`;
+        шаг обязан уйти в ретрай, а не выйти нулём."""
+        звали = self.доставка("sent")
+        было = cd._разослать
+
+        def разослать(con, e, ид=None, продолжать=False):
+            # соперник держит строку, пока шаг выбирает (шагу — пусто),
+            # а потом падает на транспорте и возвращает её в очередь
+            другой = mi.connect(self.dir)
+            другой.execute("update outbox set state='sending', attempts=1, "
+                           "last_attempt=? where id=?", (mi.now_iso(), ид))
+            итоги = было(con, e, ид=ид, продолжать=продолжать)
+            другой.execute("update outbox set state='pending', error='OSError: сеть' "
+                           "where id=?", (ид,))
+            return итоги
+        cd._разослать = разослать
+        self.addCleanup(setattr, cd, "_разослать", было)
+        with self.assertRaises(RuntimeError):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        self.assertEqual(звали, [])
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"]), ("pending", 1))
+        self.assertIn("сеть", r["error"])
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("queued", "projected"))
+        cd._разослать = было
+        # ретрай шага: строку, вернувшуюся в очередь, берёт сам
+        self.доставка("sent")
+        cd.run(self.eid, root=self.dir, env_file=self.env())
+        self.assertEqual(self.состояние(), "done")
+
     def test_outbox_продолжает_после_сбоя_одной_строки(self):
         """Ревью #120, P3-3: исключение транспорта на одной строке не
         прерывает очередь, строка ждёт с `error`, остальные уходят."""

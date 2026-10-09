@@ -301,15 +301,18 @@ def run(event_id, root=None, env_file=None):
     if not итоги:
         # строку забрал `--outbox`, запущенный владельцем в ту же секунду
         # (ревью PR #120, P2-1). Успех шага — только если он уже довёл её
-        # до конца: живая `sending` значит «шлёт или умер после захвата»,
-        # и выйти нулём было бы закрыть работу над висящей строкой (Codex,
-        # круг 4) — ошибка, ретрай; `failed` — его отказ, тоже ретрай.
+        # до исхода, и судить об этом по дайджесту: `queued` значит, что
+        # исхода нет — соперник шлёт, умер после захвата (`sending`) или
+        # упал на транспорте и вернул строку в `pending` (Codex, круги 4 и
+        # 5); выйти нулём было бы закрыть работу над висящей строкой —
+        # ошибка, ретрай. `failed` — его отказ, тоже ретрай. Остальное
+        # (`sent`, `no-transport`, `not-private`) — исход, как у своей попытки.
         строка = con.execute("select state from outbox where id=?", (oid,)).fetchone()["state"]
         state = con.execute("select state from digests where id=?", (did,)).fetchone()[0]
-        if строка == "sending":
-            raise RuntimeError("дайджест %s: строку outbox держит другой процесс — "
-                               "ретрай после аренды" % event_id)
-        if строка == "failed":
+        if state == "queued":
+            raise RuntimeError("дайджест %s: строку outbox взял другой процесс (%s), исхода "
+                               "ещё нет — ретрай" % (event_id, строка))
+        if state == "failed" or строка == "failed":
             raise RuntimeError("телеграм не принял дайджест (другой процесс)")
         print("call_digest: %s — строку outbox взял другой процесс, состояние %s"
               % (event_id, state))
