@@ -127,6 +127,18 @@ class Evidence(unittest.TestCase):
         self.assertEqual([e["segment"] for e in it["evidence"]], ["s0001"])
         self.assertEqual(len(out["evidence_rejected"]), 1)
 
+    def test_индекс_пункта_в_отказе_считается_по_ответу_модели(self):
+        """Codex по #121, круг 4: пункт, выброшенный целиком, не сдвигает
+        индексы следующих — `item` указывает на место в ответе модели."""
+        пункт = {"explicit": True, "confidence": 0.95, "deadline_phrase": ""}
+        out = ce.normalize({"requests": [
+            dict(пункт, action="а", evidence=[{"segment": "s0009"}]),      # выброшен
+            dict(пункт, action="б", evidence=[{"segment": "s0001"}]),      # принят
+            dict(пункт, action="в", evidence=[{"segment": "s0001"}, {"segment": "s0008"}]),
+        ]}, OCC, СЕГМЕНТЫ)
+        self.assertEqual([(о["item"], о["segment"]) for о in out["evidence_rejected"]],
+                         [(0, "s0009"), (2, "s0008")])
+
     def test_подынтервал_внутри_сегмента_сохраняется_за_границами_нет(self):
         out = self.пункт([{"segment": "s0002", "start_ms": 25000, "end_ms": 30000}])
         self.assertEqual(out["requests"][0]["evidence"][0]["start_ms"], 25000)

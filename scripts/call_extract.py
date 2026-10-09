@@ -226,12 +226,12 @@ def normalize(raw, occurred_at, сегменты=None):
     out = {"evidence_rejected": []}
     for key in LISTS:
         items = []
-        for it in (raw.get(key) or []):
+        for номер, it in enumerate(raw.get(key) or []):
             it = dict(it)
             if not has_evidence(it):
                 continue
             валидные, отклонённые = сверить_evidence(it, сегменты)
-            for n, о in enumerate(отклонённые):
+            for о in отклонённые:
                 # в аудит — только адрес и причина (ТЗ §6.2): ни `action`
                 # (формулировка модели о сказанном), ни сырого объекта —
                 # модель кладёт в него и лишние ключи вроде цитаты
@@ -239,8 +239,11 @@ def normalize(raw, occurred_at, сегменты=None):
                 # метка — только если она метка: строка не по шаблону может
                 # оказаться цитатой из разговора (Codex по #121)
                 метка = МЕТКА.fullmatch(str(e.get("segment") or ""))
+                # `item` — номер пункта в ответе модели, не среди принятых:
+                # иначе после выброшенного пункта индексы съезжали бы и
+                # несколько отказов указывали бы на один (Codex, круг 4)
                 out["evidence_rejected"].append({
-                    "list": key, "item": len(items), "why": о["why"],
+                    "list": key, "item": номер, "why": о["why"],
                     "segment": метка.group(0) if метка else None,
                     "start_ms": e.get("start_ms") if type(e.get("start_ms")) is int else None,
                     "end_ms": e.get("end_ms") if type(e.get("end_ms")) is int else None})
