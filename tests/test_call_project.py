@@ -817,5 +817,97 @@ class СледПравки(_СтендПравки):
         self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
 
 
+class EvidenceВРеестре(unittest.TestCase):
+    """Т2.4, ADR-0004 п.5: ссылки обязательства ложатся в `evidence_refs`
+    одной транзакцией с переносом карточки, карточка рисует диапазон и код
+    сегмента, фронтматтер несёт машиночитаемый список."""
+
+    def setUp(self):
+        import call_asr
+        tmp = tempfile.mkdtemp()
+        self.root, self.vault = os.path.join(tmp, "b"), os.path.join(tmp, "v")
+        os.makedirs(self.root)
+        os.makedirs(os.path.join(self.vault, ".git"))
+        self.con = mi.connect(self.root)
+        self.eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "ev1",
+            "occurred_at": EVENT["occurred"], "ended_at": EVENT["ended"],
+            "payload": EVENT["payload"]})
+        segs = [{"segment_id": "s0011", "start_ms": 250000, "end_ms": 275000,
+                 "speaker": "unknown-A", "text": "смета"},
+                {"segment_id": "s0029", "start_ms": 700000, "end_ms": 725000,
+                 "speaker": "unknown-A", "text": "перезвоню"}]
+        call_asr.записать_сегменты(self.con, self.eid, None, segs)
+        self.сег = {r["seq"]: r["id"] for r in self.con.execute(
+            "select seq, id from transcript_segments")}
+
+    def извлечение(self, **правки):
+        extr = json.loads(json.dumps(EXTR))
+        extr["requests"][0]["evidence"] = [{"segment": "s0011", "segment_id": self.сег[11],
+                                            "start_ms": 252000, "end_ms": 260000}]
+        extr["commitments"][0]["evidence"] = [{"segment": "s0029", "segment_id": self.сег[29],
+                                               "start_ms": 700000, "end_ms": 725000}]
+        extr.update(правки)
+        mi.write_json(mi.extraction_path(self.root, self.eid), extr)
+        return extr
+
+    def строки(self):
+        return [dict(r) for r in self.con.execute(
+            "select * from evidence_refs order by start_ms")]
+
+    def test_ссылки_ложатся_в_реестр_вместе_с_объектом(self):
+        self.извлечение()
+        written = cp.run(self.eid, self.vault, self.root)
+        строки = self.строки()
+        self.assertEqual(len(строки), 2)
+        oids = {r["id"] for r in self.con.execute("select id from commitments")}
+        self.assertEqual({r["object_id"] for r in строки}, oids)
+        r = строки[0]
+        self.assertEqual((r["object_kind"], r["kind"], r["segment_id"], r["start_ms"],
+                          r["end_ms"], r["producer"]),
+                         ("commitment", "audio", self.сег[11], 252000, 260000, "model"))
+        карточка = [w for w in written if "smetu" in w or "prislat" in w][0]
+        text = _текст(os.path.join(self.vault, карточка))
+        self.assertIn("· 04:12–04:20 · #%s" % self.сег[11][-8:], text)
+        self.assertIn("evidence:\n  - %s 252000-260000" % self.сег[11], text)
+
+    def test_повтор_проекции_не_дублирует_ссылки(self):
+        self.извлечение()
+        cp.run(self.eid, self.vault, self.root)
+        cp.run(self.eid, self.vault, self.root)
+        self.assertEqual(len(self.строки()), 2)
+
+    def test_старое_извлечение_без_segment_id_строк_не_даёт(self):
+        mi.write_json(mi.extraction_path(self.root, self.eid), EXTR)
+        written = cp.run(self.eid, self.vault, self.root)
+        self.assertEqual(self.строки(), [])
+        text = _текст(os.path.join(self.vault, [w for w in written if "prislat" in w][0]))
+        self.assertIn("· 04:12\n", text, "старая метка без диапазона и кода")
+        self.assertNotIn("evidence:", text)
+
+    def test_чужой_сегмент_отклоняется_в_аудит(self):
+        другой, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "ev2",
+            "occurred_at": EVENT["occurred"], "payload": {}})
+        import call_asr
+        call_asr.записать_сегменты(self.con, другой, None, [
+            {"segment_id": "s0001", "start_ms": 0, "end_ms": 25000, "text": "чужое"}])
+        чужой = self.con.execute("select id from transcript_segments where seq=1").fetchone()[0]
+        extr = self.извлечение()
+        extr["requests"][0]["evidence"] = [{"segment": "s0001", "segment_id": чужой,
+                                            "start_ms": 0, "end_ms": 25000}]
+        extr["commitments"][0]["evidence"][0]["end_ms"] = 999999      # за границами
+        mi.write_json(mi.extraction_path(self.root, self.eid), extr)
+        cp.run(self.eid, self.vault, self.root)
+        self.assertEqual(self.строки(), [])
+        аудит = [dict(r) for r in self.con.execute(
+            "select * from audit_events where action='evidence_rejected'")]
+        self.assertEqual(len(аудит), 2)
+        self.assertEqual((аудит[0]["actor_type"], аудит[0]["actor_id"], аудит[0]["object_kind"]),
+                         ("rule", "call_project", "commitment"))
+        self.assertNotIn("чужое", аудит[0]["detail_json"])
+        self.assertNotIn("смета", аудит[0]["detail_json"])
+
+
 if __name__ == "__main__":
     unittest.main()

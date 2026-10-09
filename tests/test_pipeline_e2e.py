@@ -193,6 +193,12 @@ class Сквозной(unittest.TestCase):
                          ("s0001", seg["id"], seg["start_ms"], seg["end_ms"]))
         self.assertEqual((extr["extractor"], extr["prompt_version"]),
                          (self.ce.MODEL, self.ce.PROMPT_VERSION))
+        # ADR-0004 п.5: ссылка обязательства — строка evidence_refs на тот же сегмент
+        ref = con.execute("select e.segment_id, c.id from evidence_refs e join commitments c "
+                          "on c.id=e.object_id where c.origin_event=?",
+                          (self.event_id,)).fetchone()
+        self.assertIsNotNone(ref, "evidence_refs пуст")
+        self.assertEqual(ref["segment_id"], seg["id"])
 
     def test_карточка_разговора_в_волте(self):
         path = os.path.join(self.vault, "kb/conversations/2026-09-02-1405-anna.md")

@@ -47,11 +47,77 @@ def slug(text, default="unknown"):
     return out or default
 
 
-def stamp(item):
-    """Метка времени первого спана: «04:12». По ней открывают место в записи."""
-    ev = (item.get("evidence") or [{}])[0]
-    ms = int(ev.get("start_ms") or 0)
+def _ммсс(ms):
     return "%02d:%02d" % (ms // 60000, (ms % 60000) // 1000)
+
+
+def stamp(item):
+    """Метка времени первой ссылки: «04:12–04:37» у ссылки на сегмент
+    реестра, «04:12» у старой, где конца не было. По ней открывают место в
+    записи (ADR-0004 п.5)."""
+    ev = (item.get("evidence") or [{}])[0]
+    a = int(ev.get("start_ms") or 0)
+    b = ev.get("end_ms")
+    if ev.get("segment_id") and isinstance(b, int) and b > a:
+        return "%s–%s" % (_ммсс(a), _ммсс(b))
+    return _ммсс(a)
+
+
+def _код_сегмента(item):
+    """Хвост `segment_id` первой ссылки — восемь знаков (ADR-0002), чтобы
+    сторож пересборки и владелец могли сослаться на строку реестра."""
+    ev = (item.get("evidence") or [{}])[0]
+    sid = ev.get("segment_id")
+    return " · #%s" % sid[-8:] if isinstance(sid, str) and sid else ""
+
+
+def _evidence_список(item):
+    """Список `evidence` во фронтматтер: машиночитаемо, чтобы проекция была
+    полной и пересобираемой (§4.8) — только ссылки на сегменты реестра."""
+    return ["%s %d-%d" % (e["segment_id"], e["start_ms"], e["end_ms"])
+            for e in item.get("evidence") or []
+            if isinstance(e.get("segment_id"), str) and e.get("segment_id")]
+
+
+def _evidence_в_реестр(con, oid, event_id, item, когда):
+    """ADR-0004 п.1, п.3: строки `evidence_refs` обязательства — по одной на
+    ссылку с `segment_id`. Сохраняется только ссылка, чей сегмент принадлежит
+    расшифровке того же события и чей интервал лежит в границах сегмента;
+    остальное — `audit_events` (`evidence_rejected`, актор `rule`). Повтор
+    проекции заменяет строки с `producer = model`, а не кладёт рядом. Старые
+    извлечения без `segment_id` строк не дают: ссылка без референта — не
+    evidence. Возвращает число записанных."""
+    con.execute("delete from evidence_refs where object_kind='commitment' and object_id=? "
+                "and producer='model'", (oid,))
+    n = 0
+    for e in item.get("evidence") or []:
+        sid = e.get("segment_id")
+        if not isinstance(sid, str) or not sid:
+            continue
+        a, b = e.get("start_ms"), e.get("end_ms")
+        свой = type(a) is int and type(b) is int and con.execute(
+            "select 1 from transcript_segments s join transcripts t on t.id=s.transcript_id "
+            "where s.id=? and t.event_id=? and s.start_ms<=? and ?<=? and ?<=s.end_ms",
+            (sid, event_id, a, a, b, b)).fetchone()
+        if not свой:
+            mi.audit(con, "evidence_rejected", ("rule", "call_project"), "commitment", oid,
+                     {"why": "сегмент не из расшифровки события или интервал за границами",
+                      "segment_id": sid, "start_ms": a if type(a) is int else None,
+                      "end_ms": b if type(b) is int else None}, когда)
+            continue
+        con.execute("insert into evidence_refs(id,object_kind,object_id,kind,segment_id,"
+                    "start_ms,end_ms,producer,created) values(?,?,?,?,?,?,?,?,?)",
+                    (mi.uuid7(), "commitment", oid, "audio", sid, a, b, "model", когда))
+        n += 1
+    return n
+
+
+def _пункты(extraction):
+    """Ключ `source_id` карточки обязательства → пункт извлечения, из
+    которого она сделана (та же нумерация, что в `commitment_cards`)."""
+    return {"commitment/%s/%s/%d" % (extraction.get("event_id"), key, n): it
+            for key in ("requests", "commitments", "changed_instructions")
+            for n, it in enumerate(extraction.get(key) or [], 1)}
 
 
 def when(event):
@@ -243,7 +309,7 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                            oid, native)
             owner = OWNER if key != "requests" else (it.get("owner") or OWNER)
             body = ["- Обещание: %s" % scrub(action),
-                    "- Откуда: [[%s]] · %s" % (conv, stamp(it))]
+                    "- Откуда: [[%s]] · %s%s" % (conv, stamp(it), _код_сегмента(it))]
             if it.get("deadline_phrase"):
                 body.append("- Прозвучало о сроке: «%s»" % scrub(it["deadline_phrase"]))
             if it.get("supersedes"):
@@ -279,7 +345,7 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                  ("supersedes", yaml_str(it["supersedes"]) if it.get("supersedes") else None),
                  ("pipeline_version", str(mi.PIPELINE_VERSION)),
                  ("valid_from", event.get("ended") or event.get("occurred"))],
-                lists=[("audience", ["mara"])])
+                lists=[("audience", ["mara"]), ("evidence", _evidence_список(it))])
             out.append((path, fm + "\n" + text))
     return out
 
@@ -357,12 +423,28 @@ def run(event_id, vault, root=None):
     if blob:
         ev["payload"]["audio_until"] = blob["audio_until"]
     canon = canon_map(vault)
-    written = write_cards(vault, all_cards(ev, extraction, canon,
-                                           _из_реестра(con), _свободный(vault, con)))
+    cards = all_cards(ev, extraction, canon, _из_реестра(con), _свободный(vault, con))
+    written = write_cards(vault, cards)
     # Реестр узнаёт о карточке тем же прогоном, а не ночным переносом: id
-    # в шапке и ключ строки — одно и то же с первой секунды (Т2.2).
-    спорные = [rel for rel in written if li.вид_по_пути(rel) and li.перенести_карточку(
-        con, vault, rel, актор=("projector", "call_project", "проекция звонка")) is None]
+    # в шапке и ключ строки — одно и то же с первой секунды (Т2.2). Вместе
+    # с объектом — его evidence (ADR-0004 п.5): строки `evidence_refs` одной
+    # транзакцией с переносом, по пункту извлечения, из которого карточка.
+    пункты = _пункты(dict(extraction, event_id=event_id))
+    тексты = dict(cards)
+    спорные, когда = [], mi.now_iso()
+    for rel in written:
+        if not li.вид_по_пути(rel):
+            continue
+        with mi.транзакция(con):
+            oid = li.перенести_карточку(
+                con, vault, rel, актор=("projector", "call_project", "проекция звонка"))
+            if oid is None:
+                спорные.append(rel)
+                continue
+            fm, _ = context_pack.mb.frontmatter(тексты.get(rel, ""))
+            пункт = пункты.get(fm.get("source_id"))
+            if пункт is not None:
+                _evidence_в_реестр(con, oid, event_id, пункт, когда)
     if спорные:
         # По построению `_свободный` сюда не попасть: путь либо свободен, либо
         # свой. Попали — значит реестр и волт разошлись так, как код не
