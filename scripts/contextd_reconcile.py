@@ -710,7 +710,11 @@ def база_цела(con, root):
     восстановление из копии (`docs/backup-core.md`), а не починка руками.
     """
     out = []
-    итог = con.execute("pragma quick_check").fetchall()
+    try:
+        итог = con.execute("pragma quick_check").fetchall()
+    except sqlite3.DatabaseError as e:
+        # совсем битая база: quick_check не отчитывается, а падает
+        итог = [("%s: %s" % (type(e).__name__, e),)]
     if not (len(итог) == 1 and итог[0][0] == "ok"):
         out.append(находка("база-повреждена", "error",
                            "quick_check contextd.db: %s — восстанавливать из копии"

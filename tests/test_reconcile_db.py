@@ -39,8 +39,9 @@ class БазаЦела(unittest.TestCase):
         # sqlite_master): одна страница посередине после миграции 3 могла
         # оказаться свободной, и quick_check её не видел
         with open(db, "r+b") as fh:
-            fh.seek(4096 * 2)
-            fh.write(b"\xff" * max(size - 4096 * 2, 512))
+            начало = max(4096 * 2, size // 2 - 2 * 4096)
+            fh.seek(начало)
+            fh.write(b"\xff" * min(4 * 4096, size - начало - 4096))
         self.con = mi.connect(self.root)
         f = rc.база_цела(self.con, self.root)
         self.assertEqual(self.виды(f), ["база-повреждена"], f)
