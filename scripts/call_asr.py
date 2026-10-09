@@ -172,12 +172,19 @@ def run(event_id, root=None):
     segs = transcribe_spans(ASR_URL or vault_common.нужен_адрес(
         "MARA_ASR_URL", "коробка с whisper"), plan,
         lambda x, y: cut_wav(audio, x, y), движок)
-    out = write_jsonl(mi.transcript_path(root, event_id), segs)
-    # файл — для следующего шага, строки — для evidence (Т5.1, ADR-0004);
-    # строки и переход события — одной транзакцией (§5.2)
+    # Сначала строки и переход события одной транзакцией (§5.2), потом файл.
+    # Порядок — инвариант, на который опирается `call_extract`: файл без
+    # строки `transcripts` может быть только расшифровкой до Т5.1 (legacy),
+    # потому что после Т5.1 файл не появляется раньше зафиксированных строк.
+    # В обратном порядке смерть между файлом и фиксацией давала бы файл
+    # свежего прогона без строк, и сверка ставила бы по нему извлечение как
+    # по legacy — с evidence без segment_id (Codex по #121, круг 3). Смерть
+    # после фиксации и до файла безопасна: ретрай шага заведёт новую
+    # расшифровку, а извлечение по строкам файла не требует.
     with mi.транзакция(con):
         записать_сегменты(con, event_id, ev["blob_sha256"], segs, движок)
         con.execute("update events set state='transcribed' where id=?", (event_id,))
+    out = write_jsonl(mi.transcript_path(root, event_id), segs)
     print("call_asr: %s — кусков %d, сегментов %d" % (event_id, len(plan), len(segs)))
     return out
 

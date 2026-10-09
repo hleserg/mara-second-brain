@@ -144,6 +144,35 @@ class Реестр(unittest.TestCase):
         tid, сег = call_asr.сегменты_события(self.con, self.eid)
         self.assertEqual((tid, sorted(сег)), (b, [1]), "сверка идёт по последней")
 
+    def test_строки_фиксируются_раньше_файла(self):
+        """Codex по #121, круг 3: файл без строки `transcripts` — только
+        legacy. Значит, `run` обязан фиксировать строки до файла: смерть
+        между ними не должна оставлять файл свежего прогона без строк."""
+        self.con.execute("insert into blobs(sha256,path,bytes,mime,created) "
+                         "values(?,?,?,?,?)", ("ab" * 32, __file__, 1, "audio/x", "t"))
+        self.con.execute("update events set blob_sha256=? where id=?", ("ab" * 32, self.eid))
+        порядок = []
+        было = (call_asr.duration_ms, call_asr.transcribe_spans, call_asr.write_jsonl,
+                call_asr.ASR_URL)
+        call_asr.duration_ms = lambda path: 1000
+        call_asr.transcribe_spans = lambda base, plan, cutter, движок=None: self.segs
+
+        def файл(path, segs):
+            порядок.append(("файл", mi.connect(self.dir).execute(
+                "select count(*) from transcripts").fetchone()[0]))
+            raise OSError("диск кончился до файла")
+        call_asr.write_jsonl = файл
+        call_asr.ASR_URL = "http://127.0.0.1:1"
+        try:
+            with self.assertRaises(OSError):
+                call_asr.run(self.eid, self.dir)
+        finally:
+            (call_asr.duration_ms, call_asr.transcribe_spans, call_asr.write_jsonl,
+             call_asr.ASR_URL) = было
+        self.assertEqual(порядок, [("файл", 1)], "строки зафиксированы до записи файла")
+        self.assertEqual(self.con.execute("select state from events").fetchone()[0],
+                         "transcribed")
+
     def test_без_расшифровки_пусто(self):
         self.assertEqual(call_asr.сегменты_события(self.con, self.eid), (None, {}))
 
