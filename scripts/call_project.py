@@ -79,6 +79,13 @@ def _evidence_список(item):
             if isinstance(e.get("segment_id"), str) and e.get("segment_id")]
 
 
+# Списки извлечения, пункты которых проекция рисует со ссылкой на запись:
+# три первых дают карточки обязательств, остальные — строки в карточке
+# разговора (`conversation_card`). Сверка — для всех (Codex по #122).
+СО_ССЫЛКАМИ = ("requests", "commitments", "changed_instructions",
+               "decisions", "open_questions", "constraints", "followups")
+
+
 def _сверить_с_реестром(con, event_id, extraction):
     """ADR-0004 п.3 и п.5 на пути проекции: до рендера каждая ссылка с
     `segment_id` сверяется с реестром — сегмент принадлежит расшифровке
@@ -91,7 +98,7 @@ def _сверить_с_реестром(con, event_id, extraction):
     мог отвергнуть (ревью PR #122). Ссылки без `segment_id` (извлечения до
     Т2.4) сверить нечем — остаются как есть, строк реестра не дают."""
     out = json.loads(json.dumps(extraction))
-    for key in ("requests", "commitments", "changed_instructions"):
+    for key in СО_ССЫЛКАМИ:
         for it in out.get(key) or []:
             принятые, отклонённые = [], []
             for e in it.get("evidence") or []:
@@ -140,6 +147,37 @@ def _evidence_в_реестр(con, oid, item, когда):
                      "model", когда))
         n += 1
     return n
+
+
+def _отозвать_evidence(con, vault, event_id, extraction, когда):
+    """Повторная проекция (база восстановлена старее извлечения, расшифровка
+    переделана): пункт, прежде бывший карточкой, теперь в ревью — карточка в
+    этот прогон не рисуется, но его объект, проекция и строки `evidence_refs`
+    от прошлого прогона остались и выдают отвергнутое за каноническое
+    (Codex по #122). Отзываем то, что реестр вправе отозвать сам: строки
+    `evidence_refs` с `producer = model`, с аудитом `evidence_withdrawn` на
+    объект. Объект и файл карточки остаются: карточка — территория владельца
+    (он мог её править), расхождение проекции с реестром — работа сторожа
+    пересборки (Т2.6), а не молчаливого удаления."""
+    native = {"commitment/%s/%s/%d" % (event_id, key, n)
+              for key in ("requests", "commitments", "changed_instructions")
+              for n, it in enumerate(extraction.get(key) or [], 1)
+              if it.get("disposition") == "task"}
+    for row in con.execute("select id, source_native_id from commitments where "
+                           "source_native_id like ?", ("commitment/%s/%%" % event_id,)):
+        if row["source_native_id"] in native:
+            continue
+        with mi.транзакция(con):
+            n = con.execute("delete from evidence_refs where object_kind='commitment' and "
+                            "object_id=? and producer='model'", (row["id"],)).rowcount
+            if n:
+                mi.audit(con, "evidence_withdrawn", ("rule", "call_project"), "commitment",
+                         row["id"], {"event": event_id, "refs": n,
+                                     "why": "пункт ушёл в ревью при повторной проекции"},
+                         когда)
+                print("call_project: %s — у объекта %s отозвано ссылок evidence: %d, "
+                      "карточка осталась, разберёт сторож пересборки"
+                      % (event_id, row["id"], n), file=sys.stderr)
 
 
 def _пункты(extraction):
@@ -460,7 +498,7 @@ def run(event_id, vault, root=None):
     # каждая отклонённая ссылка — строка аудита (ADR п.3), и у пункта, который
     # из-за неё карточки не получил, тоже: объекта нет, адрес — событие
     with mi.транзакция(con):
-        for key in ("requests", "commitments", "changed_instructions"):
+        for key in СО_ССЫЛКАМИ:
             for n, it in enumerate(extraction.get(key) or [], 1):
                 for о in it.get("evidence_rejected") or []:
                     mi.audit(con, "evidence_rejected", ("rule", "call_project"), "event",
@@ -469,6 +507,7 @@ def run(event_id, vault, root=None):
                              когда)
     cards = all_cards(ev, extraction, canon, _из_реестра(con), _свободный(vault, con))
     written = write_cards(vault, cards)
+    _отозвать_evidence(con, vault, event_id, extraction, когда)
     # Реестр узнаёт о карточке тем же прогоном, а не ночным переносом: id
     # в шапке и ключ строки — одно и то же с первой секунды (Т2.2). Вместе
     # с объектом — его evidence (ADR-0004 п.5): строки `evidence_refs` одной

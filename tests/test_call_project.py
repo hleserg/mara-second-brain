@@ -916,6 +916,70 @@ class EvidenceВРеестре(unittest.TestCase):
             self.assertNotIn("чужое", r["detail_json"])
             self.assertNotIn("смета", r["detail_json"])
 
+    def test_повторная_проекция_отзывает_ссылки_пункта_ушедшего_в_ревью(self):
+        """Codex по #122: после восстановления базы пункт, бывший карточкой,
+        уходит в ревью — его прежние строки `evidence_refs` отзываются с
+        аудитом; объект и файл карточки остаются (территория владельца)."""
+        self.извлечение()
+        written = cp.run(self.eid, self.vault, self.root)
+        карточка = [w for w in written if "prislat" in w][0]
+        oid = self.con.execute("select id from commitments where source_native_id=?",
+                               ("commitment/%s/requests/1" % self.eid,)).fetchone()[0]
+        self.assertEqual(len([r for r in self.строки() if r["object_id"] == oid]), 1)
+        # «расшифровка переделана»: ссылка пункта теперь в чужой сегмент
+        другой, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "ev9",
+            "occurred_at": EVENT["occurred"], "payload": {}})
+        import call_asr
+        call_asr.записать_сегменты(self.con, другой, None, [
+            {"segment_id": "s0001", "start_ms": 0, "end_ms": 25000, "text": "чужое"}])
+        чужой = self.con.execute("select id from transcript_segments where seq=1").fetchone()[0]
+        extr = self.извлечение()
+        extr["requests"][0]["evidence"] = [{"segment": "s0001", "segment_id": чужой,
+                                            "start_ms": 0, "end_ms": 25000}]
+        mi.write_json(mi.extraction_path(self.root, self.eid), extr)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            cp.run(self.eid, self.vault, self.root)
+        self.assertEqual([r for r in self.строки() if r["object_id"] == oid], [],
+                         "отвергнутое больше не выдаётся за каноническое")
+        self.assertEqual(len(self.строки()), 1, "второй пункт — на месте")
+        self.assertIn("отозвано ссылок evidence: 1", err.getvalue())
+        а = self.con.execute("select object_id, detail_json from audit_events where "
+                             "action='evidence_withdrawn'").fetchone()
+        self.assertEqual(а["object_id"], oid)
+        self.assertEqual(json.loads(а["detail_json"])["refs"], 1)
+        self.assertTrue(os.path.exists(os.path.join(self.vault, карточка)), "файл не трогаем")
+        self.assertEqual(self.con.execute("select count(*) from commitments").fetchone()[0], 2)
+        # и повтор — без второго отзыва: отзывать уже нечего
+        with contextlib.redirect_stderr(io.StringIO()):
+            cp.run(self.eid, self.vault, self.root)
+        self.assertEqual(self.con.execute("select count(*) from audit_events where "
+                                          "action='evidence_withdrawn'").fetchone()[0], 1)
+
+    def test_разделы_разговора_тоже_сверяются(self):
+        """Codex по #122: `decisions`/`open_questions` рисуются в карточке
+        разговора через `stamp` — чужой сегмент там тоже отклоняется."""
+        другой, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "ev8",
+            "occurred_at": EVENT["occurred"], "payload": {}})
+        import call_asr
+        call_asr.записать_сегменты(self.con, другой, None, [
+            {"segment_id": "s0001", "start_ms": 0, "end_ms": 25000, "text": "чужое"}])
+        чужой = self.con.execute("select id from transcript_segments where seq=1").fetchone()[0]
+        extr = self.извлечение(decisions=[{"action": "договорились о цене", "explicit": True,
+                                           "confidence": 0.9, "disposition": "task",
+                                           "evidence": [{"segment": "s0001", "segment_id": чужой,
+                                                         "start_ms": 0, "end_ms": 25000}]}])
+        mi.write_json(mi.extraction_path(self.root, self.eid), extr)
+        written = cp.run(self.eid, self.vault, self.root)
+        conv = _текст(os.path.join(self.vault, [w for w in written
+                                                if w.startswith("kb/conversations/")][0]))
+        self.assertIn("договорились о цене", conv)
+        self.assertNotIn("#" + чужой[-8:], conv, "чужой код в карточке разговора не рисуется")
+        а = [json.loads(r[0]) for r in self.con.execute(
+            "select detail_json from audit_events where action='evidence_rejected'")]
+        self.assertEqual([(x["list"], x["item"]) for x in а], [("decisions", 1)])
+
     def test_ссылка_без_интервала_равна_сегменту(self):
         """ADR п.1: подынтервал необязателен — без него ссылка равна сегменту."""
         extr = self.извлечение()
