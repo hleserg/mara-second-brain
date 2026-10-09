@@ -330,5 +330,27 @@ class Манифест(unittest.TestCase):
             self.assertIn("не смог открыть", r.stderr)
 
 
+    def test_подмена_файла_между_описью_и_таром_не_ломает_копию(self):
+        """Codex по #117, P2: воркер подменил расшифровку после хеша, но до
+        tar.add — архив не сходился с собственной описью. Теперь и опись, и
+        тар читают одну копию из стейджа."""
+        import unittest.mock
+        исходный = self.мод.архив
+
+        def подмена(root, снимок_db, манифест, dst, файлы_мелочи=None):
+            with open(os.path.join(self.root, "transcripts", "e1.jsonl"), "w") as fh:
+                fh.write("подменили после хеша\n")
+            return исходный(root, снимок_db, манифест, dst, файлы_мелочи)
+
+        with unittest.mock.patch.object(self.мод, "архив", подмена), \
+                unittest.mock.patch.dict(os.environ, {"MARA_BACKUP_ALLOW_SAME_DEV": "1"}), \
+                unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_НОСИТЕЛЕЙ",
+                                           os.path.join(self.tmp, "state", "core-targets.json")):
+            os.makedirs(os.path.join(self.tmp, "state"), exist_ok=True)
+            r = self.мод.прогон(self.root, [self.цель], self.пароль, 7,
+                                os.path.join(self.tmp, "work"), аудио=False, drill=True)
+        self.assertTrue(r, r)
+
+
 if __name__ == "__main__":
     unittest.main()

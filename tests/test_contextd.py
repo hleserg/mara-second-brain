@@ -1,6 +1,6 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
 import contextlib, os, sys, io, json, hashlib, socket, stat, struct
-import tempfile, threading, time, unittest, unittest.mock
+import tempfile, threading, time, unittest, unittest.mock, sqlite3
 import urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timedelta
 
@@ -969,16 +969,23 @@ class ТестГонкаFinishStored(unittest.TestCase):
         второй = mi.connect(каталог)
 
         class Опережающий:
-            """Соединение, пускающее конкурента вперёд прямо перед update."""
+            """Соединение, пускающее конкурента вперёд между проверкой состояния
+            и переходом — ровно когда оба уже решили, что событие их.
+
+            Вклиниваться на самом `update` больше нельзя: с Т2.1в переход и
+            работа идут под `begin immediate`, и конкурент внутри чужой
+            транзакции того же потока ждал бы её до таймаута — а
+            последовательность он и так получает от самой транзакции."""
 
             def __init__(self, con):
                 self.con, self.сработал = con, False
 
             def execute(self, sql, args=()):
-                if "state='stored'" in sql and not self.сработал:
+                r = self.con.execute(sql, args)
+                if "select 1 from events" in sql and not self.сработал:
                     self.сработал = True
                     contextd.finish_stored(второй, каталог, eid)
-                return self.con.execute(sql, args)
+                return r
 
             def __getattr__(self, name):
                 return getattr(self.con, name)
@@ -1151,6 +1158,184 @@ class ТестКривойДлины(unittest.TestCase):
         каталог_блоба = os.path.dirname(mi.blob_path(каталог, sha, "m4a"))
         self.assertEqual([f for f in os.listdir(каталог_блоба) if f.endswith(".part")],
                          [])
+
+
+class ТестВоркерЖивучий(unittest.TestCase):
+    def test_воркер_переживает_database_is_locked(self):
+        """Ревью P1: одна OperationalError из claim_job убивала единственный
+        поток воркера до рестарта демона."""
+        import sqlite3 as sq
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone", "source_id": "w",
+                                    "payload": {}})
+        mi.add_job(con, eid, "digest")
+        стоп = threading.Event()
+        вызовов = []
+        настоящий = mi.claim_job
+
+        def claim(c, *a, **kw):
+            вызовов.append(1)
+            if len(вызовов) == 1:
+                raise sq.OperationalError("database is locked")
+            стоп.set()
+            return None
+
+        with unittest.mock.patch.object(mi, "claim_job", claim), \
+                unittest.mock.patch.object(threading.Event, "wait", lambda self, t=None: None):
+            contextd.worker(стоп, каталог)
+        self.assertEqual(len(вызовов), 2, "после ошибки воркер не продолжил")
+
+
+class ТестКвитанции(unittest.TestCase):
+    """Т2.9, ТЗ §4.4: приём принимает `idempotency_key`, повтор с тем же
+    ключом получает тот же ответ — сохранённый, а не пересчитанный."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.srv = contextd.make_server(self.dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        self.con = mi.connect(self.dir)
+        self.dev, self.token = contextd.pair(self.con, "телефон")
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def post(self, path, тело, заголовки=(), token=None):
+        req = urllib.request.Request(self.base + path, method="POST",
+                                     data=тело if isinstance(тело, bytes)
+                                     else json.dumps(тело).encode("utf-8"))
+        req.add_header("Content-Type", "application/json" if not isinstance(тело, bytes)
+                       else "application/octet-stream")
+        req.add_header("Authorization", "Bearer " + (token or self.token))
+        for k, v in заголовки:
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read() or b"{}"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}"), dict(e.headers)
+
+    def звонок(self, тело, **ещё):
+        sha = hashlib.sha256(тело).hexdigest()
+        return dict({"kind": "call", "source": "phone", "source_id": sha,
+                     "blob": {"sha256": sha, "bytes": len(тело), "ext": "wav"}}, **ещё)
+
+    def test_повтор_с_тем_же_ключом_отдаёт_ту_же_квитанцию(self):
+        тело = b"RIFF\x00\x00\x00\x00WAVEfmt " + b"a" * 40
+        ev = self.звонок(тело, idempotency_key="k1")
+        код, первый, _ = self.post("/v1/ingest/event", ev)
+        self.assertEqual(код, 200)
+        self.assertTrue(первый["need_blob"])
+        # заливка меняет мир: пересчёт теперь дал бы need_blob=false
+        sha = ev["blob"]["sha256"]
+        код, _, _ = self.post("/v1/ingest/audio?event=" + первый["event_id"], тело)
+        self.assertEqual(код, 200)
+        код, повтор, заголовки = self.post("/v1/ingest/event", ev)
+        self.assertEqual(код, 200)
+        self.assertEqual(повтор, первый, "квитанция, а не новый расчёт")
+        self.assertEqual(заголовки.get("Idempotent-Replay"), "true")
+        self.assertEqual(self.con.execute("select count(*) from events").fetchone()[0], 1)
+        r = self.con.execute("select event_id, source from ingest_attempts").fetchone()
+        self.assertEqual((r["event_id"], r["source"]), (первый["event_id"], "phone"))
+        # без ключа — честный пересчёт, как раньше
+        код, свежий, заголовки = self.post("/v1/ingest/event", self.звонок(тело))
+        self.assertEqual((свежий["duplicate"], свежий["need_blob"]), (True, False))
+        self.assertNotIn("Idempotent-Replay", заголовки)
+
+    def test_ключ_в_заголовке_тоже_ключ(self):
+        ev = {"kind": "message", "source": "sms", "source_id": "m1",
+              "payload": {"text": "x"}}
+        код, первый, _ = self.post("/v1/ingest/event", ev, [("Idempotency-Key", "h1")])
+        код, повтор, заголовки = self.post("/v1/ingest/event", ev, [("Idempotency-Key", "h1")])
+        self.assertEqual(повтор, первый)
+        self.assertEqual(заголовки.get("Idempotent-Replay"), "true")
+
+    def test_ключ_живёт_на_устройстве_а_не_на_базе(self):
+        ev = {"kind": "message", "source": "sms", "source_id": "m1",
+              "payload": {"text": "x"}, "idempotency_key": "same"}
+        _, первый, _ = self.post("/v1/ingest/event", ev)
+        _, token2 = contextd.pair(self.con, "второй")
+        код, ответ, заголовки = self.post("/v1/ingest/event", ev, token=token2)
+        self.assertEqual(код, 200)
+        self.assertNotIn("Idempotent-Replay", заголовки, "чужая квитанция не отдаётся")
+        self.assertTrue(ответ["duplicate"], "а событие — то же, по дедупу")
+        self.assertEqual(self.con.execute("select count(distinct device_id) from "
+                                          "ingest_attempts").fetchone()[0], 2)
+
+    def test_кривой_ключ_это_400(self):
+        ev = {"kind": "message", "source": "sms", "source_id": "m1",
+              "payload": {"text": "x"}}
+        for ключ in (7, "", "x" * 129, ["a"]):
+            код, ответ, _ = self.post("/v1/ingest/event", dict(ev, idempotency_key=ключ))
+            self.assertEqual(код, 400, repr(ключ))
+            self.assertIn("idempotency_key", ответ["error"])
+        self.assertEqual(self.con.execute("select count(*) from events").fetchone()[0], 0)
+
+    def test_правка_словами_не_держит_замок_базы_пока_ждёт_флок(self):
+        """Ревью P1: правка под `begin immediate` ждала флок волта (bisync
+        держит его минутами), и заливки с воркером получали database is
+        locked по таймауту."""
+        import fcntl
+        vault = self.srv.vault
+        os.makedirs(os.path.join(vault, ".git"), exist_ok=True)
+        os.makedirs(os.path.join(vault, "kb/commitments"), exist_ok=True)
+        contextd.set_scopes(self.con, self.dev, ["correction"])
+        замок = open(os.path.join(vault, ".git/vault-git.lock"), "w")
+        fcntl.flock(замок, fcntl.LOCK_EX)
+        итог = {}
+
+        def правка():
+            итог["r"] = self.post("/v1/ingest/event", {
+                "kind": "correction", "source": "mara", "source_id": "c1",
+                "payload": {"item": "забор", "status": "open"}, "idempotency_key": "k"})
+
+        t = threading.Thread(target=правка, daemon=True)
+        t.start()
+        time.sleep(0.5)
+        другое = sqlite3.connect(os.path.join(self.dir, "contextd.db"), timeout=2,
+                                 isolation_level=None)
+        t0 = time.monotonic()
+        другое.execute("begin immediate")          # заливка в соседнем потоке
+        другое.execute("rollback")
+        self.assertLess(time.monotonic() - t0, 1.5, "замок базы держится под флоком волта")
+        fcntl.flock(замок, fcntl.LOCK_UN)
+        замок.close()
+        t.join(10)
+        код, ответ, _ = итог["r"]
+        self.assertEqual(код, 200)
+        self.assertIn("created", ответ["applied"])
+        # квитанция дописана результатом правки
+        self.assertEqual(contextd.квитанция(self.con, self.dev, "k")["applied"]["created"],
+                         ответ["applied"]["created"])
+
+    def test_гонка_двух_повторов_отдаёт_квитанцию_победителя(self):
+        """Второй с тем же ключом упёрся в уникальный индекс — его транзакция
+        откатилась целиком, а наружу ушла квитанция первого."""
+        ev = {"kind": "message", "source": "sms", "source_id": "m1",
+              "payload": {"text": "x"}, "idempotency_key": "race"}
+        _, первый, _ = self.post("/v1/ingest/event", ev)
+        # подделываем гонку: квитанция победителя появилась между проверкой и
+        # записью — подменяем `квитанция` так, чтобы первый вызов промахнулся
+        настоящая = contextd.квитанция
+        вызовов = []
+
+        def подмена(con, dev, ключ):
+            вызовов.append(1)
+            if len(вызовов) == 1:
+                return None
+            return настоящая(con, dev, ключ)
+
+        with unittest.mock.patch.object(contextd, "квитанция", подмена):
+            код, повтор, заголовки = self.post("/v1/ingest/event", ev)
+        self.assertEqual((код, повтор), (200, первый))
+        self.assertEqual(заголовки.get("Idempotent-Replay"), "true")
+        self.assertEqual(self.con.execute("select count(*) from ingest_attempts").fetchone()[0],
+                         1, "вторая квитанция не записалась")
 
 
 class ТестScopes(unittest.TestCase):

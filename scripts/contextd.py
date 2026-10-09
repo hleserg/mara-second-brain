@@ -48,7 +48,7 @@ bind. Но из локалки он виден, и это осознанный �
 `call`.
 """
 import os, sys, io, re, json, time, socket, hashlib, secrets, argparse
-import threading, subprocess
+import threading, subprocess, sqlite3
 from datetime import datetime, timedelta
 import tempfile
 import urllib.parse
@@ -835,23 +835,71 @@ class Handler(BaseHTTPRequestHandler):
                 err = call_project.check_correction(data.get("payload") or {})
                 if err:
                     return self.say(400, {"error": err}, поля=data)
-            eid, dup = mi.put_event(con, data)
-            need = need_blob(con, self.server.root, eid,
-                             (data.get("blob") or {}).get("sha256"))
-            applied = None
+            # Квитанция идемпотентности (ТЗ §4.4, Т2.9): клиент прислал
+            # `idempotency_key` — повтор с тем же ключом получает тот же
+            # ответ, что и первый, а не новый расчёт. Дедуп события это не
+            # заменяет: он гарантирует, что дубля нет, а не что ответ
+            # стабилен — `need_blob` у повтора после заливки уже `false`.
+            ключ = data.pop("idempotency_key", None)
+            if ключ is None:
+                # пустой заголовок — отсутствие ключа, а не отказ: 400 у
+                # телефона терминален
+                ключ = self.headers.get("Idempotency-Key") or None
+            if ключ is not None and not (isinstance(ключ, str) and 0 < len(ключ) <= 128):
+                return self.say(400, {"error": "idempotency_key — строка до 128 знаков"},
+                                поля=data)
+            было = квитанция(con, data["device_id"], ключ) if ключ else None
+            if было is not None:
+                print(log_line("POST", p.path, 200, data) + " replay", flush=True)
+                return self.say(200, было, ещё={"Idempotent-Replay": "true"})
+            try:
+                # событие и квитанция — одной короткой транзакцией (§5.2
+                # п.1). Правка словами — вне её: она ждёт флок волта, который
+                # минутами держит bisync, и держать под этим ожиданием замок
+                # записи базы значило бы ронять заливки и воркер по таймауту
+                # (ревью PR #118, P1). Квитанция дописывается второй короткой
+                # транзакцией; упал между ними — повтор получит квитанцию с
+                # `applied: null`, и это правда о том, что успело случиться.
+                with транзакция(con):
+                    eid, dup = mi.put_event(con, data)
+                    need = need_blob(con, self.server.root, eid,
+                                     (data.get("blob") or {}).get("sha256"))
+                    ответ = {"event_id": eid, "duplicate": dup, "need_blob": need,
+                             "applied": None}
+                    if ключ:
+                        con.execute(
+                            "insert into ingest_attempts(id,source,device_id,"
+                            "idempotency_key,received,outcome,event_id) "
+                            "values(?,?,?,?,?,?,?)",
+                            (mi.uuid7(), data.get("source"), data["device_id"], ключ,
+                             mi.now_iso(), json.dumps(ответ, ensure_ascii=False), eid))
+            except sqlite3.IntegrityError:
+                # два повтора с одним ключом разом: проиграл — отдаём квитанцию
+                # победителя, своё откатилось вместе с транзакцией
+                было = квитанция(con, data["device_id"], ключ) if ключ else None
+                if было is None:
+                    raise
+                return self.say(200, было, ещё={"Idempotent-Replay": "true"})
             if kind == "correction" and not dup:
                 # синхронно, а не через очередь: Серёга ждёт ответа Мары, а не
-                # ночного крона. Писатель карточек один — call_project.
+                # ночного крона. Писатель карточек один — call_project; свои
+                # транзакции у него внутри.
                 try:
-                    applied = call_project.apply_correction(self.server.vault,
-                                                            dict(data, id=eid), con)
+                    applied = call_project.apply_correction(
+                        self.server.vault, dict(data, id=eid), con)
                 except Exception as e:
-                    print("correction %s: %s: %s" % (eid, type(e).__name__, e), flush=True)
+                    print("correction %s: %s: %s" % (eid, type(e).__name__, e),
+                          flush=True)
                     applied = {"found": False,
                                "text": "не применил: %s" % type(e).__name__}
+                ответ["applied"] = applied
+                if ключ:
+                    con.execute("update ingest_attempts set outcome=? where device_id=? "
+                                "and idempotency_key=?",
+                                (json.dumps(ответ, ensure_ascii=False),
+                                 data["device_id"], ключ))
             print(log_line("POST", p.path, 200, data), flush=True)
-            return self.say(200, {"event_id": eid, "duplicate": dup,
-                                  "need_blob": need, "applied": applied})
+            return self.say(200, ответ)
         if p.path == "/v1/context/query":
             # пакетов по сущностям нет и не заводится, пока now.md влезает в
             # бюджет (docs/superpowers/specs/2026-09-02-context-broker-design.md).
@@ -938,6 +986,13 @@ def длина(handler):
     return int(s) if s.isascii() and s.isdigit() and len(s) <= 19 else None
 
 
+def квитанция(con, device_id, ключ):
+    """Сохранённый ответ на приём с этим ключом у этого устройства, или None."""
+    row = con.execute("select outcome from ingest_attempts where device_id=? and "
+                      "idempotency_key=?", (device_id, ключ)).fetchone()
+    return json.loads(row["outcome"]) if row else None
+
+
 def blob_row(con, sha256):
     """Что база знает о блобе. Спрашиваем её, а не файловую систему: путь
     считается от даты загрузки, поэтому августовская запись, долитая в
@@ -976,12 +1031,25 @@ def finish_stored(con, root, event_id):
     дайджест в телеграм. `rowcount` показывает, кто
     успел первым.
     """
-    if con.execute("update events set state='stored' "
-                   "where id=? and state in ('new','stale','quarantined')",
-                   (event_id,)).rowcount != 1:
+    if not con.execute("select 1 from events where id=? and state in "
+                       "('new','stale','quarantined')", (event_id,)).fetchone():
         return
+    # Манифест — до перехода: файл идемпотентен, а база обязана не говорить
+    # «stored» раньше, чем результат лежит на диске (§5.2). Переход и работа
+    # — одной транзакцией: смерть демона между ними оставляла звонок, который
+    # никто не расшифрует (ADR-0005; `tests/test_reconcile_stored.py`), и
+    # лечила его только сверка.
     mi.write_json(mi.manifest_path(root, event_id), manifest(con, root, event_id))
-    mi.add_job(con, event_id, "asr")
+    with транзакция(con):
+        if con.execute("update events set state='stored' "
+                       "where id=? and state in ('new','stale','quarantined')",
+                       (event_id,)).rowcount != 1:
+            return
+        mi.add_job(con, event_id, "asr")
+
+
+# Транзакция живёт в mara_ingest: ей пользуются и приём, и ledger_import.
+транзакция = mi.транзакция
 
 
 def need_blob(con, root, event_id, sha256):
@@ -1130,6 +1198,11 @@ def ingest_audio(con, root, event_id, поток, n=None):
     try:
         with os.fdopen(fd, "wb") as fh:
             got, размер = слить(поток, n or 0, fh)
+            # на диск, а не в страничный кэш, до rename: §5.2 принимает
+            # метаданные блоба «после fsync/rename», и до этой строки
+            # «после rename» было, а «после fsync» — нет
+            fh.flush()
+            os.fsync(fh.fileno())
         if got != want:
             # Событие с этим хешем не долить уже некому: телефон на 409
             # пересчитывает файл с начала (`Core.kt:143-145`), а дописанный
@@ -1184,11 +1257,15 @@ def ingest_audio(con, root, event_id, поток, n=None):
         if os.path.exists(tmp):
             os.unlink(tmp)
     # or ignore, а не or replace: две параллельные загрузки одного аудио не
-    # повод обнулять pin и audio_until уже лежащей строки
-    con.execute("insert or ignore into blobs(sha256,path,bytes,mime,created,audio_until)"
-                " values(?,?,?,?,?,?)",
-                (want, path, размер, mime, mi.now_iso(), audio_until()))
-    finish_stored(con, root, event_id)
+    # повод обнулять pin и audio_until уже лежащей строки. Строка блоба,
+    # переход события и работа — одной транзакцией: файл уже на диске, и
+    # база либо знает о нём целиком, либо не знает вовсе — половину (блоб
+    # без события) чинила только сверка.
+    with транзакция(con):
+        con.execute("insert or ignore into blobs(sha256,path,bytes,mime,created,audio_until)"
+                    " values(?,?,?,?,?,?)",
+                    (want, path, размер, mime, mi.now_iso(), audio_until()))
+        finish_stored(con, root, event_id)
     return 200, {"event_id": event_id, "blob_sha256": want, "bytes": размер}
 
 
@@ -1346,14 +1423,34 @@ def run_step(kind, event_id):
 def worker(stop, root):
     con = mi.connect(root)
     while not stop.is_set():
-        job = mi.claim_job(con)
-        if not job:
+        try:
+            job = mi.claim_job(con)
+            if not job:
+                stop.wait(5)
+                continue
+            ok, err = run_step(job["kind"], job["event_id"])
+            закрыть_работу(con, job, ok, err)
+            print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
+                                          "ок" if ok else "сбой"), flush=True)
+        except sqlite3.OperationalError as e:
+            # `database is locked` — чужая долгая транзакция, не конец
+            # света: поток воркера у нас один и без перезапуска, и одна
+            # такая ошибка до этой строки останавливала конвейер до рестарта
+            # демона (ревью PR #118, P1). Аренда работы истечёт сама.
+            print("%s воркер: %s — подожду" % (mi.now_iso(), e), flush=True)
             stop.wait(5)
-            continue
-        ok, err = run_step(job["kind"], job["event_id"])
+
+
+def закрыть_работу(con, job, ok, err):
+    """Итог шага и следующая работа — одной транзакцией (§5.2).
+
+    Результат шага (расшифровка, извлечение, карточки) к этому моменту уже
+    на диске — его пишет подпроцесс до своего нулевого кода. Смерть воркера
+    между `finish_job` и `add_job` оставляла `done` без продолжения, и
+    цепочку доводила сверка (`транскрипт_без_извлечения`).
+    """
+    with транзакция(con):
         mi.finish_job(con, job["id"], ok, err)
-        print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
-                                      "ок" if ok else "сбой"), flush=True)
         if ok and job["kind"] in NEXT:
             mi.add_job(con, job["event_id"], NEXT[job["kind"]])
 

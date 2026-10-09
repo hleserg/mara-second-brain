@@ -62,7 +62,9 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
             "basic-memory: карточку правит doctor и тут же пересобирает список "
             "открытых. item — теми же словами, что в списке «Открытые "
             "обязательства»; если такого нет и status=open — заведётся новая. "
-            "Два похожих — сервер попросит уточнить, переспроси Серёгу.")
+            "Два похожих — сервер попросит уточнить, переспроси Серёгу. "
+            "У пункта списка есть код #xxxxxxxx — передай его в id, тогда правка "
+            "ляжет точно в эту карточку.")
 
 СХЕМА = {
     "name": "mara_correction",
@@ -80,6 +82,13 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
                     "description": "срок как YYYY-MM-DD; «пятница» переведи в дату сам"},
             "note": {"type": "string",
                      "description": "что ещё сказал Серёга, одной строкой"},
+            "id": {"type": "string",
+                   "description": "код #xxxxxxxx из списка или полный id карточки; "
+                                  "с ним правка ложится точно в неё, без поиска по словам"},
+            "expected_version": {"type": "integer", "minimum": 1,
+                                 "description": "версия карточки из прошлого ответа, если "
+                                                "есть; разошлась — сервер не правит, а "
+                                                "возвращает конфликт"},
         },
         "required": ["item"],
     },
@@ -170,10 +179,20 @@ class Брокер:
 
     def правка(self, args):
         """Инструмент mara_correction: одно событие на doctor, ответ — строкой."""
-        payload = {k: args.get(k) for k in ("item", "status", "due", "note") if args.get(k)}
+        # по наличию, не по истинности: `expected_version: 0` обязан доехать
+        # до сервера и получить отказ, а не молча стать правкой без проверки
+        # (Codex по #118)
+        payload = {k: args.get(k) for k in ("item", "status", "due", "note", "id",
+                                            "expected_version")
+                   if args.get(k) not in (None, "")}
         # source_id — содержимое плюс минута: повтор вызова моделью в ту же
         # минуту — дубль, та же правка через час — новое событие
-        ключ = "|".join(str(payload.get(k) or "") for k in ("item", "status", "due", "note"))
+        # `expected_version` в ключе обязателен: ответ на конфликт сам велит
+        # «повтори с expected_version=N», и без него повтор в ту же минуту
+        # дедупился бы в событие-конфликт и отвечал «уже принимал» (ревью
+        # PR #118, P1)
+        ключ = "|".join(str(payload.get(k) or "") for k in (
+            "item", "status", "due", "note", "id", "expected_version"))
         событие = {"kind": "correction", "source": "mara",
                    "source_id": hashlib.sha256(
                        (ключ + "|" + time.strftime("%Y-%m-%dT%H:%M")).encode("utf-8")).hexdigest(),
@@ -196,7 +215,22 @@ class Брокер:
         if data.get("duplicate"):
             return "эту правку уже принимал, повторять не стал"
         applied = data.get("applied") or {}
-        return applied.get("text") or json.dumps(applied, ensure_ascii=False)
+        if applied.get("error") == "version_conflict":
+            # ADR-0003 п.4: конфликт — нормальный ответ, не авария; Мара
+            # говорит об этом Серёге и не повторяет вслепую
+            return ("конфликт версий: «%s» уже изменилась (сейчас версия %s, "
+                    "ждали %s, статус %s). Ничего не правил — переспроси Серёгу и "
+                    "повтори с expected_version=%s, если всё ещё актуально."
+                    % (applied.get("title") or "?", applied.get("current_version"),
+                       applied.get("expected_version"),
+                       (applied.get("current") or {}).get("status"),
+                       applied.get("current_version")))
+        текст = applied.get("text") or json.dumps(applied, ensure_ascii=False)
+        # id и версия — в ответ Маре словами: иначе ей неоткуда взять
+        # expected_version для следующей правки (Codex по #118)
+        if applied.get("id") and applied.get("version") is not None:
+            текст += " [id #%s, версия %s]" % (str(applied["id"])[-8:], applied["version"])
+        return текст
 
 
 def register(ctx) -> None:
@@ -311,6 +345,16 @@ def _demo():
     б._свежесть = time.monotonic()
     assert б.правка({"item": "прислать смету", "status": "done"}) == \
         "«прислать смету»: статус proposed → done"
+    # id и версия из ответа доезжают до Мары словами; ноль версии — до сервера
+    def с_версией(req, timeout=None):
+        тело = json.loads(req.data)
+        assert тело["payload"].get("expected_version") == 0, тело
+        return Ответ(json.dumps({"event_id": "c", "duplicate": False, "applied": {
+            "found": True, "text": "ок", "id": "01999999-0000-7000-8000-00005479d088",
+            "version": 2}}).encode())
+    б._open = с_версией
+    assert б.правка({"item": "x", "status": "done", "expected_version": 0}) == \
+        "ок [id #5479d088, версия 2]"
     assert б._свежесть is None, "после правки пакет считаем устаревшим"
     б._open = мёртвый
     assert б.правка({"item": "x", "status": "done"}).startswith("не дозвонился"), \
@@ -326,6 +370,30 @@ def _demo():
         return Ответ(b'{"event_id": "correction_1", "duplicate": true, "applied": null}')
     б._open = дубль
     assert "уже" in б.правка({"item": "x", "status": "done"}), "повтор в ту же минуту — дубль"
+
+    # id и expected_version уезжают в payload, конфликт возвращается словами
+    def конфликт(req, timeout=None):
+        тело = json.loads(req.data)
+        assert тело["payload"]["id"] == "#5479d088" and тело["payload"]["expected_version"] == 2, тело
+        return Ответ(json.dumps({"event_id": "c", "duplicate": False, "applied": {
+            "found": True, "error": "version_conflict", "title": "смета",
+            "expected_version": 2, "current_version": 3,
+            "current": {"status": "done"}}}).encode())
+    б._open = конфликт
+    текст = б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088",
+                      "expected_version": 2})
+    assert "конфликт версий" in текст and "версия 3" in текст, текст
+    # повтор «как велено», с другой версией, — другое событие, не дубль
+    ключи = []
+
+    def ловец(req, timeout=None):
+        ключи.append(json.loads(req.data)["source_id"])
+        return Ответ(json.dumps({"event_id": "c", "duplicate": False,
+                                 "applied": {"found": True, "text": "ок"}}).encode())
+    б._open = ловец
+    б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088", "expected_version": 2})
+    б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088", "expected_version": 3})
+    assert ключи[0] != ключи[1], "повтор с новой версией дедупился бы в конфликт"
 
     # register: хук и инструмент встают, без Hermes
     класс = {}

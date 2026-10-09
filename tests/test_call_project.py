@@ -396,6 +396,24 @@ class Идентичность(unittest.TestCase):
                           ревизии[1]["reason"]), ("human", "owner", "correction/correction_2"))
         self.assertEqual(con.execute("select version from commitments").fetchone()[0], 2)
 
+    def test_правка_только_заметкой_доезжает_до_реестра(self):
+        """Codex по #117, P1: заметка без смены шапки давала `changed: {}`,
+        и карточка в реестр не переносилась."""
+        root, vault, con = self.стенд()
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        событие = {"id": "c1", "occurred_at": "2026-09-02T18:00:00+03:00",
+                   "payload": {"item": "забор", "status": "open"}}
+        oid = cp.apply_correction(vault, событие, con)["id"]
+        out = cp.apply_correction(vault, dict(событие, id="c2",
+                                              payload={"item": "забор", "note": "краска куплена"}),
+                                  con)
+        self.assertTrue(out.get("applied"))
+        self.assertEqual(out["id"], oid)
+        з = con.execute("select field, new_json from corrections where object_id=? "
+                        "and field='note'", (oid,)).fetchone()
+        self.assertIsNotNone(з, "заметка не дошла до corrections")
+        self.assertIn("краска куплена", з["new_json"])
+
     def test_заведённая_правкой_на_занятом_пути_получает_различитель_из_id(self):
         root, vault, con = self.стенд()
         os.makedirs(os.path.join(vault, "kb/commitments"))
@@ -410,6 +428,175 @@ class Идентичность(unittest.TestCase):
         oid = _id(_текст(os.path.join(vault, новая)))
         self.assertEqual(новая, занятый[:-3] + "--%s.md" % oid[-8:])
         self.assertIn("title: другое", _текст(os.path.join(vault, занятый)))
+
+
+class ПравкаПоКоду(unittest.TestCase):
+    """Т2.3, часть 2 (ADR-0003 п.3–4): код карточки в пакете и в контракте
+    `mara_correction`, `expected_version` и конфликт вместо перезаписи."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.root, self.vault = os.path.join(tmp, "b"), os.path.join(tmp, "v")
+        os.makedirs(self.root)
+        os.makedirs(os.path.join(self.vault, ".git"))
+        os.makedirs(os.path.join(self.vault, "kb/commitments"))
+        self.con = mi.connect(self.root)
+
+    def завести(self, item, n):
+        out = cp.apply_correction(self.vault, {"id": "c%d" % n, "occurred_at": когда(),
+                                               "payload": {"item": item, "status": "open"}},
+                                  self.con)
+        return out["id"], out["created"]
+
+    def правка(self, n, **payload):
+        return cp.apply_correction(self.vault, {"id": "c%d" % n, "occurred_at": когда(),
+                                                "payload": payload}, self.con)
+
+    def test_ответ_несёт_id_и_версию(self):
+        oid, rel = self.завести("покрасить забор", 1)
+        self.assertEqual(uuid.UUID(oid).version, 7)
+        out = self.правка(2, item="покрасить забор", status="done")
+        self.assertEqual((out["id"], out["version"]), (oid, 2))
+
+    def test_код_из_пакета_попадает_точно_в_карточку(self):
+        a, _ = self.завести("позвонить маме", 1)
+        # второе название без общих слов сверх «позвонить»: иначе поиск по
+        # словам счёл бы его правкой первой карточки и не завёл вторую
+        b, _ = self.завести("позвонить в банк про ипотеку", 2)
+        # по словам «позвонить» — двое, по коду — одна
+        out = self.правка(3, item="позвонить", status="done")
+        self.assertIn("ambiguous", out)
+        out = self.правка(4, item="позвонить", status="done", id="#" + b[-8:])
+        self.assertTrue(out["found"])
+        self.assertEqual(out["id"], b)
+        self.assertEqual(self.con.execute("select status from commitments where id=?",
+                                          (a,)).fetchone()[0], "open", "соседа не тронули")
+        out = self.правка(5, item="позвонить", status="cancelled", id=a)
+        self.assertEqual(out["id"], a, "полный id тоже адрес")
+
+    def test_неизвестный_код_не_угадывается_по_словам(self):
+        self.завести("покрасить забор", 1)
+        out = self.правка(2, item="покрасить забор", status="done", id="#00000000")
+        self.assertFalse(out["found"])
+        self.assertIn("не нашёл карточку с кодом #00000000", out["text"])
+        self.assertEqual(self.con.execute("select status from commitments").fetchone()[0],
+                         "open")
+
+    def test_расхождение_версии_это_конфликт_а_не_перезапись(self):
+        oid, rel = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")      # версия 2
+        out = self.правка(3, item="покрасить забор", status="done", id=oid,
+                          expected_version=1)
+        self.assertEqual(out["error"], "version_conflict")
+        self.assertEqual((out["entity_id"], out["expected_version"], out["current_version"]),
+                         (oid, 1, 2))
+        self.assertEqual(out["current"]["status"], "open")
+        self.assertEqual(out["attempted_patch"]["status"], "done")
+        self.assertIn("не правил", out["text"])
+        r = self.con.execute("select status, version from commitments").fetchone()
+        self.assertEqual((r["status"], r["version"]), ("open", 2), "ничего не применено")
+        with open(os.path.join(self.vault, rel), encoding="utf-8") as fh:
+            self.assertIn("status: open", fh.read())
+        тревога = self.con.execute("select kind, state, object_id, id from alerts").fetchone()
+        self.assertEqual(tuple(тревога)[:3], ("version_conflict", "open", oid))
+        self.assertEqual(тревога["id"], out["conflict_id"])
+
+    def test_совпавшая_версия_применяется_и_проверка_отмечена(self):
+        oid, _ = self.завести("покрасить забор", 1)
+        out = self.правка(2, item="покрасить забор", status="done", id=oid,
+                          expected_version=1)
+        self.assertTrue(out["found"] and out["version_checked"])
+        self.assertEqual(out["version"], 2)
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
+
+    def test_без_строки_в_реестре_версия_не_проверяется_и_это_сказано(self):
+        p = os.path.join(self.vault, "kb/commitments/x.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: забор\nid: 01999999-0000-7000-8000-000000000009\n"
+                     "type: commitment\nstatus: open\n---\n")
+        out = self.правка(1, item="забор", status="done", expected_version=5)
+        self.assertTrue(out["found"])
+        self.assertFalse(out["version_checked"])
+        self.assertEqual(self.con.execute("select status from commitments").fetchone()[0],
+                         "done", "карточка перенесена после правки")
+
+    def test_карточка_без_id_в_шапке_адресуется_id_из_ответа(self):
+        """Ревью P2: до `--write-ids` шапка без `id:`, а строка в реестре
+        есть — id из ответа обязан быть адресом, версия — проверяться."""
+        p = os.path.join(self.vault, "kb/commitments/x.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: забор\ntype: commitment\nstatus: open\n---\n")
+        out = self.правка(1, item="забор", due="2026-10-10")
+        oid = out["id"]
+        self.assertEqual(out["version"], 1)
+        with open(p, encoding="utf-8") as fh:
+            self.assertNotIn("\nid: ", fh.read(), "шапку перенос не правит")
+        out = self.правка(2, item="что угодно", status="done", id=oid, expected_version=1)
+        self.assertTrue(out["found"] and out["version_checked"])
+        self.assertEqual((out["id"], out["version"]), (oid, 2))
+        out = self.правка(3, item="забор", status="cancelled", expected_version=1)
+        self.assertEqual(out["error"], "version_conflict")
+
+    def test_уже_так_несёт_id_и_версию_и_не_конфликт(self):
+        """ADR-0003 п.5: правка без изменений — «уже так», даже со старой
+        версией; и адрес в ответе есть."""
+        oid, _ = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")      # версия 2
+        out = self.правка(3, item="покрасить забор", status="open", id=oid,
+                          expected_version=1)
+        self.assertNotIn("error", out)
+        self.assertIn("уже так", out["text"])
+        self.assertEqual((out["id"], out["version"]), (oid, 2))
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
+
+    def test_повтор_конфликта_не_плодит_тревог(self):
+        oid, _ = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")
+        a = self.правка(3, item="покрасить забор", status="done", id=oid, expected_version=1)
+        b = self.правка(4, item="покрасить забор", status="cancelled", id=oid,
+                        expected_version=1)
+        self.assertEqual(a["conflict_id"], b["conflict_id"])
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 1)
+
+    def test_код_в_верхнем_регистре_и_список_в_шапке(self):
+        oid, _ = self.завести("покрасить забор", 1)
+        out = self.правка(2, item="x", status="done", id="#" + oid[-8:].upper())
+        self.assertEqual(out["id"], oid)
+        p = os.path.join(self.vault, "kb/commitments/y.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: кривая\nid:\n  - a\n  - b\ntype: commitment\n"
+                     "status: open\n---\n")
+        out = self.правка(3, item="кривая", status="done", id="#" + oid[-8:])
+        self.assertEqual(out["id"], oid, "список в шапке не роняет и не ловится")
+
+    def test_два_совпадения_по_коду_несут_полные_id(self):
+        import unittest.mock
+        oid, _ = self.завести("забор", 1)
+        with unittest.mock.patch.object(cp, "_совпал", return_value=True):
+            self.завести("другое", 2)
+            out = self.правка(3, item="x", status="done", id="#" + oid[-8:])
+        self.assertIn("ambiguous_ids", out)
+        self.assertEqual(len(out["ambiguous_ids"]), 2)
+
+    def test_граница_доверия_для_id_и_версии(self):
+        self.assertIsNone(cp.check_correction({"item": "x", "status": "done",
+                                               "id": "#5479d088", "expected_version": 3}))
+        self.assertIn("id", cp.check_correction({"item": "x", "status": "done", "id": "../x"}))
+        self.assertIn("id", cp.check_correction({"item": "x", "status": "done", "id": "#abc"}))
+        self.assertIn("expected_version",
+                      cp.check_correction({"item": "x", "status": "done",
+                                           "expected_version": "много"}))
+        self.assertIn("expected_version",
+                      cp.check_correction({"item": "x", "status": "done", "expected_version": 0}))
+        self.assertIn("expected_version",
+                      cp.check_correction({"item": "x", "status": "done", "expected_version": "²"}))
+        self.assertIn("id", cp.check_correction({"item": "x", "status": "done", "id": ["a"]}))
+        self.assertIsNone(cp.check_correction({"item": "x", "status": "done",
+                                               "id": "#5479D088", "expected_version": "3"}))
+
+
+def когда():
+    return "2026-09-02T18:00:00+03:00"
 
 
 if __name__ == "__main__":

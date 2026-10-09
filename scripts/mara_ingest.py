@@ -336,12 +336,27 @@ def _откат_2(con):
         con.execute("drop table %s" % т)
 
 
+# Миграция 3 (Т2.9): квитанция идемпотентности — одна на устройство и ключ.
+# Уникальность нужна не для красоты: два повтора одного запроса в одну
+# секунду без неё проходили бы оба и писали две квитанции, а §4.4 обещает
+# один и тот же результат. Частичный индекс: строки без ключа (приём без
+# `idempotency_key`, старые телефоны) под уникальность не попадают.
+def _миграция_3(con):
+    con.execute("create unique index if not exists ingest_idem on "
+                "ingest_attempts(device_id, idempotency_key) "
+                "where idempotency_key is not null")
+
+
+def _откат_3(con):
+    con.execute("drop index if exists ingest_idem")
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
-МИГРАЦИИ = (_миграция_1, _миграция_2)
+МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3)
 # Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
 # ниже него только пустая база.
-ОТКАТЫ = (None, _откат_2)
+ОТКАТЫ = (None, _откат_2, _откат_3)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 
@@ -379,11 +394,15 @@ def _сдвинуть(con, цель=ВЕРСИЯ):
                 МИГРАЦИИ[v](con)
                 v += 1
             else:
-                if ОТКАТЫ[v - 1] is None:
-                    raise RuntimeError("contextd.db: версия %d — базлайн, "
-                                       "ниже не откатывается" % v)
-                ОТКАТЫ[v - 1](con)
-                v -= 1
+                # Вниз — весь путь одной транзакцией: отказ третьего шага
+                # (в новое уже писали) не должен оставлять базу на
+                # промежуточной версии, которую код уже не откроет.
+                while v > цель:
+                    if ОТКАТЫ[v - 1] is None:
+                        raise RuntimeError("contextd.db: версия %d — базлайн, "
+                                           "ниже не откатывается" % v)
+                    ОТКАТЫ[v - 1](con)
+                    v -= 1
             con.execute("pragma user_version=%d" % v)
             con.execute("commit")
         except BaseException:
@@ -461,6 +480,48 @@ def _migrate_cli():
     print("contextd.db: версия %d → %d, integrity_check: %s, "
           "foreign_key_check: %s" % (было, _версия(con), итог, ссылки))
     return 0 if итог == ссылки == "ok" else 1
+
+
+class транзакция:
+    """`begin immediate` … `commit`, откат на исключении (§5.2, Т2.1в).
+
+    Соединения приёма — в autocommit (`isolation_level=None`), и каждый
+    оператор был сам себе транзакцией. Внутри уже открытой транзакции блок
+    становится savepoint'ом: исключение откатывает ровно его, а не делает
+    вид, что всё хорошо (ревью PR #118, P2 — без savepoint полусостояние
+    вложенного шага коммитилось вместе с внешней транзакцией). Упавший
+    `commit` откатывает: иначе соединение потока остаётся в транзакции, и
+    все следующие блоки на нём «вложенные» и никогда не коммитят.
+    """
+    _n = 0
+
+    def __init__(self, con):
+        self.con, self.точка = con, None
+
+    def __enter__(self):
+        if self.con.in_transaction:
+            транзакция._n += 1
+            self.точка = "sp%d" % транзакция._n
+            self.con.execute("savepoint " + self.точка)
+        else:
+            self.con.execute("begin immediate")
+        return self
+
+    def __exit__(self, тип, *_):
+        if self.точка:
+            if тип:
+                self.con.execute("rollback to " + self.точка)
+            self.con.execute("release " + self.точка)
+            return False
+        if тип:
+            self.con.execute("rollback")
+            return False
+        try:
+            self.con.execute("commit")
+        except BaseException:
+            self.con.execute("rollback")
+            raise
+        return False
 
 
 def dedupe_key(source, source_id, blob_sha256=None):
@@ -637,6 +698,11 @@ def write_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
+        # fsync до rename: манифест — результат, раньше которого база не
+        # вправе сказать «stored» (§5.2); без него после сбоя питания файл
+        # есть, а байт в нём нет
+        fh.flush()
+        os.fsync(fh.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
     return path

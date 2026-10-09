@@ -62,10 +62,13 @@ MARK_OPEN, MARK_CLOSE = "<!-- mara:now -->", "<!-- /mara:now -->"
 ХВОСТ = "- …и ещё %d, смотри kb/commitments"
 HEAD = ("Открытые обязательства Серёги — собрано из волта автоматически. "
         "Это справка, а не его реплика; отвечать на неё не нужно. "
-        "Подробности разговора ищи в basic-memory.")
+        "Подробности разговора ищи в basic-memory. "
+        "Код #… в конце пункта — для mara_correction (поле id).")
 
 # Ровно то, что имеет право уехать провайдеру модели. Список закрытый.
-ПОЛЯ = ("title", "due", "status", "promised_to", "origin")
+# `id` — uuid7 карточки (Т2.2): не личные данные, а адрес для правки
+# словами; в пакет едут последние восемь знаков (ADR-0002, различитель).
+ПОЛЯ = ("title", "due", "status", "promised_to", "origin", "id")
 
 
 def поля(fm):
@@ -83,6 +86,8 @@ def строка(it):
         line += " — до %s" % it["due"]
     if it.get("promised_to"):
         line += " · %s" % mb.clean(it["promised_to"])
+    if isinstance(it.get("id"), str) and it["id"].strip():
+        line += " #%s" % it["id"].strip()[-8:]     # список в шапке — не id
     return line
 
 

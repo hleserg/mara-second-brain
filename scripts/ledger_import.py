@@ -336,20 +336,11 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
         else событие(_строка(fm.get("source_id"))))
     # Объект, ревизия, проекция и история — одной транзакцией (§5.2, Т2.1в):
     # падение между `update … version=N` и строкой `revisions` оставляло бы
-    # версию без ревизии навсегда (ревью PR #117, P3-8). Если зовущий уже
-    # внутри транзакции — не вкладываемся, SQLite этого не умеет.
-    своя = not con.in_transaction
-    if своя:
-        con.execute("begin immediate")
-    try:
+    # версию без ревизии навсегда (ревью PR #117, P3-8). Внутри чужой
+    # транзакции — savepoint: откат ровно этого шага (ревью PR #118, P2).
+    with mi.транзакция(con):
         _записать_объект(con, таблица, вид, oid, значения, новый, актор)
         правок = _проекция_и_история(con, rel, вид, oid, sha, fm, текст)
-    except BaseException:
-        if своя:
-            con.execute("rollback")
-        raise
-    if своя:
-        con.execute("commit")
     return новый, правок
 
 
@@ -716,7 +707,7 @@ def сверка(con, vault):
     доменные команды, и в обоих случаях не перенесённое.
     """
     итог, замечания = Counter(), []
-    видели = {}
+    видели, сошлись = {}, set()
     for rel, fm, _, текст in карточки(vault, "kb/commitments"):
         итог["карточек"] += 1
         if not fm:
@@ -752,6 +743,7 @@ def сверка(con, vault):
             continue
         row = con.execute("select id, status from commitments where id=?",
                           (row["id"],)).fetchone()
+        сошлись.add(row["id"])
         итог["строк"] += 1
         статус = _строка(fm.get("status")) or "proposed"
         if (row["status"] or "proposed") != статус:
@@ -777,10 +769,12 @@ def сверка(con, vault):
         if нет or чужие:
             замечания.append("%s: правок из журнала нет в базе %d, чужих в базе %d"
                              % (rel, len(нет), len(чужие)))
+    # Строки, за которыми в этом прогоне не встало ни одной карточки, — а не
+    # «без проекции»: у удалённой из волта карточки проекция остаётся, и по
+    # ней сверка зеленила объект, который проектор потом воскресил бы (Codex
+    # по #117, P1).
     итог["строк без карточки"] = con.execute(
-        "select count(*) from commitments where id not in "
-        "(select object_id from projections where object_kind='commitment')"
-    ).fetchone()[0]
+        "select count(*) from commitments").fetchone()[0] - len(сошлись)
     return итог, замечания
 
 
