@@ -63,11 +63,15 @@ ITEM = {
         "confidence": {"type": "number"},
         "supersedes": {"type": "string"},
         "new_state": {"type": "string"},
+        # ADR-0004 п.2: модель называет сегмент, а не миллисекунды — аудит
+        # показал, что секунды из промпта она пересчитывает, а не копирует.
+        # Подынтервал внутри сегмента необязателен и проверяется по границам.
         "evidence": {"type": "array", "items": {
             "type": "object",
-            "properties": {"start_ms": {"type": "integer"},
+            "properties": {"segment": {"type": "string"},
+                           "start_ms": {"type": "integer"},
                            "end_ms": {"type": "integer"}},
-            "required": ["start_ms", "end_ms"]}},
+            "required": ["segment"]}},
     },
     # explicit и deadline_phrase в обязательных не для красоты: необязательное
     # поле модель просто не заполняет, и «до пятницы» теряется вместе с
@@ -80,6 +84,10 @@ SCHEMA = {"type": "object",
                              [(k, {"type": "array", "items": {"type": "string"}})
                               for k in NAMES])}
 
+# ADR-0004 п.4: версия промпта поднимается при любой правке его текста —
+# иначе регрессионный корпус (Т5.5) сравнивает несравнимое. Ложится в
+# извлечение и в карточку рядом с именем модели.
+PROMPT_VERSION = 2
 PROMPT = """Ты разбираешь расшифровку телефонного разговора Сергея.
 
 Куда что класть:
@@ -99,8 +107,10 @@ PROMPT = """Ты разбираешь расшифровку телефонно�
   «побыстрее»); срока не было — пустая строка, даты не выдумывай;
 - explicit: true, если прозвучала прямая просьба или прямое обещание;
   false для мыслей вслух вроде «может быть, потом покрасим»;
-- у каждого пункта обязателен evidence со start_ms и end_ms того сегмента,
-  где это сказано; без него пункт не нужен;
+- у каждого пункта обязателен evidence — список сегментов, где это сказано,
+  вида {"segment": "s0003"}: идентификатор ровно тот, что в квадратных
+  скобках; времена не пересчитывай и не выдумывай; без evidence пункт не
+  нужен;
 - если новое указание отменяет прежнее, положи его в changed_instructions с
   supersedes (что отменено) и new_state (как теперь);
 - confidence — твоя честная уверенность от 0 до 1;
@@ -152,20 +162,79 @@ def parse_deadline(phrase, occurred_at):
     return None, False          # «побыстрее», «на днях», «как получится»
 
 
-def has_evidence(item):
-    ev = item.get("evidence") or []
-    return bool(ev) and all("start_ms" in e for e in ev)
+МЕТКА = re.compile(r"s(\d{4})")
 
 
-def normalize(raw, occurred_at):
-    """Ответ модели → то, с чем работает проекция. Правила ТЗ §9."""
+def сегменты_из(segs):
+    """Сегменты файла расшифровки → `{seq: {start_ms, end_ms, id}}` — форма,
+    в которой их ждёт `normalize`; `id` у файла нет (он в реестре)."""
     out = {}
+    for s in segs:
+        m = МЕТКА.fullmatch(str(s.get("segment_id") or ""))
+        if m:
+            out[int(m.group(1))] = {"start_ms": s["start_ms"], "end_ms": s["end_ms"],
+                                    "id": s.get("id")}
+    return out
+
+
+def сверить_evidence(item, сегменты):
+    """ADR-0004 п.3: ссылка сохраняется, только если сегмент существует, а
+    подынтервал, если задан, лежит внутри его границ. Иначе — не сохраняется,
+    никакого «подтянуть к ближайшему». Возвращает `(валидные, отклонённые)`;
+    у валидной — `segment`, `segment_id` (из реестра, если есть), `start_ms`,
+    `end_ms` в координатах записи (без подынтервала — границы сегмента)."""
+    валидные, отклонённые = [], []
+    for e in item.get("evidence") or []:
+        if not isinstance(e, dict):
+            отклонённые.append({"evidence": e, "why": "не объект"})
+            continue
+        m = МЕТКА.fullmatch(str(e.get("segment") or ""))
+        seg = сегменты.get(int(m.group(1))) if m else None
+        if seg is None:
+            отклонённые.append({"evidence": e, "why": "нет такого сегмента"})
+            continue
+        a, b = e.get("start_ms"), e.get("end_ms")
+        if a is None and b is None:
+            a, b = seg["start_ms"], seg["end_ms"]
+        else:
+            if not (isinstance(a, int) and isinstance(b, int)
+                    and seg["start_ms"] <= a <= b <= seg["end_ms"]):
+                отклонённые.append({"evidence": e, "why": "подынтервал за границами сегмента"})
+                continue
+        валидные.append({"segment": m.group(0), "segment_id": seg.get("id"),
+                         "start_ms": a, "end_ms": b})
+    return валидные, отклонённые
+
+
+def has_evidence(item):
+    """Есть ли у пункта evidence вообще — до сверки с сегментами."""
+    return bool(item.get("evidence"))
+
+
+def normalize(raw, occurred_at, сегменты=None):
+    """Ответ модели → то, с чем работает проекция. Правила ТЗ §9.
+
+    `сегменты` — `{seq: {start_ms, end_ms, id}}` расшифровки, по которой
+    модель отвечала (`сегменты_из` или `call_asr.сегменты_события`). Пункт
+    без единой валидной ссылки не создаётся; пункт, у которого часть ссылок
+    отклонена, создаётся, но идёт в `needs-review` (ADR-0004 п.3, P12).
+    Отклонённые ссылки собираются в `out["evidence_rejected"]` — вызывающий
+    кладёт их в `audit_events`."""
+    сегменты = сегменты or {}
+    out = {"evidence_rejected": []}
     for key in LISTS:
         items = []
         for it in (raw.get(key) or []):
             it = dict(it)
             if not has_evidence(it):
                 continue
+            валидные, отклонённые = сверить_evidence(it, сегменты)
+            for о in отклонённые:
+                out["evidence_rejected"].append(dict(о, list=key,
+                                                    action=str(it.get("action") or "")[:80]))
+            if not валидные:
+                continue
+            it["evidence"] = валидные
             try:
                 conf = float(it.get("confidence") or 0)
             except (TypeError, ValueError):
@@ -174,7 +243,7 @@ def normalize(raw, occurred_at):
                 continue
             it["confidence"] = conf
             it["disposition"] = ("task" if conf >= TASK_MIN and it.get("explicit")
-                                 else "needs-review")
+                                 and not отклонённые else "needs-review")
             # Срок разбираем у любого пункта, а не только у просьб: схема
             # требует deadline_phrase везде, и «побыстрее» в открытом вопросе
             # так же не должно становиться датой.
@@ -236,13 +305,31 @@ def run(event_id, root=None):
         raise RuntimeError("нет транскрипта %s" % tpath)
     segs = call_asr.read_jsonl(tpath)
     occurred = ev["occurred"] or mi.now_iso()
+    # сегменты для сверки — из реестра (Т5.1); расшифровка, сделанная до
+    # того, как ASR стал писать строки, сверяется по файлу, без segment_id
+    tid, в_реестре = call_asr.сегменты_события(con, event_id)
+    сегменты = ({seq: {"start_ms": r["start_ms"], "end_ms": r["end_ms"], "id": r["id"]}
+                 for seq, r in в_реестре.items()} if в_реестре else сегменты_из(segs))
     raw = ask_model(transcript_text(segs))
-    data = normalize(raw, occurred)
+    data = normalize(raw, occurred, сегменты)
+    отклонено = data.pop("evidence_rejected")
     data["event_id"] = event_id
     data["occurred_at"] = occurred
     data["pipeline_version"] = mi.PIPELINE_VERSION
+    data["transcript_id"] = tid
+    data["extractor"] = MODEL          # ADR-0004 п.4: чем и по какой версии
+    data["prompt_version"] = PROMPT_VERSION
     out = mi.write_json(mi.extraction_path(root, event_id), data)
-    con.execute("update events set state='extracted' where id=?", (event_id,))
+    # отказ по evidence — строка аудита (ADR-0004 п.3): что прислала модель,
+    # без текста расшифровки; одной транзакцией с переходом события
+    with mi.транзакция(con):
+        for о in отклонено:
+            mi.audit(con, "evidence_rejected", ("model", MODEL), "event", event_id,
+                     dict(о, transcript_id=tid, prompt_version=PROMPT_VERSION))
+        con.execute("update events set state='extracted' where id=?", (event_id,))
+    if отклонено:
+        print("call_extract: %s — отклонено ссылок evidence: %d" % (event_id, len(отклонено)),
+              file=sys.stderr)
     print("call_extract: %s — просьб %d, обещаний %d, изменений %d"
           % (event_id, len(data["requests"]), len(data["commitments"]),
              len(data["changed_instructions"])))
@@ -251,15 +338,21 @@ def run(event_id, root=None):
 
 def self_check():
     occ = "2026-09-02T14:05:00+03:00"       # среда
-    span = [{"start_ms": 0, "end_ms": 1000}]
+    span = [{"segment": "s0001"}]
+    сег = {1: {"start_ms": 0, "end_ms": 1000, "id": None}}
     r = normalize({"requests": [
         {"action": "явная", "explicit": True, "confidence": 0.93, "evidence": span},
         {"action": "намёк", "explicit": False, "confidence": 0.93, "evidence": span},
         {"action": "слабая", "explicit": True, "confidence": 0.3, "evidence": span},
         {"action": "без спана", "explicit": True, "confidence": 0.99, "evidence": []},
-    ]}, occ)
+        {"action": "чужой сегмент", "explicit": True, "confidence": 0.99,
+         "evidence": [{"segment": "s0009"}]},
+    ]}, occ, сег)
     assert [x["disposition"] for x in r["requests"]] == ["task", "needs-review"], \
         "пороги или отсев спанов сломаны"
+    assert r["requests"][0]["evidence"] == [{"segment": "s0001", "segment_id": None,
+                                             "start_ms": 0, "end_ms": 1000}]
+    assert len(r["evidence_rejected"]) == 1, "ссылка в несуществующий сегмент не отклонена"
     assert parse_deadline("до пятницы", occ) == ("2026-09-04", True)
     assert parse_deadline("побыстрее", occ) == (None, False), "дедлайн выдуман"
     assert parse_deadline(None, occ) == (None, False)

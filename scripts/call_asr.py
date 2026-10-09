@@ -76,8 +76,12 @@ def cut_wav(path, start_ms, end_ms):
     return r.stdout
 
 
-def transcribe_spans(base_url, plan, cutter):
-    """Куски в whisper, ответы в сегменты со спанами в координатах записи."""
+def transcribe_spans(base_url, plan, cutter, движок=None):
+    """Куски в whisper, ответы в сегменты со спанами в координатах записи.
+
+    `движок` — словарь, в который кладутся `engine`/`model`/`language`, если
+    коробка их сообщает (ADR-0004 п.4: что сообщает коробка, не догадка).
+    """
     segs = []
     for i, (a, b) in enumerate(plan, 1):
         req = urllib.request.Request(base_url + "/transcribe", data=cutter(a, b),
@@ -85,6 +89,10 @@ def transcribe_spans(base_url, plan, cutter):
         req.add_header("Content-Type", "application/octet-stream")
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
             d = json.loads(r.read() or b"{}")
+        if движок is not None:
+            for k in ("engine", "model", "language"):
+                if d.get(k) and not движок.get(k):
+                    движок[k] = str(d[k])
         text = (d.get("text") or "").strip()
         if not text:
             continue                       # тишина сегментом не становится
@@ -92,6 +100,44 @@ def transcribe_spans(base_url, plan, cutter):
                      "speaker": "unknown-A", "text": text,
                      "asr_confidence": None, "speaker_confidence": None})
     return segs
+
+
+def записать_сегменты(con, event_id, blob_sha256, segs, движок=None):
+    """Т5.1, ADR-0004 п.1: расшифровка и её сегменты — строки реестра.
+
+    Каждый прогон ASR заводит **новый** `transcripts` с новыми сегментами
+    (переобработка по §9.1 старые строки не трогает — evidence остаётся
+    приколоченным к той расшифровке, по которой его нашли). `seq` — номер
+    из метки `s%04d`, по нему `call_extract` переводит метку модели в
+    `segment_id`. Пишется одной транзакцией с переходом события; у
+    вызывающего транзакция уже открыта — тогда это её шаг. Возвращает id
+    расшифровки."""
+    движок = движок or {}
+    tid = mi.uuid7()
+    with mi.транзакция(con):
+        con.execute("insert into transcripts(id,event_id,blob_sha256,engine,model,"
+                    "language,created) values(?,?,?,?,?,?,?)",
+                    (tid, event_id, blob_sha256, движок.get("engine", "unknown"),
+                     движок.get("model", "unknown"), движок.get("language"),
+                     mi.now_iso()))
+        for s in segs:
+            con.execute("insert into transcript_segments(id,transcript_id,seq,start_ms,"
+                        "end_ms,speaker,text) values(?,?,?,?,?,?,?)",
+                        (mi.uuid7(), tid, int(s["segment_id"][1:]), s["start_ms"],
+                         s["end_ms"], s.get("speaker"), s.get("text")))
+    return tid
+
+
+def сегменты_события(con, event_id):
+    """Сегменты последней расшифровки события: `(transcript_id, {seq: row})`.
+    Нет расшифровки — `(None, {})`."""
+    t = con.execute("select id from transcripts where event_id=? order by created desc, "
+                    "id desc limit 1", (event_id,)).fetchone()
+    if not t:
+        return None, {}
+    rows = con.execute("select * from transcript_segments where transcript_id=? "
+                       "order by seq", (t["id"],)).fetchall()
+    return t["id"], {r["seq"]: r for r in rows}
 
 
 def write_jsonl(path, segs):
@@ -122,11 +168,16 @@ def run(event_id, root=None):
         raise RuntimeError("блоб %s не на диске" % ev["blob_sha256"][:12])
     audio = b["path"]
     plan = slice_plan(duration_ms(audio))
+    движок = {}
     segs = transcribe_spans(ASR_URL or vault_common.нужен_адрес(
         "MARA_ASR_URL", "коробка с whisper"), plan,
-        lambda x, y: cut_wav(audio, x, y))
+        lambda x, y: cut_wav(audio, x, y), движок)
     out = write_jsonl(mi.transcript_path(root, event_id), segs)
-    con.execute("update events set state='transcribed' where id=?", (event_id,))
+    # файл — для следующего шага, строки — для evidence (Т5.1, ADR-0004);
+    # строки и переход события — одной транзакцией (§5.2)
+    with mi.транзакция(con):
+        записать_сегменты(con, event_id, ev["blob_sha256"], segs, движок)
+        con.execute("update events set state='transcribed' where id=?", (event_id,))
     print("call_asr: %s — кусков %d, сегментов %d" % (event_id, len(plan), len(segs)))
     return out
 
