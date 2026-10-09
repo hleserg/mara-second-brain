@@ -842,34 +842,30 @@ class Handler(BaseHTTPRequestHandler):
             # стабилен — `need_blob` у повтора после заливки уже `false`.
             ключ = data.pop("idempotency_key", None)
             if ключ is None:
-                ключ = self.headers.get("Idempotency-Key")
+                # пустой заголовок — отсутствие ключа, а не отказ: 400 у
+                # телефона терминален
+                ключ = self.headers.get("Idempotency-Key") or None
             if ключ is not None and not (isinstance(ключ, str) and 0 < len(ключ) <= 128):
                 return self.say(400, {"error": "idempotency_key — строка до 128 знаков"},
                                 поля=data)
             было = квитанция(con, data["device_id"], ключ) if ключ else None
             if было is not None:
+                print(log_line("POST", p.path, 200, data) + " replay", flush=True)
                 return self.say(200, было, ещё={"Idempotent-Replay": "true"})
             try:
-                # событие и квитанция — одной транзакцией (§5.2 п.1)
+                # событие и квитанция — одной короткой транзакцией (§5.2
+                # п.1). Правка словами — вне её: она ждёт флок волта, который
+                # минутами держит bisync, и держать под этим ожиданием замок
+                # записи базы значило бы ронять заливки и воркер по таймауту
+                # (ревью PR #118, P1). Квитанция дописывается второй короткой
+                # транзакцией; упал между ними — повтор получит квитанцию с
+                # `applied: null`, и это правда о том, что успело случиться.
                 with транзакция(con):
                     eid, dup = mi.put_event(con, data)
                     need = need_blob(con, self.server.root, eid,
                                      (data.get("blob") or {}).get("sha256"))
-                    applied = None
-                    if kind == "correction" and not dup:
-                        # синхронно, а не через очередь: Серёга ждёт ответа
-                        # Мары, а не ночного крона. Писатель карточек один —
-                        # call_project.
-                        try:
-                            applied = call_project.apply_correction(
-                                self.server.vault, dict(data, id=eid), con)
-                        except Exception as e:
-                            print("correction %s: %s: %s" % (eid, type(e).__name__, e),
-                                  flush=True)
-                            applied = {"found": False,
-                                       "text": "не применил: %s" % type(e).__name__}
                     ответ = {"event_id": eid, "duplicate": dup, "need_blob": need,
-                             "applied": applied}
+                             "applied": None}
                     if ключ:
                         con.execute(
                             "insert into ingest_attempts(id,source,device_id,"
@@ -884,6 +880,24 @@ class Handler(BaseHTTPRequestHandler):
                 if было is None:
                     raise
                 return self.say(200, было, ещё={"Idempotent-Replay": "true"})
+            if kind == "correction" and not dup:
+                # синхронно, а не через очередь: Серёга ждёт ответа Мары, а не
+                # ночного крона. Писатель карточек один — call_project; свои
+                # транзакции у него внутри.
+                try:
+                    applied = call_project.apply_correction(
+                        self.server.vault, dict(data, id=eid), con)
+                except Exception as e:
+                    print("correction %s: %s: %s" % (eid, type(e).__name__, e),
+                          flush=True)
+                    applied = {"found": False,
+                               "text": "не применил: %s" % type(e).__name__}
+                ответ["applied"] = applied
+                if ключ:
+                    con.execute("update ingest_attempts set outcome=? where device_id=? "
+                                "and idempotency_key=?",
+                                (json.dumps(ответ, ensure_ascii=False),
+                                 data["device_id"], ключ))
             print(log_line("POST", p.path, 200, data), flush=True)
             return self.say(200, ответ)
         if p.path == "/v1/context/query":
@@ -1034,28 +1048,8 @@ def finish_stored(con, root, event_id):
         mi.add_job(con, event_id, "asr")
 
 
-class транзакция:
-    """`begin immediate` … `commit`, откат на исключении (§5.2, Т2.1в).
-
-    Соединения contextd — в autocommit (`isolation_level=None`), и каждый
-    оператор был сам себе транзакцией. Вложенного `begin` SQLite не умеет,
-    поэтому внутри уже открытой транзакции зовущего блок — прозрачный: так
-    `finish_stored` работает и сам по себе, и внутри приёма блоба.
-    """
-
-    def __init__(self, con):
-        self.con, self.своя = con, False
-
-    def __enter__(self):
-        if not self.con.in_transaction:
-            self.con.execute("begin immediate")
-            self.своя = True
-        return self
-
-    def __exit__(self, тип, *_):
-        if self.своя:
-            self.con.execute("rollback" if тип else "commit")
-        return False
+# Транзакция живёт в mara_ingest: ей пользуются и приём, и ledger_import.
+транзакция = mi.транзакция
 
 
 def need_blob(con, root, event_id, sha256):
@@ -1429,14 +1423,22 @@ def run_step(kind, event_id):
 def worker(stop, root):
     con = mi.connect(root)
     while not stop.is_set():
-        job = mi.claim_job(con)
-        if not job:
+        try:
+            job = mi.claim_job(con)
+            if not job:
+                stop.wait(5)
+                continue
+            ok, err = run_step(job["kind"], job["event_id"])
+            закрыть_работу(con, job, ok, err)
+            print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
+                                          "ок" if ok else "сбой"), flush=True)
+        except sqlite3.OperationalError as e:
+            # `database is locked` — чужая долгая транзакция, не конец
+            # света: поток воркера у нас один и без перезапуска, и одна
+            # такая ошибка до этой строки останавливала конвейер до рестарта
+            # демона (ревью PR #118, P1). Аренда работы истечёт сама.
+            print("%s воркер: %s — подожду" % (mi.now_iso(), e), flush=True)
             stop.wait(5)
-            continue
-        ok, err = run_step(job["kind"], job["event_id"])
-        закрыть_работу(con, job, ok, err)
-        print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
-                                      "ок" if ok else "сбой"), flush=True)
 
 
 def закрыть_работу(con, job, ok, err):

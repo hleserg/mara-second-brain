@@ -552,7 +552,7 @@ class Сущности(unittest.TestCase):
         con.execute("delete from ingest_attempts")
         con.close()
         con = mi.migrate(self.dir, 2)
-        self.assertNotIn("ingest_idem", indексы() if False else {r[0] for r in con.execute(
+        self.assertNotIn("ingest_idem", {r[0] for r in con.execute(
             "select name from sqlite_master where type='index'")})
         self.assertEqual(self.версия(), 2)
         con.close()

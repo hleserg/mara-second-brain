@@ -122,13 +122,61 @@ class Границы(unittest.TestCase):
         self.assertEqual(self.работ(eid), 1)
         self.assertEqual(self.con.execute("select attempts from jobs").fetchone()[0], 1)
 
-    def test_транзакция_внутри_чужой_прозрачна(self):
+    def test_транзакция_внутри_чужой_это_savepoint(self):
         self.con.execute("begin immediate")
         with contextd.транзакция(self.con):
             self.con.execute("insert into compute_nodes(id,name) values('n','x')")
         self.assertTrue(self.con.in_transaction, "чужую транзакцию не закрыли")
+        # исключение внутри вложенного блока откатывает ровно его (ревью P2)
+        with self.assertRaises(RuntimeError):
+            with contextd.транзакция(self.con):
+                self.con.execute("insert into compute_nodes(id,name) values('m','y')")
+                raise RuntimeError("бум")
+        self.assertTrue(self.con.in_transaction)
+        self.assertEqual([r[0] for r in self.con.execute("select id from compute_nodes")],
+                         ["n"], "вложенный шаг откатился, внешний цел")
         self.con.execute("rollback")
         self.assertIsNone(self.con.execute("select 1 from compute_nodes").fetchone())
+
+    def test_упавший_commit_откатывает_а_не_оставляет_транзакцию(self):
+        con = self.con
+
+        class Кривой:
+            """Соединение, у которого commit падает — диск, I/O."""
+
+            def execute(self, sql, *a):
+                if sql == "commit":
+                    raise RuntimeError("диск")
+                return con.execute(sql, *a)
+
+            def __getattr__(self, name):
+                return getattr(con, name)
+
+        with self.assertRaises(RuntimeError):
+            with contextd.транзакция(Кривой()):
+                con.execute("insert into compute_nodes(id,name) values('n','x')")
+        self.assertFalse(con.in_transaction, "соединение зависло в транзакции")
+        self.assertIsNone(self.con.execute("select 1 from compute_nodes").fetchone())
+
+    def test_исключение_в_переносе_под_приёмом_не_коммитит_полусостояние(self):
+        """Ревью P2: внутри транзакции приёма упавший шаг переноса коммитился
+        вместе с событием — объект без проекции."""
+        import unittest.mock
+        import ledger_import as li
+        vault = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, vault, True)
+        os.makedirs(os.path.join(vault, ".git"))
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        with open(os.path.join(vault, "kb/commitments/a.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: забор\ntype: commitment\nstatus: open\n---\n")
+        with unittest.mock.patch.object(li, "_проекция_и_история",
+                                        side_effect=RuntimeError("бум")):
+            with contextd.транзакция(self.con):
+                self.con.execute("insert into compute_nodes(id,name) values('n','x')")
+                with self.assertRaises(RuntimeError):
+                    li.перенести_карточку(self.con, vault, "kb/commitments/a.md")
+        self.assertEqual(self.con.execute("select count(*) from commitments").fetchone()[0], 0)
+        self.assertEqual(self.con.execute("select count(*) from compute_nodes").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

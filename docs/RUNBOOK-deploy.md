@@ -457,6 +457,12 @@ checkout» перестаёт быть ложью: извлечённое и п�
 
 ```bash
 ssh doctor 'cd ~/mara-second-brain && MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate'
+
+Миграция 3 (Т2.9) ставит уникальный индекс на `ingest_attempts(device_id,
+idempotency_key)`. Если она отказала с `UNIQUE constraint failed` — в
+таблице уже есть дубли ключей (на doctor их быть не может: телефон ключ не
+шлёт); удалить лишние строки руками и повторить. База при отказе остаётся
+на прежней версии, строки целы.
 ```
 
 Ждём `contextd.db: версия N → M, integrity_check: ok, foreign_key_check: ok`

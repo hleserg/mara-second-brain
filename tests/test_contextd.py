@@ -1,6 +1,6 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
 import contextlib, os, sys, io, json, hashlib, socket, stat, struct
-import tempfile, threading, time, unittest, unittest.mock
+import tempfile, threading, time, unittest, unittest.mock, sqlite3
 import urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timedelta
 
@@ -1160,6 +1160,34 @@ class ТестКривойДлины(unittest.TestCase):
                          [])
 
 
+class ТестВоркерЖивучий(unittest.TestCase):
+    def test_воркер_переживает_database_is_locked(self):
+        """Ревью P1: одна OperationalError из claim_job убивала единственный
+        поток воркера до рестарта демона."""
+        import sqlite3 as sq
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        con = mi.connect(каталог)
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone", "source_id": "w",
+                                    "payload": {}})
+        mi.add_job(con, eid, "digest")
+        стоп = threading.Event()
+        вызовов = []
+        настоящий = mi.claim_job
+
+        def claim(c, *a, **kw):
+            вызовов.append(1)
+            if len(вызовов) == 1:
+                raise sq.OperationalError("database is locked")
+            стоп.set()
+            return None
+
+        with unittest.mock.patch.object(mi, "claim_job", claim), \
+                unittest.mock.patch.object(threading.Event, "wait", lambda self, t=None: None):
+            contextd.worker(стоп, каталог)
+        self.assertEqual(len(вызовов), 2, "после ошибки воркер не продолжил")
+
+
 class ТестКвитанции(unittest.TestCase):
     """Т2.9, ТЗ §4.4: приём принимает `idempotency_key`, повтор с тем же
     ключом получает тот же ответ — сохранённый, а не пересчитанный."""
@@ -1247,6 +1275,43 @@ class ТестКвитанции(unittest.TestCase):
             self.assertEqual(код, 400, repr(ключ))
             self.assertIn("idempotency_key", ответ["error"])
         self.assertEqual(self.con.execute("select count(*) from events").fetchone()[0], 0)
+
+    def test_правка_словами_не_держит_замок_базы_пока_ждёт_флок(self):
+        """Ревью P1: правка под `begin immediate` ждала флок волта (bisync
+        держит его минутами), и заливки с воркером получали database is
+        locked по таймауту."""
+        import fcntl
+        vault = self.srv.vault
+        os.makedirs(os.path.join(vault, ".git"), exist_ok=True)
+        os.makedirs(os.path.join(vault, "kb/commitments"), exist_ok=True)
+        contextd.set_scopes(self.con, self.dev, ["correction"])
+        замок = open(os.path.join(vault, ".git/vault-git.lock"), "w")
+        fcntl.flock(замок, fcntl.LOCK_EX)
+        итог = {}
+
+        def правка():
+            итог["r"] = self.post("/v1/ingest/event", {
+                "kind": "correction", "source": "mara", "source_id": "c1",
+                "payload": {"item": "забор", "status": "open"}, "idempotency_key": "k"})
+
+        t = threading.Thread(target=правка, daemon=True)
+        t.start()
+        time.sleep(0.5)
+        другое = sqlite3.connect(os.path.join(self.dir, "contextd.db"), timeout=2,
+                                 isolation_level=None)
+        t0 = time.monotonic()
+        другое.execute("begin immediate")          # заливка в соседнем потоке
+        другое.execute("rollback")
+        self.assertLess(time.monotonic() - t0, 1.5, "замок базы держится под флоком волта")
+        fcntl.flock(замок, fcntl.LOCK_UN)
+        замок.close()
+        t.join(10)
+        код, ответ, _ = итог["r"]
+        self.assertEqual(код, 200)
+        self.assertIn("created", ответ["applied"])
+        # квитанция дописана результатом правки
+        self.assertEqual(contextd.квитанция(self.con, self.dev, "k")["applied"]["created"],
+                         ответ["applied"]["created"])
 
     def test_гонка_двух_повторов_отдаёт_квитанцию_победителя(self):
         """Второй с тем же ключом упёрся в уникальный индекс — его транзакция

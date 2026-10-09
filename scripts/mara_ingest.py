@@ -482,6 +482,48 @@ def _migrate_cli():
     return 0 if итог == ссылки == "ok" else 1
 
 
+class транзакция:
+    """`begin immediate` … `commit`, откат на исключении (§5.2, Т2.1в).
+
+    Соединения приёма — в autocommit (`isolation_level=None`), и каждый
+    оператор был сам себе транзакцией. Внутри уже открытой транзакции блок
+    становится savepoint'ом: исключение откатывает ровно его, а не делает
+    вид, что всё хорошо (ревью PR #118, P2 — без savepoint полусостояние
+    вложенного шага коммитилось вместе с внешней транзакцией). Упавший
+    `commit` откатывает: иначе соединение потока остаётся в транзакции, и
+    все следующие блоки на нём «вложенные» и никогда не коммитят.
+    """
+    _n = 0
+
+    def __init__(self, con):
+        self.con, self.точка = con, None
+
+    def __enter__(self):
+        if self.con.in_transaction:
+            транзакция._n += 1
+            self.точка = "sp%d" % транзакция._n
+            self.con.execute("savepoint " + self.точка)
+        else:
+            self.con.execute("begin immediate")
+        return self
+
+    def __exit__(self, тип, *_):
+        if self.точка:
+            if тип:
+                self.con.execute("rollback to " + self.точка)
+            self.con.execute("release " + self.точка)
+            return False
+        if тип:
+            self.con.execute("rollback")
+            return False
+        try:
+            self.con.execute("commit")
+        except BaseException:
+            self.con.execute("rollback")
+            raise
+        return False
+
+
 def dedupe_key(source, source_id, blob_sha256=None):
     """Ключ идемпотентности. У аудио — содержимое, у остального — источник и id.
 
