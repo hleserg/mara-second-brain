@@ -49,10 +49,14 @@ RULES_VERSION = 1
 
 def конфигурация():
     """Ручки прогона извлечения, которые ложатся в `extractions/<event>.json`
-    (Т5.0, ТЗ §9): модель, параметры запроса, пороги. Таймаут HTTP результат
-    не меняет — его тут нет."""
+    (Т5.0, ТЗ §9): модель, параметры запроса, пороги и хеш схемы ответа —
+    `format: SCHEMA` меняет выход так же, как текст промпта, и правка схемы
+    без поднятия `PROMPT_VERSION` иначе была бы невидима. Таймаут HTTP
+    результат не меняет — его тут нет."""
     return {"model": MODEL, "options": dict(OPTIONS),
-            "task_min": TASK_MIN, "review_min": REVIEW_MIN}
+            "task_min": TASK_MIN, "review_min": REVIEW_MIN,
+            "schema_sha256": hashlib.sha256(json.dumps(
+                SCHEMA, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()}
 
 LISTS = ("requests", "commitments", "decisions", "constraints",
          "open_questions", "changed_instructions", "followups")
@@ -102,9 +106,11 @@ SCHEMA = {"type": "object",
                              [(k, {"type": "array", "items": {"type": "string"}})
                               for k in NAMES])}
 
-# ADR-0004 п.4: версия промпта поднимается при любой правке его текста —
-# иначе регрессионный корпус (Т5.5) сравнивает несравнимое. Ложится в
-# извлечение и в карточку рядом с именем модели.
+# ADR-0004 п.4: версия промпта поднимается при любой правке его текста и
+# схемы ответа `SCHEMA`/`ITEM` (она уходит в запрос как `format` и меняет
+# выход так же) — иначе регрессионный корпус (Т5.5) сравнивает
+# несравнимое. Ложится в извлечение и в карточку рядом с именем модели;
+# хеш схемы — в `config` извлечения (`конфигурация`).
 PROMPT_VERSION = 2
 PROMPT = """Ты разбираешь расшифровку телефонного разговора Сергея.
 

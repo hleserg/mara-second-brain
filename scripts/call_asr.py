@@ -119,8 +119,9 @@ def записать_сегменты(con, event_id, blob_sha256, segs, движ
     из метки `s%04d`, по нему `call_extract` переводит метку модели в
     `segment_id`. Своя транзакция, а внутри чужой — её шаг (savepoint):
     `run` держит одну на строки и переход события. `конфиг` — ручки
-    прогона (`конфигурация()`; по умолчанию — текущие), `pipeline_version` —
-    версия конвейера кода (Т5.0, ТЗ §9). Возвращает id расшифровки."""
+    прогона (`конфигурация()`; по умолчанию — текущие); в строку также
+    ложится `PIPELINE_VERSION` кода (Т5.0, ТЗ §9). Возвращает id
+    расшифровки."""
     движок = движок or {}
     tid = mi.uuid7()
     with mi.транзакция(con):
@@ -180,7 +181,11 @@ def run(event_id, root=None):
     if not b or not b["path"] or not os.path.exists(b["path"]):
         raise RuntimeError("блоб %s не на диске" % ev["blob_sha256"][:12])
     audio = b["path"]
-    plan = slice_plan(duration_ms(audio))
+    # План нарезки — из той же конфигурации, что ляжет в строку: иначе
+    # подменённое окно (тест, будущий ключ командной строки) резало бы по
+    # одному, а записывало другое (ревью субагента)
+    конфиг = конфигурация()
+    plan = slice_plan(duration_ms(audio), конфиг["window_ms"], конфиг["overlap_ms"])
     движок = {}
     segs = transcribe_spans(ASR_URL or vault_common.нужен_адрес(
         "MARA_ASR_URL", "коробка с whisper"), plan,
@@ -195,7 +200,7 @@ def run(event_id, root=None):
     # после фиксации и до файла безопасна: ретрай шага заведёт новую
     # расшифровку, а извлечение по строкам файла не требует.
     with mi.транзакция(con):
-        записать_сегменты(con, event_id, ev["blob_sha256"], segs, движок)
+        записать_сегменты(con, event_id, ev["blob_sha256"], segs, движок, конфиг)
         con.execute("update events set state='transcribed' where id=?", (event_id,))
     out = write_jsonl(mi.transcript_path(root, event_id), segs)
     print("call_asr: %s — кусков %d, сегментов %d" % (event_id, len(plan), len(segs)))

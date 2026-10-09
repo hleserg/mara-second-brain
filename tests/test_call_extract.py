@@ -244,7 +244,10 @@ class Шаг(unittest.TestCase):
                           self.mi.PIPELINE_VERSION))
         self.assertEqual(extr["config"], {"model": ce.MODEL, "options": ce.OPTIONS,
                                           "task_min": ce.TASK_MIN,
-                                          "review_min": ce.REVIEW_MIN})
+                                          "review_min": ce.REVIEW_MIN,
+                                          "schema_sha256": extr["config"]["schema_sha256"]})
+        self.assertEqual(len(extr["config"]["schema_sha256"]), 64,
+                         "схема ответа тоже под происхождением")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(
             ce.transcript_text(self.segs).encode("utf-8")).hexdigest())
         self.assertEqual(ce.конфигурация()["options"], {"temperature": 0, "num_ctx": 8192},

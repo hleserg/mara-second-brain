@@ -581,9 +581,7 @@ class Сущности(unittest.TestCase):
         con.execute("delete from transcripts")
         con.close()
         con = mi.migrate(self.dir, 4)
-        self.assertNotIn("config_json", colonки := {
-            r[1] for r in con.execute("pragma table_info(transcripts)")})
-        self.assertNotIn("pipeline_version", colonки)
+        self.assertFalse({"config_json", "pipeline_version"} & колонки())
         self.assertEqual(self.версия(), 4)
         con.close()
         con = mi.migrate(self.dir)

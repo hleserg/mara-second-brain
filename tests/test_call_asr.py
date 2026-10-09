@@ -186,6 +186,9 @@ class Реестр(unittest.TestCase):
             (call_asr.duration_ms, call_asr.transcribe_spans, call_asr.write_jsonl,
              call_asr.ASR_URL) = было
         self.assertEqual(порядок, [("файл", 1)], "строки зафиксированы до записи файла")
+        # план нарезки и записанный конфиг — из одного источника (ревью)
+        self.assertEqual(json.loads(self.con.execute(
+            "select config_json from transcripts").fetchone()[0]), call_asr.конфигурация())
         self.assertEqual(self.con.execute("select state from events").fetchone()[0],
                          "transcribed")
 
