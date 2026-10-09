@@ -50,6 +50,9 @@ except ValueError:
                      % os.environ.get("MARA_DIGEST_MAX_AGE_H"))
 
 
+ВИД = "telegram_digest"            # kind строки outbox (§5.2, Т2.5)
+
+
 def свежий(occurred, now=None, часов=None):
     """Пустое и неразобранное время считаем свежим: промолчать из-за строки,
     которую не смогли прочитать, хуже, чем написать лишний раз."""
@@ -178,6 +181,36 @@ def deliver(text, token, chat_id):
     return "sent" if ok else "failed"
 
 
+def _отправитель(e):
+    """Транспорт для строк outbox: `kind` → исход `deliver`. Отдельной
+    функцией, чтобы `--outbox` и `run` шли одной дорогой."""
+    def отправить(kind, payload):
+        return deliver(payload["text"], e.get("TELEGRAM_BOT_TOKEN"), payload["chat_id"])
+    return отправить
+
+
+def _разослать(con, e, event_id=None):
+    """Отправить ждущие строки outbox (все или одного события) и перенести
+    исход в `digests`/`events`. Возвращает список `(digest_id, исход)`.
+
+    Отправка — вне транзакции, по зафиксированной строке (§5.2, Т2.5);
+    исход — одной транзакцией со строкой дайджеста и состоянием события.
+    `sent` закрывает событие; `no-transport`/`not-private` — настройка, не
+    сбой: строка остаётся `pending`, а что их есть, скажет сверка (N11)."""
+    итоги = []
+    for oid, исход in mi.из_outbox(con, _отправитель(e), kind=ВИД, object_id=event_id):
+        row = con.execute("select object_id, payload_json from outbox where id=?",
+                          (oid,)).fetchone()
+        did = json.loads(row["payload_json"])["digest_id"]
+        with mi.транзакция(con):
+            con.execute("update digests set state=? where id=?", (исход, did))
+            if исход == "sent":
+                con.execute("update events set state='done' where id=?",
+                            (row["object_id"],))
+        итоги.append((did, исход))
+    return итоги
+
+
 def run(event_id, root=None, env_file=None):
     root = root or mi.ROOT
     con = mi.connect(root)
@@ -189,45 +222,68 @@ def run(event_id, root=None, env_file=None):
     created = len(cp.commitment_cards(ev, extraction, {}))
     text, items = render(ev, extraction, created)
     e = env(env_file)
-    state = ("stale" if not свежий(ev["occurred"]) else
-             deliver(text, e.get("TELEGRAM_BOT_TOKEN"),
-                     e.get("TELEGRAM_HOME_CHANNEL")))
+    свеж = свежий(ev["occurred"])
     did = str(uuid.uuid4())
-    # один дайджест на событие: сбой отправки уводит работу в ретрай, и вторая
-    # попытка должна заменить строку, а не положить рядом ещё одну
-    con.execute("delete from digests where event_id=?", (event_id,))
-    con.execute("insert into digests(id,event_id,chat_id,text,items_json,sent_at,state) "
-                "values(?,?,?,?,?,?,?)",
-                (did, event_id, e.get("TELEGRAM_HOME_CHANNEL"), text,
-                 json.dumps(items, ensure_ascii=False), mi.now_iso(), state))
-    print("call_digest: %s — %s, пунктов %d" % (event_id, state, len(items)))
-    if state == "stale":
-        # Звонок обработан: дайджест собран и лежит в `digests`. Не закрыть
-        # его здесь значило бы держать работу в вечном ретрае ради сообщения,
-        # которое мы намеренно не шлём.
+    # Результат шага и намерение отправить его — одной транзакцией, отправка
+    # — после фиксации, по строке outbox (§5.2, Т2.5). До этого шаг слал в
+    # сеть, а строку `digests` писал потом: смерть между ними теряла след
+    # отправленного, и ретрай слал второй раз, не зная о первом. Один
+    # дайджест на событие: повтор шага заменяет строку, а не кладёт рядом
+    # ещё одну; прежнее намерение, если его не успели отправить, снимается —
+    # иначе `--outbox` отправил бы оба.
+    with mi.транзакция(con):
+        con.execute("delete from digests where event_id=?", (event_id,))
+        con.execute("update outbox set state='skipped', error='пересобран' "
+                    "where kind=? and object_id=? and state='pending'", (ВИД, event_id))
+        con.execute("insert into digests(id,event_id,chat_id,text,items_json,sent_at,state) "
+                    "values(?,?,?,?,?,?,?)",
+                    (did, event_id, e.get("TELEGRAM_HOME_CHANNEL"), text,
+                     json.dumps(items, ensure_ascii=False), mi.now_iso(),
+                     "queued" if свеж else "stale"))
+        if свеж:
+            mi.в_outbox(con, ВИД, {"digest_id": did, "text": text,
+                                   "chat_id": e.get("TELEGRAM_HOME_CHANNEL")},
+                        "event", event_id)
+        else:
+            # Звонок обработан: дайджест собран и лежит в `digests`. Не
+            # закрыть его здесь значило бы держать работу в вечном ретрае
+            # ради сообщения, которое мы намеренно не шлём.
+            con.execute("update events set state='done' where id=?", (event_id,))
+    if not свеж:
+        print("call_digest: %s — stale, пунктов %d" % (event_id, len(items)))
         # в stderr, а не в stdout: `contextd` зовёт шаг через
         # `subprocess.run(capture_output=True)` и возвращает только stderr —
         # ветка `not-private` этот урок уже выучила, эта чуть не повторила
         print("call_digest: %s старше %g ч — в телеграм не шлём, текст в "
               "digests; сверка назовёт его находкой «дайджест-догрузка»"
               % (event_id, СВЕЖЕСТЬ_Ч), file=sys.stderr)
-        con.execute("update events set state='done' where id=?", (event_id,))
         return did
+    (_, state), = _разослать(con, e, event_id)
+    print("call_digest: %s — %s, пунктов %d" % (event_id, state, len(items)))
     if state == "failed":
         raise RuntimeError("телеграм не принял дайджест")
     if state != "sent":
         # транспорта нет (или адресат не тот) — это настройка, а не сбой:
         # повторять нечего, но и объявлять звонок обработанным нельзя. Текст
-        # лежит в digests, сверка считает такие каждый час в свой лог, а
-        # владельцу называет их в суточной сводке 8:00 (N11) — но сводка идёт
-        # этим же `deliver`, так что при обоих недоставленных состояниях
-        # владелец услышит N11 только после починки настройки. Находка не
-        # протухает: строки лежат в digests, пока их не разберут
+        # лежит в digests, намерение — в outbox; сверка считает такие каждый
+        # час в свой лог, а владельцу называет их в суточной сводке 8:00
+        # (N11) — но сводка идёт этим же `deliver`, так что при обоих
+        # недоставленных состояниях владелец услышит N11 только после починки
+        # настройки. Находка не протухает: строки лежат, пока их не разберут
         print("call_digest: %s не доставлен (%s) — событие остаётся %s"
               % (event_id, state, ev["state"]))
-        return did
-    con.execute("update events set state='done' where id=?", (event_id,))
     return did
+
+
+def outbox(root=None, env_file=None):
+    """`--outbox`: разослать всё, что ждёт, — после починки токена или
+    адресата, одной командой вместо `--event` по каждому звонку. Возвращает
+    число отправленных."""
+    con = mi.connect(root or mi.ROOT)
+    итоги = _разослать(con, env(env_file))
+    for did, исход in итоги:
+        print("call_digest: outbox %s — %s" % (did, исход))
+    return sum(1 for _, и in итоги if и == "sent")
 
 
 def self_check():
@@ -280,12 +336,17 @@ def main():
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--env-file", default=ENV_FILE)
     ap.add_argument("--self-check", action="store_true", dest="self_check")
+    ap.add_argument("--outbox", action="store_true",
+                    help="разослать все ждущие дайджесты из outbox")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
-    if not a.event:
-        ap.error("нужен --event")
     mi.ROOT = a.root
+    if a.outbox:
+        outbox(a.root, a.env_file)
+        return 0
+    if not a.event:
+        ap.error("нужен --event или --outbox")
     run(a.event, a.root, a.env_file)
     return 0
 

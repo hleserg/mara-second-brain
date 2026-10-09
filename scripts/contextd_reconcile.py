@@ -633,7 +633,7 @@ def дайджест_не_доставлен(con):
     return [находка("дайджест-не-доставлен", "warn",
                     "дайджестов без доставки: %d (%s) — проверить "
                     "TELEGRAM_BOT_TOKEN и TELEGRAM_HOME_CHANNEL в "
-                    "/etc/mara/contextd.env, потом call_digest.py --event <id>"
+                    "/etc/mara/contextd.env, потом call_digest.py --outbox"
                     % (len(rows), "; ".join(чем)), count=len(rows),
                     sample=[r["event_id"] for r in rows[:5]])]
 

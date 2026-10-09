@@ -374,20 +374,25 @@ def _записать_объект(con, таблица, вид, oid, значе�
     """
     actor_type, actor_id, причина = актор
     имена = sorted(значения)
+    # Событие аудита — той же транзакцией, что объект и ревизия (§5.2, Т2.5):
+    # имена полей и версия, без значений — они в `revisions`.
     if новый:
         con.execute("insert into %s(%s) values(%s)"
                     % (таблица, ",".join(имена), ",".join("?" * len(имена))),
                     [значения[k] for k in имена])
+        когда = mi.now_iso()
+        поля = sorted(k for k, v in значения.items() if v is not None and k != "id")
         if вид == "commitment":
             con.execute(
                 "insert into revisions(object_kind,object_id,version,changed_json,"
                 "actor_type,actor_id,reason,origin_event,occurred) "
                 "values(?,?,1,?,?,?,?,?,?)",
-                (вид, oid, json.dumps({k: [None, v] for k, v in значения.items()
-                                       if v is not None and k != "id"},
+                (вид, oid, json.dumps({k: [None, значения[k]] for k in поля},
                                       ensure_ascii=False),
-                 actor_type, actor_id, причина, значения.get("origin_event"),
-                 mi.now_iso()))
+                 actor_type, actor_id, причина, значения.get("origin_event"), когда))
+        mi.audit(con, "object.created", актор, вид, oid,
+                 {"version": 1 if вид == "commitment" else None, "fields": поля,
+                  "reason": причина}, когда)
         return
     старое = dict(con.execute("select * from %s where id=?" % таблица, (oid,)).fetchone())
     # `created` у существующего объекта не переносится: проектор ставит в
@@ -400,9 +405,10 @@ def _записать_объект(con, таблица, вид, oid, значе�
         return
     поля_sql = ", ".join("%s=?" % k for k in sorted(изменилось))
     args = [изменилось[k][1] for k in sorted(изменилось)]
+    когда = mi.now_iso()
+    версия = None
     if вид == "commitment":
         версия = (старое.get("version") or 1) + 1
-        когда = mi.now_iso()
         con.execute("update %s set %s, version=?, updated=? where id=?"
                     % (таблица, поля_sql), args + [версия, когда, oid])
         con.execute(
@@ -412,6 +418,8 @@ def _записать_объект(con, таблица, вид, oid, значе�
              actor_type, actor_id, причина, значения.get("origin_event"), когда))
     else:
         con.execute("update %s set %s where id=?" % (таблица, поля_sql), args + [oid])
+    mi.audit(con, "object.updated", актор, вид, oid,
+             {"version": версия, "fields": sorted(изменилось), "reason": причина}, когда)
 
 
 def перенести_карточку(con, vault, rel, актор=ПЕРЕНОС_АКТОР):

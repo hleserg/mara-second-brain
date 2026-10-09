@@ -162,8 +162,8 @@ class ИмяEnvФайла(unittest.TestCase):
                          "/etc/mara/contextd.env")
 
 
-class Доставка(unittest.TestCase):
-    """N11: недоставленный дайджест не считается обработанным звонком."""
+class _СтендДоставки(unittest.TestCase):
+    """Событие, извлечение и чистое окружение; тестов не несёт."""
 
     def setUp(self):
         # env() читает окружение раньше env-файла: если у разработчика
@@ -192,6 +192,10 @@ class Доставка(unittest.TestCase):
     def состояние(self):
         return self.con.execute("select state from events where id=?",
                                 (self.eid,)).fetchone()["state"]
+
+
+class Доставка(_СтендДоставки):
+    """N11: недоставленный дайджест не считается обработанным звонком."""
 
     def test_без_транспорта_событие_не_закрывается(self):
         пусто = os.path.join(self.dir, "нет-такого.env")
@@ -253,6 +257,121 @@ class Доставка(unittest.TestCase):
             cd.deliver = было
         self.assertEqual(self.состояние(), "projected",
                          "до ретрая звонок обработанным не считается")
+
+
+class Outbox(_СтендДоставки):
+    """Т2.5, §5.2: исходящий эффект — через outbox, а не из середины шага.
+    Текст дайджеста и намерение отправить его коммитятся вместе и раньше
+    отправки; исход отправки ложится в ту же строку."""
+
+    def env(self, имя="есть.env"):
+        env = os.path.join(self.dir, имя)
+        with open(env, "w", encoding="utf-8") as fh:
+            fh.write("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_HOME_CHANNEL=123456789\n")
+        return env
+
+    def строки(self):
+        return [dict(r) for r in self.con.execute("select * from outbox order by created")]
+
+    def дайджест(self):
+        return self.con.execute("select id, state from digests where event_id=?",
+                                (self.eid,)).fetchone()
+
+    def доставка(self, исход):
+        """Подменить `deliver`; возвращает список вызовов."""
+        звали = []
+
+        def стук(text, token, chat):
+            звали.append((text, chat))
+            if isinstance(исход, Exception):
+                raise исход
+            return исход
+        было = cd.deliver
+        cd.deliver = стук
+        self.addCleanup(setattr, cd, "deliver", было)
+        return звали
+
+    def test_намерение_лежит_в_базе_до_отправки(self):
+        """Когда транспорт стучится в сеть, строка дайджеста и строка outbox
+        уже зафиксированы — другим соединением видно."""
+        увидели = []
+
+        def стук(text, token, chat):
+            другой = mi.connect(self.dir)
+            увидели.append((другой.execute("select state from digests").fetchone()[0],
+                            tuple(другой.execute("select state, attempts from outbox").fetchone())))
+            return "sent"
+        было = cd.deliver
+        cd.deliver = стук
+        self.addCleanup(setattr, cd, "deliver", было)
+        cd.run(self.eid, root=self.dir, env_file=self.env())
+        self.assertEqual(увидели, [("queued", ("pending", 1))],
+                         "попытка считается до отправки, строка — зафиксирована")
+        r, = self.строки()
+        self.assertEqual((r["kind"], r["object_kind"], r["object_id"], r["state"],
+                          r["attempts"]), (cd.ВИД, "event", self.eid, "sent", 1))
+        self.assertIsNotNone(r["sent"])
+        self.assertEqual(json.loads(r["payload_json"])["digest_id"], self.дайджест()["id"])
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("sent", "done"))
+
+    def test_без_транспорта_строка_ждёт_и_уходит_по_outbox(self):
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        cd.run(self.eid, root=self.dir, env_file=пусто)
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"], r["error"]), ("pending", 1, "no-transport"))
+        self.assertEqual(self.дайджест()["state"], "no-transport")
+        # владелец починил настройку — `--outbox` дошлёт всё, что ждёт, без
+        # пересборки и без `--event` по каждому звонку
+        звали = self.доставка("sent")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 1)
+        self.assertEqual(len(звали), 1)
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"], r["error"]), ("sent", 2, None))
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("sent", "done"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 0, "второй раз слать нечего")
+        self.assertEqual(len(звали), 1)
+
+    def test_сбой_сети_оставляет_попытку_в_строке(self):
+        """Исключение из транспорта — попытка считается, строка ждёт, шаг
+        падает в ретрай; повтор шага снимает старое намерение и кладёт новое."""
+        self.доставка(OSError("сеть упала"))
+        with self.assertRaises(OSError):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"]), ("pending", 1))
+        self.assertIn("сеть упала", r["error"])
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("queued", "projected"))
+        self.доставка("sent")
+        cd.run(self.eid, root=self.dir, env_file=self.env())
+        старая, новая = self.строки()
+        self.assertEqual((старая["state"], старая["error"]), ("skipped", "пересобран"))
+        self.assertEqual(новая["state"], "sent")
+        self.assertEqual(self.состояние(), "done")
+
+    def test_отказ_телеграма_закрывает_строку_как_failed(self):
+        self.доставка("failed")
+        with self.assertRaises(RuntimeError):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        r, = self.строки()
+        self.assertEqual(r["state"], "failed")
+        self.assertEqual(self.дайджест()["state"], "failed")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 0,
+                             "failed — не pending: его повторяет ретрай шага, не outbox")
+
+    def test_старый_звонок_в_outbox_не_кладётся(self):
+        with mock.patch.object(cd, "СВЕЖЕСТЬ_Ч", 24):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        self.assertEqual(self.строки(), [])
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("stale", "done"))
+
+    def test_outbox_в_командной_строке(self):
+        r = subprocess.run([sys.executable, os.path.join(СКРИПТЫ, "call_digest.py"),
+                            "--root", self.dir, "--env-file", self.env(), "--outbox"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class Свежесть(unittest.TestCase):
