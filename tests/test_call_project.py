@@ -976,6 +976,9 @@ class EvidenceВРеестре(unittest.TestCase):
                                                 if w.startswith("kb/conversations/")][0]))
         self.assertIn("договорились о цене", conv)
         self.assertNotIn("#" + чужой[-8:], conv, "чужой код в карточке разговора не рисуется")
+        self.assertNotIn("договорились о цене · 00:00", conv,
+                         "вместо отклонённой ссылки не выдумывается 00:00 (Codex, круг 2)")
+        self.assertIn("- договорились о цене · на проверку\n", conv)
         а = [json.loads(r[0]) for r in self.con.execute(
             "select detail_json from audit_events where action='evidence_rejected'")]
         self.assertEqual([(x["list"], x["item"]) for x in а], [("decisions", 1)])

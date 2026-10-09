@@ -54,13 +54,23 @@ def _ммсс(ms):
 def stamp(item):
     """Метка времени первой ссылки: «04:12–04:37» у ссылки на сегмент
     реестра, «04:12» у старой, где конца не было. По ней открывают место в
-    записи (ADR-0004 п.5)."""
-    ev = (item.get("evidence") or [{}])[0]
-    a = int(ev.get("start_ms") or 0)
-    b = ev.get("end_ms")
-    if ev.get("segment_id") and isinstance(b, int) and b > a:
+    записи (ADR-0004 п.5). Ссылок нет (все отклонены реестром) — пустая
+    строка, а не «00:00»: выдуманная метка хуже отсутствующей (Codex по
+    #122, круг 2)."""
+    ev = item.get("evidence") or []
+    if not ev:
+        return ""
+    a = int(ev[0].get("start_ms") or 0)
+    b = ev[0].get("end_ms")
+    if ev[0].get("segment_id") and isinstance(b, int) and b > a:
         return "%s–%s" % (_ммсс(a), _ммсс(b))
     return _ммсс(a)
+
+
+def метка(item):
+    """« · 04:12–04:37» для строки списка; пусто, если метки нет."""
+    s = stamp(item)
+    return " · " + s if s else ""
 
 
 def _код_сегмента(item):
@@ -322,7 +332,7 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
             text = it.get("new_state") or it.get("action") or ""
             due = " (до %s)" % it["due_at"] if it.get("due_at") else ""
             mark = "" if it.get("disposition") == "task" else " · на проверку"
-            lines.append("- %s%s%s · %s" % (scrub(text), due, mark, stamp(it)))
+            lines.append("- %s%s%s%s" % (scrub(text), due, mark, метка(it)))
         lines.append("")
     for line in (people_line(extraction, canon), projects_line(extraction, canon)):
         if line:
@@ -377,7 +387,7 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                            oid, native)
             owner = OWNER if key != "requests" else (it.get("owner") or OWNER)
             body = ["- Обещание: %s" % scrub(action),
-                    "- Откуда: [[%s]] · %s%s" % (conv, stamp(it), _код_сегмента(it))]
+                    "- Откуда: [[%s]]%s%s" % (conv, метка(it), _код_сегмента(it))]
             if it.get("deadline_phrase"):
                 body.append("- Прозвучало о сроке: «%s»" % scrub(it["deadline_phrase"]))
             if it.get("supersedes"):

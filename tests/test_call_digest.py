@@ -609,6 +609,41 @@ class Outbox(_СтендДоставки):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class СверкаСРеестром(_СтендДоставки):
+    """Codex по #122, круг 2: дайджест сверяет извлечение с реестром так же,
+    как проектор — пункт с отклонённой ссылкой не «создан» и без метки."""
+
+    def test_отклонённый_пункт_не_создан_и_без_метки(self):
+        import call_asr, call_project as cp
+        call_asr.записать_сегменты(self.con, self.eid, None, [
+            {"segment_id": "s0002", "start_ms": 25000, "end_ms": 50000, "text": "смета"}])
+        свой = self.con.execute("select id from transcript_segments").fetchone()[0]
+        другой, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                            "source_id": "d9", "occurred_at": EVENT["occurred"],
+                                            "payload": {}})
+        call_asr.записать_сегменты(self.con, другой, None, [
+            {"segment_id": "s0001", "start_ms": 0, "end_ms": 25000, "text": "чужое"}])
+        чужой = self.con.execute("select id from transcript_segments where seq=1").fetchone()[0]
+        extr = с(requests=[
+            {"action": "прислать смету", "explicit": True, "confidence": 0.95,
+             "disposition": "task", "deadline_phrase": "",
+             "evidence": [{"segment": "s0002", "segment_id": свой,
+                           "start_ms": 25000, "end_ms": 50000}]},
+            {"action": "выдумка", "explicit": True, "confidence": 0.95,
+             "disposition": "task", "deadline_phrase": "",
+             "evidence": [{"segment": "s0001", "segment_id": чужой,
+                           "start_ms": 0, "end_ms": 25000}]}])
+        mi.write_json(mi.extraction_path(self.dir, self.eid), extr)
+        cd.run(self.eid, root=self.dir, env_file=os.path.join(self.dir, "нет-такого.env"))
+        text = self.con.execute("select text from digests").fetchone()[0]
+        self.assertIn("1 задач", text.replace("задача", "задач"), "создана одна, не две")
+        self.assertIn("• прислать смету · 00:25–00:50", text)
+        self.assertIn("• выдумка\n", text + "\n", "без выдуманной метки")
+        self.assertNotIn("выдумка · 00:00", text)
+        self.assertEqual(self.con.execute("select count(*) from audit_events").fetchone()[0],
+                         0, "аудит отказов — дело проектора, дайджест только фильтрует")
+
+
 class Свежесть(unittest.TestCase):
     """Разовая догрузка отдаёт неделю молчания одной пачкой: 69 звонков —
     69 сообщений подряд. Старьё в телеграм не идёт, но и не теряется."""

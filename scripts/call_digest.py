@@ -120,7 +120,7 @@ def line_of(item):
     if item.get("supersedes"):
         text = "%s → %s" % (item["supersedes"], text)
     due = " (до %s)" % item["due_at"] if item.get("due_at") else ""
-    return "• %s%s · %s" % (text, due, cp.stamp(item))
+    return "• %s%s%s" % (text, due, cp.метка(item))
 
 
 def render(event, extraction, created_count):
@@ -231,7 +231,12 @@ def run(event_id, root=None, env_file=None):
     epath = mi.extraction_path(root, event_id)
     if not os.path.exists(epath):
         raise RuntimeError("нет извлечения %s" % epath)
-    extraction = json.load(open(epath, encoding="utf-8"))
+    with open(epath, encoding="utf-8") as fh:
+        extraction = json.load(fh)
+    # та же сверка с реестром, что у проектора: пункт, ушедший там в ревью,
+    # и здесь не «создан», а отклонённая ссылка не печатается (Codex по
+    # #122, круг 2); аудит отказов пишет проектор, здесь — только фильтр
+    extraction = cp._сверить_с_реестром(con, event_id, extraction)
     created = len(cp.commitment_cards(ev, extraction, {}))
     text, items = render(ev, extraction, created)
     e = env(env_file)
