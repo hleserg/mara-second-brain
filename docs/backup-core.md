@@ -444,11 +444,15 @@ mkdir -p -m 700 /srv/mara-blobs && tar -xzf /var/tmp/core.tar.gz -C /srv/mara-bl
 scripts/core-backup.py --verify /srv/mara-blobs
 rm /srv/mara-blobs/manifest.json /var/tmp/core.tar.gz
 
-# 2а. Карточки, которые реестр умеет нарисовать сам, — из него (Т2.6):
-#     сухой прогон сравнивает с волтом из git, пустой каталог — заполняет.
-#     В живой волт не пишет: карточки без источника в реестре берутся из git.
-MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --check --vault /srv/vault
-MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --into /var/tmp/vault-rebuilt
+# 2а. Карточки, которые реестр умеет нарисовать сам, — из него (Т2.6).
+#     Волт восстанавливается из git (шаг 5 RUNBOOK-deploy); пересборка его
+#     не заменяет, а проверяет: карточки без источника в реестре (перенесённые
+#     из волта до проектора) только из git и берутся. Сухой прогон сравнивает
+#     с волтом из git — код 1 с «разошлось» у правленных рукой до переноса
+#     ожидаем, смотреть дифф. Пустой каталог заполняется и без волта
+#     («Люди:» тогда без ссылок, пока entity-link.py не догонит).
+MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --check --diff --vault /srv/vault
+MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --into /var/tmp/vault-rebuilt --vault /srv/vault
 
 # 3. Аудио из зеркала
 cd /mnt/backup/mara && find calls -name '*.gpg' | while read -r f; do

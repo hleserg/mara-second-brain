@@ -22,8 +22,18 @@
 
 Что в проекции **не** воспроизводится из реестра и потому даёт «разошлось»:
 правка рукой, не перенесённая `ledger_import.py`; чужие ключи шапки (Basic
-Memory); извлечение, переделанное после проекции. Это не ошибки пересборки,
-а сведения о волте — их и печатает сухой прогон.
+Memory); извлечение, переделанное после проекции; строка журнала,
+поправленная рукой после переноса (в `corrections` остаются обе — прежняя
+и новая, пересборка рисует две строки); сущность, заведённая после проекции
+(индекс `_system/entity-index.json` — не реестр: «Люди:» линкуется иначе, а
+`content_sha256` разговора — хеш тела на момент проекции); поднятый
+`PIPELINE_VERSION` (строка `pipeline_version:` у всех карточек; какой
+версией нарисована — `projections.projector_version`). Это не ошибки
+пересборки, а сведения о волте — их и печатает сухой прогон.
+
+Для `--into` живой волт не обязателен: нет его — сравнивать не с чем
+(«не сравнивалось»), а имена в «Люди:» остаются без ссылок, пока
+`entity-link.py` не догонит их по индексу сущностей восстановленного волта.
 
     python3 scripts/vault_rebuild.py --check [--diff] [--vault V --root R]
     python3 scripts/vault_rebuild.py --into /tmp/vault-rebuilt [--vault V --root R]
@@ -44,7 +54,7 @@ from vault_common import canon_map, scrub
 ИЗ_СТРОКИ = {"commitment": ("created", "status", "owner", "promised_to", "due",
                             "due_explicit", "valid_from", "classification"),
              "conversation": ("created", "valid_from", "classification")}
-СОСТОЯНИЯ = ("совпало", "разошлось", "без файла", "без источника")
+СОСТОЯНИЯ = ("совпало", "разошлось", "без файла", "без источника", "не сравнивалось")
 
 
 class НеПересобрать(RuntimeError):
@@ -69,33 +79,48 @@ def _журнал(con, oid):
     """Строки «Правки:» из `corrections` — в том виде, в каком их пишет
     `call_project._поправить`: одна строка журнала на правку, переходы
     статуса и срока, затем заметка. Отметки переноса (`actor_type`
-    `import`) — не журнал. Правки одной минуты — в порядке записи."""
+    `import`) — не журнал.
+
+    Строки реестра идут по одной на поле, и в строку журнала они
+    собираются по соседству (`rowid` — порядок записи, он же порядок строк
+    в файле: журнал только дописывается): строка `note` — всегда отдельная
+    строка журнала (перенос заводит её только у строки без переходов);
+    переход с уже занятым полем, другим временем, автором или событием
+    открывает новую строку. Ключ `(время, автор, событие)` для этого не
+    годится: две строки рукой в одну минуту или строка, поправленная рукой
+    после переноса (в реестре остаются обе), сливались бы в одну (ревью
+    PR #125)."""
     rows = con.execute(
         "select field, old_json, new_json, actor_id, origin_event, occurred, reason "
         "from corrections where object_kind='commitment' and object_id=? and "
-        "actor_type='human' order by occurred, rowid", (oid,)).fetchall()
-    группы = {}
+        "actor_type='human' order by rowid", (oid,)).fetchall()
+    строки, текущая = [], None
     for r in rows:
-        группы.setdefault((r["occurred"], r["actor_id"], r["origin_event"]), []).append(r)
-    строки = []
-    for (когда, кто, событие), части in группы.items():
-        переходы, заметка = [], None
-        for r in части:
-            если = json.loads(r["new_json"]) if r["new_json"] else None
-            было = json.loads(r["old_json"]) if r["old_json"] else None
-            if r["field"] == "status":
-                переходы.append("статус %s → %s" % (было or "?", если))
-            elif r["field"] == "due":
-                переходы.append("срок %s → %s" % (было or "не был", если))
-            else:
-                заметка = если
-            _, _, хвост = (r["reason"] or "").partition(": ")
-            if хвост and заметка is None:
-                заметка = хвост
-        части_строки = переходы + ([заметка] if заметка else [])
+        ключ = (r["occurred"], r["actor_id"], r["origin_event"])
+        if (текущая is None or текущая["ключ"] != ключ or текущая["заметка"] is not None
+                or r["field"] == "note" or r["field"] in текущая["поля"]):
+            текущая = {"ключ": ключ, "поля": [], "переходы": [], "заметка": None,
+                       "хвост": None}
+            строки.append(текущая)
+        если = json.loads(r["new_json"]) if r["new_json"] else None
+        было = json.loads(r["old_json"]) if r["old_json"] else None
+        текущая["поля"].append(r["field"])
+        if r["field"] == "status":
+            текущая["переходы"].append("статус %s → %s" % (было or "?", если))
+        elif r["field"] == "due":
+            текущая["переходы"].append("срок %s → %s" % (было or "не был", если))
+        else:
+            текущая["заметка"] = если
+        _, _, хвост = (r["reason"] or "").partition(": ")
+        текущая["хвост"] = текущая["хвост"] or хвост
+    out = []
+    for с in строки:
+        когда, кто, событие = с["ключ"]
+        заметка = с["заметка"] if с["заметка"] is not None else с["хвост"]
+        части = с["переходы"] + ([заметка] if заметка else [])
         адрес = "%s, %s" % (когда[:16], кто) + (", correction/%s" % событие if событие else "")
-        строки.append("- %s: %s" % (адрес, "; ".join(части_строки)))
-    return строки
+        out.append("- %s: %s" % (адрес, "; ".join(части)))
+    return out
 
 
 def _с_журналом(text, строки):
@@ -145,11 +170,14 @@ def _из_звонка(con, root, event_id, canon, пути):
     for native, it in cp._пункты(dict(extraction, event_id=event_id)).items():
         oid = объекты.get(native)
         ссылки = _evidence_из_реестра(con, oid) if oid else []
-        if ссылки:
+        # только у однородного списка: у смешанного (первая ссылка — старая,
+        # без `segment_id`) проекция рисовала метку по старой, и подмена
+        # сдвинула бы её (ревью PR #125)
+        if ссылки and all(isinstance(e.get("segment_id"), str) and e.get("segment_id")
+                          for e in it.get("evidence") or [] if isinstance(e, dict)):
             it["evidence"] = ссылки
-    ид = cp._из_реестра(con)
-    cards = cp.all_cards(ev, extraction, canon, ид,
-                         lambda вид, rel, oid, native: пути.get(oid, rel))
+    cards = cp.all_cards(ev, extraction, canon, cp._из_реестра(con),
+                         lambda вид, rel, oid, native: пути.get(oid, rel), cp._создан(con))
     out = {}
     for rel, text in cards:
         вид = li.вид_по_пути(rel)
@@ -177,12 +205,16 @@ def _строка(con, вид, oid):
     return con.execute("select * from %s where id=?" % таблица, (oid,)).fetchone()
 
 
-def пересобрать(con, root, vault):
+def пересобрать(con, root, vault, сравнивать=True):
     """→ (счётчики, `{rel: (состояние, текст или None, причина)}`). Ничего
-    не пишет; волт только читается — ради сравнения и карты сущностей."""
-    if not vault or not any(os.path.isdir(os.path.join(vault, под)) for под, *_ in li.ВИДЫ):
+    не пишет; волт только читается — ради сравнения и карты сущностей.
+    Без волта (`сравнивать=False`, путь `--into` без живого волта) карточки
+    рисуются с пустой картой сущностей и помечаются «не сравнивалось»."""
+    волт_есть = bool(vault) and any(os.path.isdir(os.path.join(vault, под))
+                                    for под, *_ in li.ВИДЫ)
+    if сравнивать and not волт_есть:
         raise vd.ВолтНеПрочитан("волт не прочитан: %s — нет каталогов карточек" % vault)
-    canon = canon_map(vault)
+    canon = canon_map(vault) if волт_есть else {}
     проекции = [dict(r) for r in con.execute(
         "select path, object_kind, object_id from projections order by path")]
     пути = {p["object_id"]: p["path"] for p in проекции}
@@ -213,6 +245,10 @@ def пересобрать(con, root, vault):
             итог["без источника"] += 1
             карточки[rel] = ("без источника", None, str(e))
             continue
+        if not волт_есть:
+            итог["не сравнивалось"] += 1
+            карточки[rel] = ("не сравнивалось", text, "волта нет — сравнивать не с чем")
+            continue
         путь = os.path.join(vault, rel)
         try:
             with open(путь, "rb") as fh:
@@ -234,12 +270,14 @@ def пересобрать(con, root, vault):
 
 
 def записать(карточки, into, vault=None):
-    """Пересобранные карточки — в пустой каталог. Живой волт — отказ (Г4)."""
-    if vault and os.path.realpath(into) == os.path.realpath(vault):
+    """Пересобранные карточки — в пустой каталог. Живой волт и всё внутри
+    него — отказ (Г4): подкаталог волта попал бы в синк и в коммит."""
+    if vault and os.path.isdir(vault) and os.path.commonpath(
+            [os.path.realpath(into), os.path.realpath(vault)]) == os.path.realpath(vault):
         raise RuntimeError("в живой волт пересборка не пишет (Г4/Т2.8): "
-                           "укажите пустой каталог")
-    if os.path.isdir(into) and os.listdir(into):
-        raise RuntimeError("каталог %s не пуст — пересборка пишет только в пустой" % into)
+                           "укажите пустой каталог вне волта")
+    if os.path.exists(into) and (not os.path.isdir(into) or os.listdir(into)):
+        raise RuntimeError("%s — не пустой каталог, пересборка пишет только в пустой" % into)
     n = 0
     for rel, (состояние, text, _) in sorted(карточки.items()):
         if text is None:
@@ -311,10 +349,10 @@ def main():
         ap.error("нужен --check или --into КАТАЛОГ")
     try:
         con = vd.только_чтение(a.root)
-        итог, карточки = пересобрать(con, a.root, a.vault)
+        итог, карточки = пересобрать(con, a.root, a.vault, сравнивать=bool(a.check))
         if a.into:
             print("записано карточек: %d → %s" % (записать(карточки, a.into, a.vault), a.into))
-    except (vd.ВолтНеПрочитан, sqlite3.OperationalError, RuntimeError) as e:
+    except (vd.ВолтНеПрочитан, sqlite3.OperationalError, RuntimeError, OSError) as e:
         print("vault_rebuild: %s" % e, file=sys.stderr)
         return 2
     print(строка(итог))

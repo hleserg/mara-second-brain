@@ -171,6 +171,67 @@ class Пересборка(unittest.TestCase):
             vr.записать(карточки, занят, self.vault)
         self.assertEqual(os.listdir(занят), ["x"])
 
+    def test_журнал_рукой_две_строки_в_минуту_и_ранняя_дата_позже(self):
+        """Ревью PR #125: строки журнала собираются по соседству записи, не
+        по ключу (время, автор, событие) — две строки рукой в одну минуту не
+        сливаются, а строка с более ранней датой, дописанная позже, остаётся
+        на своём месте (журнал только дописывается)."""
+        self.правка(item="прислать смету", status="done", note="отправил")
+        with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:
+            fh.write("- 2026-09-21T15:08, владелец: первая заметка\n"
+                     "- 2026-09-21T15:08, владелец: вторая заметка\n"
+                     "- 2026-09-01T10:00, владелец: срок 2026-09-04 → 2026-09-03; задним числом\n")
+        li.run(self.con, self.vault)
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
+
+    def test_заметка_с_переносом_и_точкой_с_запятой_переживает_круг(self):
+        self.правка(item="прислать смету", status="done", note="а ;б;;в\nвторая строка")
+        text = self.читать(self.card)
+        self.assertIn("статус proposed → done; а; б; в вторая строка\n", text)
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
+
+    def test_повторная_проекция_не_меняет_created(self):
+        """Ревью PR #125: `created` при перерисовке — из реестра, иначе каждая
+        повторная проекция давала бы «разошлось» по одной строке."""
+        было_created = [l for l in self.читать(self.card).splitlines()
+                        if l.startswith("created:")]
+        было = mi.now_iso
+        mi.now_iso = lambda: "2027-01-01T00:00:00+03:00"
+        try:
+            cp.run(self.eid, self.vault, self.root)
+        finally:
+            mi.now_iso = было
+        self.assertEqual([l for l in self.читать(self.card).splitlines()
+                          if l.startswith("created:")], было_created)
+        итог, карточки = self.пересборка()
+        self.assertEqual(итог["совпало"], 3, dict(итог))
+
+    def test_into_без_живого_волта(self):
+        """Восстановление в пустой каталог не требует волта: сравнивать не с
+        чем, карточки — «не сравнивалось», «Люди:» без ссылок до entity-link."""
+        with self.assertRaises(vd.ВолтНеПрочитан):
+            vr.пересобрать(self.con, self.root, None)
+        итог, карточки = vr.пересобрать(self.con, self.root, None, сравнивать=False)
+        self.assertEqual((итог["не сравнивалось"], итог["совпало"]), (3, 0), dict(итог))
+        self.assertFalse(vr.расхождение(итог))
+        into = os.path.join(os.path.dirname(self.vault), "без-волта")
+        self.assertEqual(vr.записать(карточки, into, None), 3)
+        for rel in карточки:
+            self.assertEqual(self.читать(rel, into), self.читать(rel), rel)
+
+    def test_подкаталог_волта_и_файл_вместо_каталога(self):
+        итог, карточки = self.пересборка()
+        with self.assertRaises(RuntimeError) as e:
+            vr.записать(карточки, os.path.join(self.vault, "новое"), self.vault)
+        self.assertIn("Г4", str(e.exception))
+        self.assertFalse(os.path.exists(os.path.join(self.vault, "новое")))
+        файл = os.path.join(os.path.dirname(self.vault), "файл")
+        open(файл, "w").close()
+        with self.assertRaises(RuntimeError):
+            vr.записать(карточки, файл, self.vault)
+
     def test_неполный_волт_отказ(self):
         with self.assertRaises(vd.ВолтНеПрочитан):
             vr.пересобрать(self.con, self.root, os.path.join(self.root, "нет"))
@@ -198,6 +259,13 @@ class Пересборка(unittest.TestCase):
         self.assertNotIn("рукой", self.читать(self.card, into))
         r = запуск("--check", "--root", os.path.join(self.root, "опечатка"))
         self.assertEqual(r.returncode, 2, r.stdout)
+        r = запуск("--into", into)                       # каталог уже занят
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("не пустой", r.stderr)
+        r = запуск("--into", os.path.join(os.path.dirname(self.vault), "ещё"),
+                   "--vault", os.path.join(self.root, "нет"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("не сравнивалось 3", r.stdout)
 
 
 if __name__ == "__main__":

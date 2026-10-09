@@ -257,6 +257,23 @@ def _новый(вид, native):
     return mi.uuid7()
 
 
+def _создан(con):
+    """`created` объекта из реестра, если он там есть: повторная проекция
+    того же звонка не переписывает дату создания карточки (перенос её
+    намеренно не обновляет, и пересборка из реестра берёт её же — иначе
+    каждая перерисовка давала бы «разошлось» по одной строке `created:`,
+    ревью PR #125). Нет объекта — None, и карточка получает «сейчас»."""
+    def создан(вид, oid):
+        таблица = "commitments" if вид == "commitment" else "conversations"
+        row = con.execute("select created from %s where id=?" % таблица, (oid,)).fetchone()
+        return row["created"] if row else None
+    return создан
+
+
+def _никогда(вид, oid):
+    return None
+
+
 def _из_реестра(con):
     """Id по `source_id`, если объект уже есть в реестре; иначе новый.
 
@@ -313,12 +330,14 @@ def _как_есть(вид, rel, oid, native):
     return rel
 
 
-def conversation_card(event, extraction, canon, ид=_новый, вольный=_как_есть):
+def conversation_card(event, extraction, canon, ид=_новый, вольный=_как_есть,
+                      создан=_никогда):
     """(путь относительно волта, текст карточки) для одного разговора."""
     day, hhmm, human = when(event)
     who = contact(event)
     native = "call/" + event["id"]
     oid = ид("conversation", native)
+    created = создан("conversation", oid) or mi.now_iso()
     path = вольный("conversation", "%s/%s-%s-%s.md" % (CONV_DIR, day, hhmm, slug(who)),
                    oid, native)
 
@@ -345,7 +364,7 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
          ("type", "conversation"),
          ("source", "phone"),
          ("source_id", native),
-         ("created", mi.now_iso()),
+         ("created", created),
          ("occurred", event.get("occurred")),
          ("sensitive", "true"),
          ("distilled", "true"),
@@ -364,7 +383,7 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
 
 
 def commitment_cards(event, extraction, canon, ид=_новый, вольный=_как_есть,
-                     conv=None):
+                     conv=None, создан=_никогда):
     """Карточки обязательств: только то, что перешло порог и сказано прямо.
 
     `conv` — имя файла разговора без расширения, на который ссылается
@@ -403,7 +422,7 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                  ("type", "commitment"),
                  ("source", "phone"),
                  ("source_id", native),
-                 ("created", mi.now_iso()),
+                 ("created", создан("commitment", oid) or mi.now_iso()),
                  ("occurred", event.get("occurred")),
                  ("sensitive", "true"),
                  ("distilled", "true"),
@@ -459,15 +478,15 @@ def person_card(event, canon):
     return "entities/people/%s.md" % key, fm + "\n" + body
 
 
-def all_cards(event, extraction, canon, ид=_новый, вольный=_как_есть):
+def all_cards(event, extraction, canon, ид=_новый, вольный=_как_есть, создан=_никогда):
     """Всё, что рождает один звонок: разговор и обязательства из него."""
-    conv_path, conv_text = conversation_card(event, extraction, canon, ид, вольный)
+    conv_path, conv_text = conversation_card(event, extraction, canon, ид, вольный, создан)
     cards = [(conv_path, conv_text)]
     person = person_card(event, canon)
     if person:
         cards.append(person)
     conv = os.path.basename(conv_path)[:-3]
-    return cards + commitment_cards(event, extraction, canon, ид, вольный, conv)
+    return cards + commitment_cards(event, extraction, canon, ид, вольный, conv, создан)
 
 
 def write_cards(vault, cards):
@@ -516,7 +535,8 @@ def run(event_id, vault, root=None):
                              event_id, dict(о, list=key, item=n, why="сегмент не из "
                                             "расшифровки события или интервал за границами"),
                              когда)
-    cards = all_cards(ev, extraction, canon, _из_реестра(con), _свободный(vault, con))
+    cards = all_cards(ev, extraction, canon, _из_реестра(con), _свободный(vault, con),
+                      _создан(con))
     written = write_cards(vault, cards)
     _отозвать_evidence(con, vault, event_id, extraction, когда)
     # Реестр узнаёт о карточке тем же прогоном, а не ночным переносом: id
@@ -916,7 +936,12 @@ def apply_correction(vault, event, con=None):
     p = event.get("payload") or {}
     item = scrub(str(p.get("item") or "").strip())
     status, due = p.get("status") or None, p.get("due") or None
-    note = scrub(str(p.get("note") or "").strip()) or None
+    # заметка — одной строкой и с одиночным «; »: журнал «Правки:» режется
+    # по «;» и читается построчно (`ledger_import.журнал`), и заметка с
+    # переносом или двойной точкой с запятой не пережила бы круг
+    # волт → реестр → пересборка (ревью PR #125)
+    note = re.sub(r"\s*;+\s*", "; ", " ".join(str(p.get("note") or "").split())).strip("; ")
+    note = scrub(note) or None
     ид = p["id"].strip() if isinstance(p.get("id"), str) else ""
     ожидали = _целое(p.get("expected_version"))
     когда = mi.now_iso()
