@@ -14,7 +14,7 @@ SQLite только очередь.
     python3 scripts/call_project.py --event call_<uuid> --vault /srv/vault
     python3 scripts/call_project.py --self-check
 """
-import os, sys, re, json, glob, hashlib, argparse
+import os, sys, re, json, glob, hashlib, argparse, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -640,6 +640,79 @@ def _завести(vault, item, due, note, когда, event):
             "text": "завёл «%s»%s" % (item, " до " + due if due else "")}
 
 
+def _вернуть_карточку(vault, out, found):
+    """Снять с диска то, что записала правка: заведённую карточку убрать,
+    поправленной вернуть прежний текст (он в `found[0]["text"]`)."""
+    if out.get("created"):
+        try:
+            os.remove(os.path.join(vault, out["created"]))
+        except FileNotFoundError:
+            pass
+    elif out.get("applied") and found:
+        _atomic(found[0]["path"], found[0]["text"])
+
+
+def _в_реестр(con, vault, event, p, out, found, адреса, проверено, слияние, когда):
+    """Хвост правки в реестре: перенос записанной карточки и событие аудита —
+    одной транзакцией (§5.2, Т2.5: «след правки сохраняется»). Аудит пишется
+    на любой исход, включая отказы: конфликт, «подходят несколько», «не
+    нашёл» — ревизии их не видят, а след нужен и им.
+
+    `applied`, а не `changed`: правка «только заметка» меняет журнал, а не
+    шапку, и по `changed` реестр её не видел (Codex по #117, P1).
+    Перенос — под тем же флоком, что и запись: иначе вторая правка успевала
+    бы изменить файл до того, как первая прочитает его в реестр, и две
+    правки ложились бы одной ревизией с чужим актором (Codex по #117, P2).
+    """
+    eid = event.get("id")
+    rel = out.get("card") if out.get("applied") else out.get("created")
+    причина = "correction/%s" % eid
+    # ADR-0003 п.3: правка, версию которой проверить было нечем или не
+    # просили (нет `expected_version` или строки в реестре), записывается с
+    # `legacy_title_match` в причине ревизии — долг виден в данных, а не
+    # только в ответе (`version_checked`)
+    if out.get("applied") and not проверено:
+        причина += "; legacy_title_match"
+    with mi.транзакция(con):
+        if rel:
+            # актор — владелец: правка словами это его решение, Мара лишь записала
+            oid = li.перенести_карточку(con, vault, rel, актор=("human", "owner", причина))
+            if not oid:
+                # перенос отверг карточку (спор по ключу или занятому id, см.
+                # `ledger_import._спор`) — это отказ команды, а не её успех:
+                # без исключения транзакция записала бы аудит `applied`, а
+                # файл остался бы с правкой без строки (Codex по #120, круг 3).
+                # `call_project.run` тот же None считает ошибкой.
+                raise RuntimeError("правка %s: карточка %s спорная, реестр её не принял"
+                                   % (eid, rel))
+            row = con.execute("select version from commitments where id=?",
+                              (oid,)).fetchone()
+            # id и версия в ответе — чтобы следующая правка пришла с ними
+            # (ADR-0003 п.3: сперва id в ответ, потом expected_version
+            # обязателен)
+            out["id"], out["version"] = oid, row["version"] if row else None
+        elif "id" not in out and out.get("found") and len(found) == 1:
+            # «уже так»: ничего не писали, но адрес и версия у карточки есть
+            row = _строка_реестра(con, found[0], адреса)
+            if row:
+                out["id"], out["version"] = row["id"], row["version"]
+        исход = ("conflict" if out.get("error") == "version_conflict"
+                 else "ambiguous" if out.get("ambiguous")
+                 else "created" if out.get("created")
+                 else "applied" if out.get("applied")
+                 else "noop" if out.get("found")
+                 else "not_found")
+        mi.audit(con, "correction", ("human", "owner"), "commitment",
+                 out.get("id") or out.get("entity_id"),
+                 {"event": eid, "outcome": исход,
+                  "fields": [k for k in ("status", "due", "note") if p.get(k)],
+                  "expected_version": _целое(p.get("expected_version")),
+                  "version_checked": проверено,
+                  "merged": "commutative" if слияние else None,
+                  "conflict_id": out.get("conflict_id"),
+                  "ambiguous_ids": out.get("ambiguous_ids")}, когда)
+
+
 def apply_correction(vault, event, con=None):
     """Событие kind=correction → карточка. Возвращает, что сделано, с полем
     `text` для Мары. Пакет для Мары пересобирается сразу, как после звонка.
@@ -655,69 +728,88 @@ def apply_correction(vault, event, con=None):
     ид = p["id"].strip() if isinstance(p.get("id"), str) else ""
     ожидали = _целое(p.get("expected_version"))
     когда = mi.now_iso()
+    # Реестр — одной транзакцией на всю команду: тревога конфликта, перенос
+    # карточки и строка аудита ложатся вместе или никак (§5.2, ревью PR
+    # #120, P3-1). Замок записи берётся уже под флоком волта, а не до него,
+    # и держится миллисекунды — файл карточки пишется внутри, но он мал.
     with locked(vault):
-        cards = _карточки(vault)
-        адреса = _адреса(con)
-        # код из пакета — точный адрес, поиск по словам ему не нужен; нет
-        # такого кода — не угадываем по словам, а говорим
-        found = _по_коду(cards, ид, адреса) if ид else _похожие(item, cards)
-        конфликт, проверено = None, False
-        if len(found) == 1 and ожидали is not None and con is not None:
-            fm = found[0]["fm"]
-            # ADR-0003 п.5: правка, после которой ничего не меняется, — не
-            # конфликт, а «уже так»; версию проверяем только у настоящего
-            # изменения
-            меняет = ((status and status != fm.get("status"))
-                      or (due and due != fm.get("due")) or bool(note))
-            проверено = _строка_реестра(con, found[0], адреса) is not None
-            if меняет:
-                конфликт = _конфликт(con, found[0], ожидали, dict(p), когда, адреса)
-        if конфликт:
-            out = конфликт
-        elif len(found) > 1:
-            names = [c["fm"].get("title") for c in found]
-            out = {"found": False, "ambiguous": names,
-                   "ambiguous_ids": [_id_карточки(c, адреса) for c in found],
-                   "text": "подходят несколько, уточни: " + "; ".join(names)}
-        elif found:
-            out = _поправить(found[0], status, due, note, когда, event.get("id"))
-            # ADR-0003 п.3: без строки в реестре версию проверить нечем
-            out["version_checked"] = проверено
-        elif ид:
-            out = {"found": False, "text": "не нашёл карточку с кодом #%s" % ид.lstrip("#")}
-        elif status == "open":
-            out = _завести(vault, item, due, note, когда, event)
-        else:
-            открытые = [c["fm"].get("title") for c in cards
-                        if c["fm"].get("status") in context_pack.OPEN]
-            out = {"found": False, "open": открытые,
-                   "text": "не нашёл «%s» среди открытых: %s"
-                           % (item, "; ".join(открытые) or "список пуст")}
-        # `applied`, а не `changed`: правка «только заметка» меняет журнал, а
-        # не шапку, и по `changed` реестр её не видел (Codex по #117, P1).
-        # Перенос — под тем же флоком, что и запись: иначе вторая правка
-        # успевала бы изменить файл до того, как первая прочитает его в
-        # реестр, и две правки ложились бы одной ревизией с чужим актором
-        # (Codex по #117, P2).
-        rel = out.get("card") if out.get("applied") else out.get("created")
-        if con is not None and rel:
-            # актор — владелец: правка словами это его решение, Мара лишь записала
-            oid = li.перенести_карточку(con, vault, rel, актор=(
-                "human", "owner", "correction/%s" % event.get("id")))
-            if oid:
-                row = con.execute("select version from commitments where id=?",
-                                  (oid,)).fetchone()
-                # id и версия в ответе — чтобы следующая правка пришла с ними
-                # (ADR-0003 п.3: сперва id в ответ, потом expected_version
-                # обязателен)
-                out["id"], out["version"] = oid, row["version"] if row else None
-    if con is not None and "id" not in out and out.get("found") and len(found) == 1:
-        # «уже так»: ничего не писали, но адрес и версия у карточки есть
-        row = _строка_реестра(con, found[0], адреса)
-        if row:
-            out["id"], out["version"] = row["id"], row["version"]
+        # что записано на диск — видно снаружи и до возврата из `_правка`:
+        # исключение из переноса или из `commit` должно знать, что откатывать
+        записано = {}
+        try:
+            with (mi.транзакция(con) if con is not None else contextlib.nullcontext()):
+                out = _правка(con, vault, event, p, item, status, due, note,
+                              ид, ожидали, когда, записано)
+        except BaseException:
+            # Реестр откатился — откатываем и файл: иначе карточка уже с
+            # правкой, а строки нет, и повтор видит «уже так», так что реестр
+            # не догонит никогда (Codex по #120, P1). Ловим снаружи
+            # транзакции: упавший `commit` — тоже откат (Codex, круг 2).
+            # Файл — не транзакция, поэтому прежний текст возвращаем руками.
+            if записано:
+                _вернуть_карточку(vault, записано["out"], записано["found"])
+            raise
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
+    return out
+
+
+def _правка(con, vault, event, p, item, status, due, note, ид, ожидали, когда,
+            записано):
+    """Тело команды под флоком и транзакцией: найти, решить, записать файл,
+    перенести в реестр. Возвращает ответ; в `записано` кладёт ответ и
+    найденные карточки, как только файл на диске тронут."""
+    cards = _карточки(vault)
+    адреса = _адреса(con)
+    # код из пакета — точный адрес, поиск по словам ему не нужен; нет
+    # такого кода — не угадываем по словам, а говорим
+    found = _по_коду(cards, ид, адреса) if ид else _похожие(item, cards)
+    конфликт, проверено, слияние = None, False, False
+    if len(found) == 1 and ожидали is not None and con is not None:
+        fm = found[0]["fm"]
+        # ADR-0003 п.5: правка, после которой ничего не меняется, — не
+        # конфликт, а «уже так»; версию проверяем только у настоящего
+        # изменения. Заметка — коммутативна: только `status` и `due`
+        # двигают версию, а с ними она не пересекается, так что правка
+        # «одна заметка» на несовпавшую версию принимается, а не идёт
+        # в ревью.
+        меняет_шапку = ((status and status != fm.get("status"))
+                        or (due and due != fm.get("due")))
+        row = _строка_реестра(con, found[0], адреса)
+        проверено = row is not None
+        if меняет_шапку or (note and row is not None and ожидали > row["version"]):
+            # версия больше текущей — такой нет; это не «старая
+            # заметка», а чужое представление о карточке (ревью PR
+            # #120, P3-4)
+            конфликт = _конфликт(con, found[0], ожидали, dict(p), когда, адреса)
+        elif note and row is not None:
+            слияние = row["version"] != ожидали
+    if конфликт:
+        out = конфликт
+    elif len(found) > 1:
+        names = [c["fm"].get("title") for c in found]
+        out = {"found": False, "ambiguous": names,
+               "ambiguous_ids": [_id_карточки(c, адреса) for c in found],
+               "text": "подходят несколько, уточни: " + "; ".join(names)}
+    elif found:
+        out = _поправить(found[0], status, due, note, когда, event.get("id"))
+        # ADR-0003 п.3: без строки в реестре версию проверить нечем
+        out["version_checked"] = проверено
+        if слияние:
+            out["merged"] = "commutative"
+    elif ид:
+        out = {"found": False, "text": "не нашёл карточку с кодом #%s" % ид.lstrip("#")}
+    elif status == "open":
+        out = _завести(vault, item, due, note, когда, event)
+    else:
+        открытые = [c["fm"].get("title") for c in cards
+                    if c["fm"].get("status") in context_pack.OPEN]
+        out = {"found": False, "open": открытые,
+               "text": "не нашёл «%s» среди открытых: %s"
+                       % (item, "; ".join(открытые) or "список пуст")}
+    записано.update(out=out, found=found)
+    if con is not None:
+        _в_реестр(con, vault, event, p, out, found, адреса, проверено, слияние, когда)
     return out
 
 

@@ -36,7 +36,9 @@ def карточка(vault, rel, **fm):
     return p
 
 
-class Перенос(unittest.TestCase):
+class _СтендПереноса(unittest.TestCase):
+    """Пустые реестр и волт; тестов не несёт."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -51,6 +53,8 @@ class Перенос(unittest.TestCase):
     def строки(self, table):
         return [dict(r) for r in self.con.execute("select * from " + table)]
 
+
+class Перенос(_СтендПереноса):
     def test_обязательство_переносится_с_полями_и_отпечатком(self):
         p = карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
         итог = self.перенести()
@@ -1122,6 +1126,62 @@ class Версия(unittest.TestCase):
         self.assertEqual(self.con.execute("select title from conversations").fetchone()[0],
                          "Звонок с Анной")
         self.assertEqual(self.ревизии(), [])
+
+
+
+
+class Аудит(_СтендПереноса):
+    """Т2.5, §5.2: объект + ревизия + событие аудита — одной транзакцией.
+    В аудите — имена полей и версия, без значений."""
+
+    def аудит(self):
+        return [dict(r) for r in self.con.execute(
+            "select * from audit_events order by occurred, id")]
+
+    def test_создание_и_изменение_оставляют_след(self):
+        p = карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        self.перенести()
+        а, = self.аудит()
+        oid = self.строки("commitments")[0]["id"]
+        self.assertEqual((а["action"], а["object_kind"], а["object_id"], а["actor_type"],
+                          а["actor_id"]), ("object.created", "commitment", oid, "import",
+                                           li.ПЕРЕНОС))
+        д = json.loads(а["detail_json"])
+        self.assertEqual(д["version"], 1)
+        self.assertIn("title", д["fields"])
+        self.assertNotIn("смету", а["detail_json"], "содержимого в аудите нет")
+        self.перенести()
+        self.assertEqual(len(self.аудит()), 1, "перерисовка без изменений следа не оставляет")
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md", status="open")
+        self.перенести()
+        а = self.аудит()[-1]
+        self.assertEqual(а["action"], "object.updated")
+        self.assertEqual(json.loads(а["detail_json"]), {"version": 2, "fields": ["status"],
+                                                        "reason": li.ПЕРЕНОС_АКТОР[2]})
+
+    def test_разговор_тоже_в_аудите_но_без_версии(self):
+        карточка(self.vault, "kb/conversations/2026-09-02-1405-anna.md",
+                 type="conversation", title="Анна, звонок", source_id="call/call_1",
+                 origin=None, due=None, promised_to=None)
+        self.перенести()
+        а, = self.аудит()
+        self.assertEqual((а["action"], а["object_kind"]), ("object.created", "conversation"))
+        self.assertIsNone(json.loads(а["detail_json"])["version"])
+
+    def test_аудит_откатывается_вместе_с_объектом(self):
+        карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
+        было = mi.audit
+
+        def упасть(*a, **kw):
+            raise RuntimeError("смоделированный сбой аудита")
+        mi.audit = упасть
+        try:
+            with self.assertRaises(RuntimeError):
+                self.перенести()
+        finally:
+            mi.audit = было
+        self.assertEqual(self.строки("commitments"), [], "объект без следа не записан")
+        self.assertEqual(self.строки("revisions"), [])
 
 
 if __name__ == "__main__":

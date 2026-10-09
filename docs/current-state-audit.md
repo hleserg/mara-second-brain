@@ -228,7 +228,7 @@ retention в 04:40, `context_pack` в 04:25, `gmail_ingest --sync` каждые
 (`scripts/contextd.py:974`, `mi.add_job(con, event_id, "asr")`), и цепочка
 `asr → extract → project → digest` отработала ровно на 171 звонке. Сообщения
 и письма в неё не попадают **by design**: первый `insert into commitments`
-появляется в Т2.5. Формулировка «36 805 событий прошли мимо обработки»
+появляется в Т-У.3. Формулировка «36 805 событий прошли мимо обработки»
 недоказуема — `daily-page.log` и `context-pack.log` отработали, значит
 `events` читает не только `jobs`.
 
@@ -467,7 +467,7 @@ ASR идёт с просроченной арендой. Сейчас безоп
 | Ledger документирован и единственный write authority | наоборот: authority — волт (`call_project.py:6-7`), в базе 5 служебных таблиц | — | нет |
 | Immutable stable IDs, не зависящие от имени файла | разговор и обязательство: uuid7 в шапке (`id:`) и в реестре, выдаёт `call_project` через реестр, занятый путь — различитель из id (Т2.2, 2026-10-05); `events.id` — uuid4 с префиксом, как было; люди — по slug имени | `tests/test_call_project.py::Идентичность`, `tests/test_ledger_import.py::Идентичность` | частично: карточки — есть, события и люди — нет; на doctor ждёт `--write-ids` |
 | Regression-тесты на коллизии двух карточек и двух звонков в минуту | путь из даты и slug получает различитель из id (`call_project._свободный`), повтор — квитанция (Т2.9) | `tests/test_collisions.py` (три сценария §17.1), `tests/test_call_project.py::Идентичность` | **есть** (2026-10-09, Т2.7) |
-| Updates через revisions и `expected_version` | `version` и `revisions` растут на каждое принятое изменение (`ledger_import._записать_объект`); `mara_correction` принимает `id` и `expected_version`, расхождение — `version_conflict` в `alerts` (Т2.3, части 1–2) | `tests/test_ledger_import.py::Версия`, `tests/test_call_project.py::ПравкаПоКоду` | частично (2026-10-09): `expected_version` необязателен, HTTP 409 — за доменными командами Т2.5 |
+| Updates через revisions и `expected_version` | `version` и `revisions` растут на каждое принятое изменение (`ledger_import._записать_объект`); `mara_correction` принимает `id` и `expected_version`, расхождение — `version_conflict` в `alerts` (Т2.3, части 1–2) | `tests/test_ledger_import.py::Версия`, `tests/test_call_project.py::ПравкаПоКоду` | частично (2026-10-09): `expected_version` необязателен, HTTP 409 нет — хвост Т2.3 после правки плагина |
 | Потерянное обновление невозможно | правка с `expected_version` при расхождении не применяется (конфликт); без версии — по-прежнему last-write-wins (п.3 ADR-0003, legacy) | `test_расхождение_версии_это_конфликт_а_не_перезапись` | частично (2026-10-09) |
 | Evidence валидируется по существующему сегменту и диапазону | проверяется только наличие ключа `start_ms` | `test_пункт_без_спана_выбрасывается` | нет |
 | Markdown полностью перестраивается из ledger | пересборка сегодня уничтожит правки | — | нет |
@@ -494,7 +494,7 @@ ASR идёт с просроченной арендой. Сейчас безоп
 |---|---|---|---|
 | Потоковая загрузка с ограниченной памятью | тело блоба читается кусками: `слить()` в `scripts/contextd.py`, буфер `КУСОК`; целиком в память читается только JSON-тело | `tests/test_upload_memory.py` (8 МиБ в гейте; 50 и 250 МиБ под `MARA_SLOW=1`), прибор `scripts/upload_memory_probe.py` | **измерено** (2026-10-05, Т3б.4): прирост RSS 2,2 МиБ при любом теле от 4 до 256 МиБ, `docs/upload-memory-profile.md`; замер в контейнере, не на doctor |
 | Прерванные и повторные загрузки безопасны и идемпотентны | дедупликация есть, но N1 теряет аудио, N5 создаёт дубль | 5 тестов на дедуп | частично |
-| Constraints, транзакции, миграции, integrity checks покрыты тестами | `foreign_keys=on` на каждом соединении, миграции по `user_version` с путём вниз (Т2.1); `integrity_check` на `--migrate`, `quick_check` каждый прогон сверки (`база_цела`, Т2.1б) | `tests/test_mara_ingest.py` (миграции), `tests/test_reconcile_db.py` | частично (2026-10-05): транзакционные границы §5.2 — Т2.1в, тесты на убитый процесс — Т2.1б |
+| Constraints, транзакции, миграции, integrity checks покрыты тестами | `foreign_keys=on` на каждом соединении, миграции по `user_version` с путём вниз (Т2.1); `integrity_check` на `--migrate`, `quick_check` каждый прогон сверки (`база_цела`, Т2.1б) | `tests/test_mara_ingest.py` (миграции), `tests/test_reconcile_db.py`, `tests/test_transactions.py`, `tests/test_call_digest.py::Outbox`, `tests/test_call_project.py::СледПравки` | частично (2026-10-09): границы §5.2 — Т2.1в (#118), объект + ревизия + аудит и результат + outbox — Т2.5; тесты на убитый процесс — Т2.1б |
 | Backup manifest проверяется | манифест версии 2 внутри архива (sha256 и размер каждого файла, `host`, `retention`, `schema_version`), `сверить_манифест` в ночном учении и `core-backup.py --verify` | `tests/test_backup_manifest.py` (10) | **есть** (2026-10-05, Т3б.3); волт — по-прежнему `git bundle verify` |
 | Хотя бы один изолированный restore drill выполнен и описан | скрипт есть, стоит в кроне ежеквартально, но покрывает только волт | — | частично |
 | После restore проекции пересобираются, блобы сверяются, evidence открывается | базы и блобов в бэкапе нет вообще | — | нет |
@@ -518,7 +518,7 @@ ASR идёт с просроченной арендой. Сейчас безоп
 | GTR с защитой ресурсов и Minecraft | GTR как узла не существует | — | нет |
 | Control Plane поверх общего domain API | Control Plane нет | — | нет |
 | Дашборд показывает рекордер, очереди, бэкапы, конфликты, вычисления | есть `/metrics` в формате Prometheus (с петли, порт 8788) и часовой reconcile в Telegram; отставание считается по каждому источнику — `mara_tdlib_lag_seconds`, `mara_gmail_lag_seconds`, `mara_whatsapp_lag_seconds`, `mara_sms_lag_seconds` | `test_healthz_и_метрики` | частично (2026-09-23): числа живые, но **никто их не читает**. `mara_whatsapp_lag_seconds` = −1 держался три недели, и заметили его только руками — тревог нет, Т9.1 |
-| Мутации через `expected_version` и audit trail | версий нет; журнал правок пишется в тело карточки | 7 тестов | частично |
+| Мутации через `expected_version` и audit trail | `version` в реестре, `expected_version` в `mara_correction`, конфликт — `alerts` (Т2.3); `audit_events` на каждое изменение объекта и каждую команду правки, включая отказы (Т2.5) | `tests/test_call_project.py::ПравкаПоКоду`, `::СледПравки`, `tests/test_ledger_import.py::Аудит` | частично (2026-10-09): `expected_version` ещё не обязателен, HTTP 409 нет — хвост Т2.3 |
 | Agent Observatory | нет | — | нет |
 | Контракт отчётов и виджетов | нет | — | нет |
 

@@ -1,5 +1,5 @@
 """Карточки разговора и обязательств (ТЗ §10)."""
-import os, sys, json, uuid, tempfile, unittest
+import os, sys, json, uuid, tempfile, unittest, sqlite3, contextlib, io
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import call_project as cp
@@ -392,8 +392,11 @@ class Идентичность(unittest.TestCase):
                          "строка журнала «статус open → done» в истории")
         ревизии = [dict(r) for r in con.execute("select * from revisions order by version")]
         self.assertEqual([r["version"] for r in ревизии], [1, 2])
+        # найдена по словам, без `expected_version` — ADR-0003 п.3: долг
+        # проверки виден в причине ревизии, не только в ответе
         self.assertEqual((ревизии[1]["actor_type"], ревизии[1]["actor_id"],
-                          ревизии[1]["reason"]), ("human", "owner", "correction/correction_2"))
+                          ревизии[1]["reason"]),
+                         ("human", "owner", "correction/correction_2; legacy_title_match"))
         self.assertEqual(con.execute("select version from commitments").fetchone()[0], 2)
 
     def test_правка_только_заметкой_доезжает_до_реестра(self):
@@ -430,9 +433,9 @@ class Идентичность(unittest.TestCase):
         self.assertIn("title: другое", _текст(os.path.join(vault, занятый)))
 
 
-class ПравкаПоКоду(unittest.TestCase):
-    """Т2.3, часть 2 (ADR-0003 п.3–4): код карточки в пакете и в контракте
-    `mara_correction`, `expected_version` и конфликт вместо перезаписи."""
+class _СтендПравки(unittest.TestCase):
+    """Волт с реестром и две правки: завести и поправить. Тестов не несёт —
+    наследники не должны прогонять чужие."""
 
     def setUp(self):
         tmp = tempfile.mkdtemp()
@@ -451,6 +454,11 @@ class ПравкаПоКоду(unittest.TestCase):
     def правка(self, n, **payload):
         return cp.apply_correction(self.vault, {"id": "c%d" % n, "occurred_at": когда(),
                                                 "payload": payload}, self.con)
+
+
+class ПравкаПоКоду(_СтендПравки):
+    """Т2.3, часть 2 (ADR-0003 п.3–4): код карточки в пакете и в контракте
+    `mara_correction`, `expected_version` и конфликт вместо перезаписи."""
 
     def test_ответ_несёт_id_и_версию(self):
         oid, rel = self.завести("покрасить забор", 1)
@@ -549,6 +557,35 @@ class ПравкаПоКоду(unittest.TestCase):
         self.assertEqual((out["id"], out["version"]), (oid, 2))
         self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
 
+    def test_заметка_коммутативна_и_на_старую_версию_принимается(self):
+        """ADR-0003 п.5: только `status` и `due` двигают версию; заметка с
+        ними не пересекается, и правка «одна заметка» на несовпавшую версию — не
+        конфликт, а слияние, о котором сказано."""
+        oid, rel = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")      # версия 2
+        out = self.правка(3, item="покрасить забор", note="краска куплена", id=oid,
+                          expected_version=1)
+        self.assertNotIn("error", out)
+        self.assertTrue(out["applied"] and out["version_checked"])
+        self.assertEqual(out["merged"], "commutative")
+        self.assertEqual((out["id"], out["version"]), (oid, 2), "версию заметка не двигает")
+        with open(os.path.join(self.vault, rel), encoding="utf-8") as fh:
+            self.assertIn("краска куплена", fh.read())
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
+        # а заметка вместе со статусом на старую версию — по-прежнему конфликт
+        out = self.правка(4, item="покрасить забор", status="done", note="ещё",
+                          id=oid, expected_version=1)
+        self.assertEqual(out["error"], "version_conflict")
+        # на совпавшую версию слияния нет и слово про него не звучит
+        out = self.правка(5, item="покрасить забор", note="третья", id=oid,
+                          expected_version=2)
+        self.assertNotIn("merged", out)
+        # версии больше текущей нет — это не старая заметка, а конфликт
+        # (ревью #120, P3-4)
+        out = self.правка(6, item="покрасить забор", note="четвёртая", id=oid,
+                          expected_version=7)
+        self.assertEqual(out["error"], "version_conflict")
+
     def test_повтор_конфликта_не_плодит_тревог(self):
         oid, _ = self.завести("покрасить забор", 1)
         self.правка(2, item="покрасить забор", due="2026-10-10")
@@ -597,6 +634,187 @@ class ПравкаПоКоду(unittest.TestCase):
 
 def когда():
     return "2026-09-02T18:00:00+03:00"
+
+
+
+
+class СледПравки(_СтендПравки):
+    """Т2.5, §5.2 «след правки сохраняется»: на каждую команду правки — строка
+    `audit_events`, с исходом, включая отказы, которых ревизии не видят.
+    Содержимого в ней нет: имена полей, версии, исход."""
+
+    def след(self):
+        return [dict(r) for r in self.con.execute(
+            "select * from audit_events where action='correction' order by occurred, id")]
+
+    def деталь(self, row):
+        return json.loads(row["detail_json"])
+
+    def test_каждый_исход_оставляет_строку_аудита(self):
+        oid, _ = self.завести("покрасить забор", 1)                         # created
+        self.правка(2, item="покрасить забор", due="2026-10-10")           # applied, legacy
+        self.правка(3, item="покрасить забор", status="open")              # noop
+        self.правка(4, item="покрасить забор", status="done", id=oid,
+                    expected_version=1)                                     # conflict
+        self.правка(5, item="покрасить забор", status="done", id="#00000000")   # not_found
+        self.завести("позвонить в банк про ипотеку", 6)
+        self.завести("позвонить маме", 7)
+        self.правка(8, item="позвонить", status="done")                    # ambiguous
+        исходы = [(self.деталь(r)["event"], self.деталь(r)["outcome"]) for r in self.след()]
+        self.assertEqual(исходы, [("c1", "created"), ("c2", "applied"), ("c3", "noop"),
+                                  ("c4", "conflict"), ("c5", "not_found"),
+                                  ("c6", "created"), ("c7", "created"),
+                                  ("c8", "ambiguous")])
+        след = self.след()
+        self.assertTrue(all(r["actor_type"] == "human" and r["actor_id"] == "owner"
+                            and r["object_kind"] == "commitment" for r in след))
+        self.assertEqual([r["object_id"] for r in след[:4]], [oid] * 4,
+                         "у конфликта и «уже так» адрес есть")
+        self.assertIsNone(след[4]["object_id"], "не нашли — адреса нет")
+        д = self.деталь(след[3])
+        self.assertEqual((д["expected_version"], д["version_checked"]), (1, True))
+        self.assertEqual(д["conflict_id"], self.con.execute(
+            "select id from alerts").fetchone()[0])
+        self.assertEqual(self.деталь(след[1])["version_checked"], False)
+        self.assertEqual(len(self.деталь(след[7])["ambiguous_ids"]), 2)
+
+    def test_аудит_не_несёт_содержимого(self):
+        self.завести("покрасить забор у соседа", 1)
+        self.правка(2, item="покрасить забор у соседа", note="секретная заметка")
+        for r in self.след():
+            self.assertNotIn("забор", r["detail_json"])
+            self.assertNotIn("секретная", r["detail_json"])
+        self.assertEqual(self.деталь(self.след()[1])["fields"], ["note"])
+
+    def test_проверенная_правка_без_legacy_в_причине(self):
+        """ADR-0003 п.3: `legacy_title_match` — только у правки, версию
+        которой проверить было нечем или не просили."""
+        oid, _ = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10", id=oid, expected_version=1)
+        self.правка(3, item="покрасить забор", status="done")
+        причины = [r[0] for r in self.con.execute(
+            "select reason from revisions order by version")]
+        self.assertEqual(причины, ["correction/c1", "correction/c2",
+                                   "correction/c3; legacy_title_match"])
+
+    def test_аудит_и_перенос_одной_транзакцией(self):
+        """Падение переноса не оставляет строки аудита без ревизии и наоборот."""
+        self.завести("покрасить забор", 1)
+        было = cp.li.перенести_карточку
+
+        def упасть(*a, **kw):
+            raise RuntimeError("смоделированный сбой переноса")
+        cp.li.перенести_карточку = упасть
+        try:
+            with self.assertRaises(RuntimeError):
+                self.правка(2, item="покрасить забор", status="done")
+        finally:
+            cp.li.перенести_карточку = было
+        self.assertEqual(len(self.след()), 1, "от упавшей правки следа нет")
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
+        # и наоборот: не легла строка аудита — не лёг и перенос
+        было = mi.audit
+
+        def упасть(*a, **kw):
+            raise RuntimeError("смоделированный сбой аудита")
+        mi.audit = упасть
+        try:
+            with self.assertRaises(RuntimeError):
+                self.правка(3, item="покрасить забор", status="done")
+        finally:
+            mi.audit = было
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
+        self.assertEqual(self.con.execute("select count(*) from revisions").fetchone()[0], 1)
+
+    def test_сбой_реестра_возвращает_карточку(self):
+        """Codex по #120, P1: реестр откатился — файл тоже, иначе повтор
+        видит «уже так», и реестр не догонит никогда."""
+        oid, rel = self.завести("покрасить забор", 1)
+        p = os.path.join(self.vault, rel)
+        with open(p, encoding="utf-8") as fh:
+            было_текст = fh.read()
+        было = mi.audit
+        mi.audit = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("сбой аудита"))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.правка(2, item="покрасить забор", status="done", note="заметка")
+            with self.assertRaises(RuntimeError):
+                self.правка(3, item="заменить крышу", status="open")
+        finally:
+            mi.audit = было
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), было_текст, "правленая карточка возвращена")
+        self.assertEqual(os.listdir(os.path.join(self.vault, "kb/commitments")),
+                         [os.path.basename(rel)], "заведённая карточка снята")
+        # и повтор правки после починки — настоящая правка, не «уже так»
+        out = self.правка(4, item="покрасить забор", status="done")
+        self.assertTrue(out["applied"])
+        self.assertEqual(out["version"], 2)
+
+    def test_упавший_commit_тоже_возвращает_карточку(self):
+        """Codex по #120, круг 2: откат бывает и на `commit` внешней
+        транзакции — после того, как `_в_реестр` отработал без ошибки."""
+        oid, rel = self.завести("покрасить забор", 1)
+        p = os.path.join(self.vault, rel)
+        with open(p, encoding="utf-8") as fh:
+            было_текст = fh.read()
+
+        class ломаная(mi.транзакция):
+            def __exit__(self, тип, *a):
+                if self.точка or тип:
+                    return super().__exit__(тип, *a)
+                self.con.execute("rollback")
+                raise sqlite3.OperationalError("commit упал")
+        было = mi.транзакция
+        mi.транзакция = ломаная
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.правка(2, item="покрасить забор", status="done")
+            with self.assertRaises(sqlite3.OperationalError):
+                self.правка(3, item="заменить крышу", status="open")
+        finally:
+            mi.транзакция = было
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), было_текст)
+        self.assertEqual(os.listdir(os.path.join(self.vault, "kb/commitments")),
+                         [os.path.basename(rel)])
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
+        self.assertFalse(self.con.in_transaction, "соединение не осталось в транзакции")
+        out = self.правка(4, item="покрасить забор", status="done")
+        self.assertTrue(out["applied"] and out["version"] == 2)
+
+    def test_спорную_карточку_правка_не_считает_успехом(self):
+        """Codex по #120, круг 3: перенос отвергает карточку молча (None) —
+        правка обязана это считать отказом: файл назад, аудита `applied` нет."""
+        oid, rel = self.завести("покрасить забор", 1)
+        # карточка с чужим id в шапке: занят объектом с другим ключом — спор
+        p = os.path.join(self.vault, "kb/commitments/krysha.md")
+        текст = ("---\ntitle: заменить крышу\nid: %s\ntype: commitment\nstatus: open\n"
+                 "source_id: commitment/call_9/requests/1\n---\n" % oid)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                self.правка(2, item="заменить крышу", status="done")
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), текст, "файл возвращён")
+        self.assertEqual([json.loads(r["detail_json"])["outcome"] for r in self.след()],
+                         ["created"], "аудита об успехе нет")
+        self.assertEqual(self.con.execute("select count(*) from commitments").fetchone()[0], 1)
+
+    def test_тревога_конфликта_и_её_аудит_одной_транзакцией(self):
+        """Ревью #120, P3-1: упал аудит — нет и тревоги."""
+        oid, _ = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")
+        было = mi.audit
+        mi.audit = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("сбой аудита"))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.правка(3, item="покрасить забор", status="done", id=oid,
+                            expected_version=1)
+        finally:
+            mi.audit = было
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

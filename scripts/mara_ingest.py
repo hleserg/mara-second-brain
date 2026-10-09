@@ -351,12 +351,47 @@ def _откат_3(con):
     con.execute("drop index if exists ingest_idem")
 
 
+# Т2.5, §5.2: transactional outbox. Строка — намерение произвести внешний
+# эффект (сообщение в телеграм), записанное той же транзакцией, что и
+# результат, ради которого эффект нужен (`digests`). Сама отправка идёт
+# отдельно, вне транзакции и после её фиксации, по строке; исход ложится в
+# ту же строку. До этого `call_digest` слал в сеть, а потом писал результат:
+# смерть между отправкой и записью теряла след сообщения, и ретрай слал ещё
+# раз, не зная о первом. Повтор при обрыве между отправкой и пометкой
+# `sent` outbox не исключает (at-least-once), но делает его видимым:
+# `attempts` и `last_attempt` остаются в строке.
+SCHEMA_4 = """
+create table if not exists outbox(
+  id text primary key not null, kind text not null,
+  object_kind text, object_id text, payload_json text not null,
+  created text not null, attempts integer not null default 0,
+  state text not null default 'pending' check(state in
+    ('pending', 'sending', 'sent', 'failed', 'skipped')),
+  last_attempt text, sent text, error text);
+create index if not exists outbox_state on outbox(state, created)
+"""
+
+
+def _миграция_4(con):
+    for о in _операторы(SCHEMA_4):
+        con.execute(о)
+
+
+def _откат_4(con):
+    """Назад к 3 — пока outbox пуст: строка в нём — след отправленного или
+    ждущего отправки сообщения, и стереть его командой нельзя."""
+    if con.execute("select 1 from outbox limit 1").fetchone():
+        raise RuntimeError("contextd.db: откат 4 → 3 стёр бы записанное в outbox "
+                           "— только восстановлением из бэкапа")
+    con.execute("drop table outbox")
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
-МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3)
+МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3, _миграция_4)
 # Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
 # ниже него только пустая база.
-ОТКАТЫ = (None, _откат_2, _откат_3)
+ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 
@@ -658,6 +693,116 @@ def finish_job(con, job_id, ok, error=None):
                 "updated=? where id=?",
                 (attempts, (error or "")[:500],
                  int(time.time()) + next_delay(attempts), now_iso(), job_id))
+
+
+def audit(con, action, actor, object_kind=None, object_id=None, detail=None,
+          когда=None):
+    """Строка `audit_events` (§5.2, Т2.5): кто, что сделал и над чем.
+
+    Пишется той же транзакцией, что и само действие — вызывающий держит её.
+    Содержимого не несёт (ТЗ §6.2: audit metadata без утечки содержимого):
+    имена полей, версии и исход — да, значения полей и тексты — нет, они в
+    `revisions` и `corrections`. `actor` — `(actor_type, actor_id[, reason])`,
+    как у ревизий; третий элемент здесь не нужен.
+    """
+    con.execute("insert into audit_events(id,occurred,actor_type,actor_id,"
+                "action,object_kind,object_id,detail_json) values(?,?,?,?,?,?,?,?)",
+                (uuid7(), когда or now_iso(), actor[0], actor[1], action,
+                 object_kind, object_id,
+                 json.dumps(detail, ensure_ascii=False) if detail is not None
+                 else None))
+
+
+def в_outbox(con, kind, payload, object_kind=None, object_id=None, когда=None):
+    """Положить намерение внешнего эффекта в outbox (§5.2, Т2.5). Возвращает
+    id строки. Вызывается внутри транзакции с результатом, ради которого
+    эффект нужен; отправляет — `из_outbox`, уже после фиксации."""
+    oid = uuid7()
+    con.execute("insert into outbox(id,kind,object_kind,object_id,payload_json,"
+                "created) values(?,?,?,?,?,?)",
+                (oid, kind, object_kind, object_id,
+                 json.dumps(payload, ensure_ascii=False), когда or now_iso()))
+    return oid
+
+
+# Аренда строки outbox: `sending` старше этого — брошенная попытка (процесс
+# умер между захватом и пометкой), её можно брать снова.
+АРЕНДА_OUTBOX_С = 600
+
+
+def из_outbox(con, отправить, kind=None, object_id=None, ид=None, limit=100,
+              продолжать=False, итог=None):
+    """Разослать ждущие строки outbox. Возвращает список `(id, исход)`.
+
+    `итог(row, исход)` — что вызывающий ведёт рядом со строкой (состояние
+    дайджеста, события): зовётся внутри той же транзакции, что переводит
+    строку в конечное состояние, — чтобы не было окна, где outbox уже
+    `sent`, а результат ещё нет: такую строку `--outbox` не взял бы
+    никогда, а ретрай шага послал бы второй раз (Codex по #120, P1).
+    Сорвался `итог` — строка остаётся `sending` и уйдёт по аренде.
+
+    `отправить(kind, payload)` → исход: `sent`, `failed`, либо любая другая
+    строка — «не сейчас» (нет транспорта, адресат не тот): строка
+    возвращается в `pending` с этой строкой в `error`, попытка считается.
+    Исключение из `отправить` — тоже попытка и тоже `pending`, с текстом
+    исключения; без `продолжать` оно летит дальше (решать, ретрай это или
+    DLQ, вызывающему), с `продолжать` — исход `error`, и очередь идёт
+    дальше.
+    Захват строки — её же запись: `pending` → `sending` с `attempts+1` и
+    `last_attempt` **до** отправки, одним `update … where state='pending'`,
+    который проходит ровно у одного из двух процессов, взявших одну строку
+    (`--outbox` владельца рядом с воркером; ревью PR #120, P2-1); второй
+    её не видит и не шлёт. Обрыв между отправкой и пометкой оставляет
+    `sending`: такую строку берут снова через `АРЕНДА_OUTBOX_С` — повтор
+    возможен (at-least-once), но виден по `attempts`. Строк, которые
+    забрал другой, в итогах нет.
+    """
+    # порог аренды в том же формате и поясе, что `now_iso`: сравнение
+    # строк, а не времени, но формат фиксированный, и пояс один
+    просрочено = (datetime.now(TZ) - timedelta(seconds=АРЕНДА_OUTBOX_С)
+                  ).isoformat(timespec="seconds")
+    sql = ("select * from outbox where (state='pending' or "
+           "(state='sending' and last_attempt < ?))")
+    args = [просрочено]
+    if kind:
+        sql, args = sql + " and kind=?", args + [kind]
+    if object_id:
+        sql, args = sql + " and object_id=?", args + [object_id]
+    if ид:
+        sql, args = sql + " and id=?", args + [ид]
+    rows = con.execute(sql + " order by created limit ?", args + [limit]).fetchall()
+    итоги = []
+    for r in rows:
+        когда = now_iso()
+        взял = con.execute(
+            "update outbox set state='sending', attempts=attempts+1, last_attempt=? "
+            "where id=? and (state='pending' or (state='sending' and last_attempt=?))",
+            (когда, r["id"], r["last_attempt"])).rowcount
+        if not взял:
+            continue
+        try:
+            исход = отправить(r["kind"], json.loads(r["payload_json"]))
+        except Exception as e:
+            con.execute("update outbox set state='pending', error=? where id=?",
+                        ("%s: %s" % (type(e).__name__, e), r["id"]))
+            if not продолжать:
+                raise
+            итоги.append((r["id"], "error"))
+            continue
+        with транзакция(con):
+            if исход == "sent":
+                con.execute("update outbox set state='sent', sent=?, error=null "
+                            "where id=?", (когда, r["id"]))
+            elif исход == "failed":
+                con.execute("update outbox set state='failed', error=? where id=?",
+                            (исход, r["id"]))
+            else:
+                con.execute("update outbox set state='pending', error=? where id=?",
+                            (исход, r["id"]))
+            if итог is not None:
+                итог(r, исход)
+        итоги.append((r["id"], исход))
+    return итоги
 
 
 def blob_path(root, sha256, ext, when=None):
