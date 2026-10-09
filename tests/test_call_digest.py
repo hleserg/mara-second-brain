@@ -503,6 +503,25 @@ class Outbox(_СтендДоставки):
                          "строка не конечная — уйдёт по аренде, а не потеряется")
         self.assertEqual((self.дайджест()["state"], self.состояние()), ("queued", "projected"))
 
+    def test_outbox_шлёт_в_починенный_чат(self):
+        """Codex по #120, круг 2: адресат — настройка, не часть намерения.
+        Строка, легшая при пустом `TELEGRAM_HOME_CHANNEL`, после починки
+        уходит в починенный чат — настоящим `deliver`, с сетью под заглушкой."""
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        cd.run(self.eid, root=self.dir, env_file=пусто)
+        self.assertEqual(self.дайджест()["state"], "no-transport")
+        self.assertIsNone(self.con.execute("select chat_id from digests").fetchone()[0])
+        ответ = mock.MagicMock()
+        ответ.__enter__.return_value.read.return_value = b'{"ok": true}'
+        with mock.patch("urllib.request.urlopen", return_value=ответ) as у, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 1)
+        тело = у.call_args[0][0].data.decode()
+        self.assertIn("chat_id=123456789", тело)
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("sent", "done"))
+        self.assertEqual(self.con.execute("select chat_id from digests").fetchone()[0],
+                         "123456789", "в строке — куда ушло на самом деле")
+
     def test_outbox_в_командной_строке(self):
         r = subprocess.run([sys.executable, os.path.join(СКРИПТЫ, "call_digest.py"),
                             "--root", self.dir, "--env-file", self.env(), "--outbox"],

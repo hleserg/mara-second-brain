@@ -1,5 +1,5 @@
 """Карточки разговора и обязательств (ТЗ §10)."""
-import os, sys, json, uuid, tempfile, unittest
+import os, sys, json, uuid, tempfile, unittest, sqlite3
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import call_project as cp
@@ -750,6 +750,38 @@ class СледПравки(_СтендПравки):
         out = self.правка(4, item="покрасить забор", status="done")
         self.assertTrue(out["applied"])
         self.assertEqual(out["version"], 2)
+
+    def test_упавший_commit_тоже_возвращает_карточку(self):
+        """Codex по #120, круг 2: откат бывает и на `commit` внешней
+        транзакции — после того, как `_в_реестр` отработал без ошибки."""
+        oid, rel = self.завести("покрасить забор", 1)
+        p = os.path.join(self.vault, rel)
+        with open(p, encoding="utf-8") as fh:
+            было_текст = fh.read()
+
+        class ломаная(mi.транзакция):
+            def __exit__(self, тип, *a):
+                if self.точка or тип:
+                    return super().__exit__(тип, *a)
+                self.con.execute("rollback")
+                raise sqlite3.OperationalError("commit упал")
+        было = mi.транзакция
+        mi.транзакция = ломаная
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.правка(2, item="покрасить забор", status="done")
+            with self.assertRaises(sqlite3.OperationalError):
+                self.правка(3, item="заменить крышу", status="open")
+        finally:
+            mi.транзакция = было
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), было_текст)
+        self.assertEqual(os.listdir(os.path.join(self.vault, "kb/commitments")),
+                         [os.path.basename(rel)])
+        self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
+        self.assertFalse(self.con.in_transaction, "соединение не осталось в транзакции")
+        out = self.правка(4, item="покрасить забор", status="done")
+        self.assertTrue(out["applied"] and out["version"] == 2)
 
     def test_тревога_конфликта_и_её_аудит_одной_транзакцией(self):
         """Ревью #120, P3-1: упал аудит — нет и тревоги."""

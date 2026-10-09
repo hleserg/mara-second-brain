@@ -183,9 +183,15 @@ def deliver(text, token, chat_id):
 
 def _отправитель(e):
     """Транспорт для строк outbox: `kind` → исход `deliver`. Отдельной
-    функцией, чтобы `--outbox` и `run` шли одной дорогой."""
+    функцией, чтобы `--outbox` и `run` шли одной дорогой.
+
+    Адресат — из текущего окружения, не из строки: намерение — «дайджест
+    владельцу», а чат владельца — настройка. Строка, легшая при пустом или
+    кривом `TELEGRAM_HOME_CHANNEL`, после починки обязана уйти в
+    починенный чат, а не снова упереться в старый (Codex по #120, P1)."""
     def отправить(kind, payload):
-        return deliver(payload["text"], e.get("TELEGRAM_BOT_TOKEN"), payload["chat_id"])
+        return deliver(payload["text"], e.get("TELEGRAM_BOT_TOKEN"),
+                       e.get("TELEGRAM_HOME_CHANNEL"))
     return отправить
 
 
@@ -202,9 +208,11 @@ def _разослать(con, e, ид=None, продолжать=False):
     итоги = []
 
     def итог(row, исход):
-        # внутри транзакции, переводящей строку outbox в конечное состояние
+        # внутри транзакции, переводящей строку outbox в конечное состояние;
+        # `chat_id` — куда ушло на самом деле, не куда собирались при сборке
         did = json.loads(row["payload_json"])["digest_id"]
-        con.execute("update digests set state=? where id=?", (исход, did))
+        con.execute("update digests set state=?, chat_id=? where id=?",
+                    (исход, e.get("TELEGRAM_HOME_CHANNEL"), did))
         if исход == "sent":
             con.execute("update events set state='done' where id=?", (row["object_id"],))
         итоги.append((did, исход))
@@ -259,8 +267,7 @@ def run(event_id, root=None, env_file=None):
                      json.dumps(items, ensure_ascii=False), mi.now_iso(),
                      "queued" if свеж else "stale"))
         if свеж:
-            oid = mi.в_outbox(con, ВИД, {"digest_id": did, "text": text,
-                                         "chat_id": e.get("TELEGRAM_HOME_CHANNEL")},
+            oid = mi.в_outbox(con, ВИД, {"digest_id": did, "text": text},
                               "event", event_id)
         else:
             # Звонок обработан: дайджест собран и лежит в `digests`. Не
