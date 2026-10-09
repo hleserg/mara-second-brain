@@ -495,7 +495,8 @@ def run(event_id, vault, root=None):
     epath = mi.extraction_path(root, event_id)
     if not os.path.exists(epath):
         raise RuntimeError("нет извлечения %s" % epath)
-    extraction = json.load(open(epath, encoding="utf-8"))
+    with open(epath, encoding="utf-8") as fh:
+        extraction = json.load(fh)
     blob = con.execute("select audio_until from blobs where sha256=?",
                        (ev["blob_sha256"],)).fetchone()
     if blob:
@@ -780,16 +781,10 @@ def _поправить(card, status, due, note, когда, event_id):
     return out
 
 
-def _завести(vault, item, due, note, когда, event):
-    """Новая задача словами Серёги. Поля те же, что у карточки из звонка, чтобы
-    context_pack и сводки видели её как любую другую."""
-    day, stem = когда[:10], slug(item)[:40]
-    oid = mi.uuid7()
-    rel = "%s/%s-%s.md" % (COMM_DIR, day, stem)
-    # занятый путь — различитель из id, как у проектора (ADR-0002), а не
-    # позиционный `-2`: тот переезжал при пересборке
-    if os.path.exists(os.path.join(vault, rel)):
-        rel = "%s/%s-%s--%s.md" % (COMM_DIR, day, stem, oid[-8:])
+def карточка_правки(item, due, note, когда, event, oid):
+    """Текст карточки, заведённой словами владельца: чистый рендер, без
+    диска — им же пересборка (`vault_rebuild`) рисует такую карточку из
+    события правки в реестре."""
     fm = frontmatter(
         [("title", yaml_str(item[:80])),
          ("id", oid),
@@ -816,7 +811,20 @@ def _завести(vault, item, due, note, когда, event):
             "- Откуда: сказано Маре, %s" % когда[:16]]
     if note:
         body.append("- Заметка: %s" % note)
-    _atomic(os.path.join(vault, rel), fm + "\n" + "\n".join(body) + "\n")
+    return fm + "\n" + "\n".join(body) + "\n"
+
+
+def _завести(vault, item, due, note, когда, event):
+    """Новая задача словами Серёги. Поля те же, что у карточки из звонка, чтобы
+    context_pack и сводки видели её как любую другую."""
+    day, stem = когда[:10], slug(item)[:40]
+    oid = mi.uuid7()
+    rel = "%s/%s-%s.md" % (COMM_DIR, day, stem)
+    # занятый путь — различитель из id, как у проектора (ADR-0002), а не
+    # позиционный `-2`: тот переезжал при пересборке
+    if os.path.exists(os.path.join(vault, rel)):
+        rel = "%s/%s-%s--%s.md" % (COMM_DIR, day, stem, oid[-8:])
+    _atomic(os.path.join(vault, rel), карточка_правки(item, due, note, когда, event, oid))
     return {"found": False, "created": rel, "title": item,
             "text": "завёл «%s»%s" % (item, " до " + due if due else "")}
 
