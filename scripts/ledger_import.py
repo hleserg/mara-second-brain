@@ -352,12 +352,17 @@ def _проекция_и_история(con, rel, вид, oid, sha, fm, текс
     # `ledger_version`/`projector_version`/`manifest_hash` из миграции 2
     # (ревью PR #117, P2-2) — колонки проектора Т2.6, которые перенос не
     # ведёт и трогать не вправе
+    # `ledger_version` — версия объекта, которую эта проекция отражает
+    # (§4.8, Т2.6); `projector_version`/`manifest_hash` ставит проектор
+    версия = (con.execute("select version from commitments where id=?", (oid,)).fetchone()
+              or [None])[0] if вид == "commitment" else None
     con.execute("insert into projections"
-                "(path,object_kind,object_id,content_sha256,written) "
-                "values(?,?,?,?,?) on conflict(path) do update set "
+                "(path,object_kind,object_id,content_sha256,written,ledger_version) "
+                "values(?,?,?,?,?,?) on conflict(path) do update set "
                 "object_kind=excluded.object_kind, object_id=excluded.object_id, "
-                "content_sha256=excluded.content_sha256, written=excluded.written",
-                (rel, вид, oid, sha, mi.now_iso()))
+                "content_sha256=excluded.content_sha256, written=excluded.written, "
+                "ledger_version=excluded.ledger_version",
+                (rel, вид, oid, sha, mi.now_iso(), версия))
     return правки_в_базу(con, oid, fm, текст) if вид == "commitment" else 0
 
 
