@@ -47,11 +47,155 @@ def slug(text, default="unknown"):
     return out or default
 
 
-def stamp(item):
-    """Метка времени первого спана: «04:12». По ней открывают место в записи."""
-    ev = (item.get("evidence") or [{}])[0]
-    ms = int(ev.get("start_ms") or 0)
+def _ммсс(ms):
     return "%02d:%02d" % (ms // 60000, (ms % 60000) // 1000)
+
+
+def stamp(item):
+    """Метка времени первой ссылки: «04:12–04:37» у ссылки на сегмент
+    реестра, «04:12» у старой, где конца не было. По ней открывают место в
+    записи (ADR-0004 п.5). Ссылок нет (все отклонены реестром) — пустая
+    строка, а не «00:00»: выдуманная метка хуже отсутствующей (Codex по
+    #122, круг 2)."""
+    ev = item.get("evidence") or []
+    if not ev:
+        return ""
+    a = int(ev[0].get("start_ms") or 0)
+    b = ev[0].get("end_ms")
+    if ev[0].get("segment_id") and isinstance(b, int) and b > a:
+        return "%s–%s" % (_ммсс(a), _ммсс(b))
+    return _ммсс(a)
+
+
+def метка(item):
+    """« · 04:12–04:37» для строки списка; пусто, если метки нет."""
+    s = stamp(item)
+    return " · " + s if s else ""
+
+
+def _код_сегмента(item):
+    """Хвост `segment_id` первой ссылки — восемь знаков (ADR-0002), чтобы
+    сторож пересборки и владелец могли сослаться на строку реестра."""
+    ev = (item.get("evidence") or [{}])[0]
+    sid = ev.get("segment_id")
+    return " · #%s" % sid[-8:] if isinstance(sid, str) and sid else ""
+
+
+def _evidence_список(item):
+    """Список `evidence` во фронтматтер: машиночитаемо, чтобы проекция была
+    полной и пересобираемой (§4.8) — только ссылки на сегменты реестра."""
+    return ["%s %d-%d" % (e["segment_id"], e["start_ms"], e["end_ms"])
+            for e in item.get("evidence") or []
+            if isinstance(e.get("segment_id"), str) and e.get("segment_id")]
+
+
+# Списки извлечения, пункты которых проекция рисует со ссылкой на запись:
+# три первых дают карточки обязательств, остальные — строки в карточке
+# разговора (`conversation_card`). Сверка — для всех (Codex по #122).
+СО_ССЫЛКАМИ = ("requests", "commitments", "changed_instructions",
+               "decisions", "open_questions", "constraints", "followups")
+
+
+def _сверить_с_реестром(con, event_id, extraction):
+    """ADR-0004 п.3 и п.5 на пути проекции: до рендера каждая ссылка с
+    `segment_id` сверяется с реестром — сегмент принадлежит расшифровке
+    этого события, интервал (если есть) в его границах; без интервала
+    ссылка равна сегменту целиком (п.1). Возвращает копию извлечения, в
+    которой у пунктов остались только принятые ссылки (`evidence`), а
+    отклонённые отложены в `evidence_rejected`; пункт `task` с хотя бы одной
+    отклонённой уходит в `needs-review` (п.3) и карточки не получает.
+    Карточка рисуется по принятому — а не по тексту модели, который реестр
+    мог отвергнуть (ревью PR #122). Ссылки без `segment_id` (извлечения до
+    Т2.4) сверить нечем — остаются как есть, строк реестра не дают."""
+    out = json.loads(json.dumps(extraction))
+    for key in СО_ССЫЛКАМИ:
+        for it in out.get(key) or []:
+            принятые, отклонённые = [], []
+            for e in it.get("evidence") or []:
+                sid = e.get("segment_id") if isinstance(e, dict) else None
+                if not isinstance(sid, str) or not sid:
+                    принятые.append(e)                  # legacy — не сверяем
+                    continue
+                seg = con.execute(
+                    "select s.start_ms, s.end_ms from transcript_segments s join transcripts t "
+                    "on t.id=s.transcript_id where s.id=? and t.event_id=?",
+                    (sid, event_id)).fetchone()
+                a, b = e.get("start_ms"), e.get("end_ms")
+                if seg is not None and a is None and b is None:
+                    a, b = seg["start_ms"], seg["end_ms"]
+                if (seg is None or type(a) is not int or type(b) is not int
+                        or not seg["start_ms"] <= a <= b <= seg["end_ms"]):
+                    отклонённые.append({"segment_id": sid,
+                                        "start_ms": a if type(a) is int else None,
+                                        "end_ms": b if type(b) is int else None})
+                    continue
+                принятые.append(dict(e, start_ms=a, end_ms=b))
+            it["evidence"], it["evidence_rejected"] = принятые, отклонённые
+            if отклонённые and it.get("disposition") == "task":
+                it["disposition"] = "needs-review"
+    return out
+
+
+def _evidence_в_реестр(con, oid, item, когда):
+    """ADR-0004 п.1, п.5: строки `evidence_refs` обязательства — по одной на
+    принятую ссылку с `segment_id` (сверка — `_сверить_с_реестром`, до
+    рендера; отклонённые уже в аудите). Повтор проекции заменяет строки с `producer =
+    model`, а не кладёт рядом; их `id` при этом выдаются заново — на них
+    никто не ссылается, стабильный id (ADR-0002) у объекта, а не у ссылки.
+    Ссылки без `segment_id` строк не дают: ссылка без референта — не
+    evidence. Возвращает число записанных."""
+    con.execute("delete from evidence_refs where object_kind='commitment' and object_id=? "
+                "and producer='model'", (oid,))
+    n = 0
+    for e in item.get("evidence") or []:
+        sid = e.get("segment_id")
+        if not isinstance(sid, str) or not sid:
+            continue
+        con.execute("insert into evidence_refs(id,object_kind,object_id,kind,segment_id,"
+                    "start_ms,end_ms,producer,created) values(?,?,?,?,?,?,?,?,?)",
+                    (mi.uuid7(), "commitment", oid, "audio", sid, e["start_ms"], e["end_ms"],
+                     "model", когда))
+        n += 1
+    return n
+
+
+def _отозвать_evidence(con, vault, event_id, extraction, когда):
+    """Повторная проекция (база восстановлена старее извлечения, расшифровка
+    переделана): пункт, прежде бывший карточкой, теперь в ревью — карточка в
+    этот прогон не рисуется, но его объект, проекция и строки `evidence_refs`
+    от прошлого прогона остались и выдают отвергнутое за каноническое
+    (Codex по #122). Отзываем то, что реестр вправе отозвать сам: строки
+    `evidence_refs` с `producer = model`, с аудитом `evidence_withdrawn` на
+    объект. Объект и файл карточки остаются: карточка — территория владельца
+    (он мог её править), расхождение проекции с реестром — работа сторожа
+    пересборки (Т2.6), а не молчаливого удаления."""
+    native = {"commitment/%s/%s/%d" % (event_id, key, n)
+              for key in ("requests", "commitments", "changed_instructions")
+              for n, it in enumerate(extraction.get(key) or [], 1)
+              if it.get("disposition") == "task"}
+    for row in con.execute("select id, source_native_id from commitments where "
+                           "source_native_id like ?", ("commitment/%s/%%" % event_id,)):
+        if row["source_native_id"] in native:
+            continue
+        with mi.транзакция(con):
+            n = con.execute("delete from evidence_refs where object_kind='commitment' and "
+                            "object_id=? and producer='model'", (row["id"],)).rowcount
+            if n:
+                mi.audit(con, "evidence_withdrawn", ("rule", "call_project"), "commitment",
+                         row["id"], {"event": event_id, "refs": n,
+                                     "why": "пункт ушёл в ревью при повторной проекции"},
+                         когда)
+                print("call_project: %s — у объекта %s отозвано ссылок evidence: %d, "
+                      "карточка осталась, разберёт сторож пересборки"
+                      % (event_id, row["id"], n), file=sys.stderr)
+
+
+def _пункты(extraction):
+    """Ключ `source_id` карточки обязательства → пункт извлечения, из
+    которого она сделана (та же нумерация, что в `commitment_cards`)."""
+    return {"commitment/%s/%s/%d" % (extraction.get("event_id"), key, n): it
+            for key in ("requests", "commitments", "changed_instructions")
+            for n, it in enumerate(extraction.get(key) or [], 1)}
 
 
 def when(event):
@@ -188,7 +332,7 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
             text = it.get("new_state") or it.get("action") or ""
             due = " (до %s)" % it["due_at"] if it.get("due_at") else ""
             mark = "" if it.get("disposition") == "task" else " · на проверку"
-            lines.append("- %s%s%s · %s" % (scrub(text), due, mark, stamp(it)))
+            lines.append("- %s%s%s%s" % (scrub(text), due, mark, метка(it)))
         lines.append("")
     for line in (people_line(extraction, canon), projects_line(extraction, canon)):
         if line:
@@ -243,7 +387,7 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                            oid, native)
             owner = OWNER if key != "requests" else (it.get("owner") or OWNER)
             body = ["- Обещание: %s" % scrub(action),
-                    "- Откуда: [[%s]] · %s" % (conv, stamp(it))]
+                    "- Откуда: [[%s]]%s%s" % (conv, метка(it), _код_сегмента(it))]
             if it.get("deadline_phrase"):
                 body.append("- Прозвучало о сроке: «%s»" % scrub(it["deadline_phrase"]))
             if it.get("supersedes"):
@@ -279,7 +423,7 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                  ("supersedes", yaml_str(it["supersedes"]) if it.get("supersedes") else None),
                  ("pipeline_version", str(mi.PIPELINE_VERSION)),
                  ("valid_from", event.get("ended") or event.get("occurred"))],
-                lists=[("audience", ["mara"])])
+                lists=[("audience", ["mara"]), ("evidence", _evidence_список(it))])
             out.append((path, fm + "\n" + text))
     return out
 
@@ -357,12 +501,43 @@ def run(event_id, vault, root=None):
     if blob:
         ev["payload"]["audio_until"] = blob["audio_until"]
     canon = canon_map(vault)
-    written = write_cards(vault, all_cards(ev, extraction, canon,
-                                           _из_реестра(con), _свободный(vault, con)))
+    # evidence сверяется с реестром до рендера: карточка рисует только
+    # принятые ссылки, пункт с отклонённой — в ревью, не в карточку (ADR п.3)
+    extraction = _сверить_с_реестром(con, event_id, extraction)
+    когда = mi.now_iso()
+    # каждая отклонённая ссылка — строка аудита (ADR п.3), и у пункта, который
+    # из-за неё карточки не получил, тоже: объекта нет, адрес — событие
+    with mi.транзакция(con):
+        for key in СО_ССЫЛКАМИ:
+            for n, it in enumerate(extraction.get(key) or [], 1):
+                for о in it.get("evidence_rejected") or []:
+                    mi.audit(con, "evidence_rejected", ("rule", "call_project"), "event",
+                             event_id, dict(о, list=key, item=n, why="сегмент не из "
+                                            "расшифровки события или интервал за границами"),
+                             когда)
+    cards = all_cards(ev, extraction, canon, _из_реестра(con), _свободный(vault, con))
+    written = write_cards(vault, cards)
+    _отозвать_evidence(con, vault, event_id, extraction, когда)
     # Реестр узнаёт о карточке тем же прогоном, а не ночным переносом: id
-    # в шапке и ключ строки — одно и то же с первой секунды (Т2.2).
-    спорные = [rel for rel in written if li.вид_по_пути(rel) and li.перенести_карточку(
-        con, vault, rel, актор=("projector", "call_project", "проекция звонка")) is None]
+    # в шапке и ключ строки — одно и то же с первой секунды (Т2.2). Вместе
+    # с объектом — его evidence (ADR-0004 п.5): строки `evidence_refs` одной
+    # транзакцией с переносом, по пункту извлечения, из которого карточка.
+    пункты = _пункты(dict(extraction, event_id=event_id))
+    тексты = dict(cards)
+    спорные = []
+    for rel in written:
+        if not li.вид_по_пути(rel):
+            continue
+        with mi.транзакция(con):
+            oid = li.перенести_карточку(
+                con, vault, rel, актор=("projector", "call_project", "проекция звонка"))
+            if oid is None:
+                спорные.append(rel)
+                continue
+            fm, _ = context_pack.mb.frontmatter(тексты.get(rel, ""))
+            пункт = пункты.get(fm.get("source_id"))
+            if пункт is not None:
+                _evidence_в_реестр(con, oid, пункт, когда)
     if спорные:
         # По построению `_свободный` сюда не попасть: путь либо свободен, либо
         # свой. Попали — значит реестр и волт разошлись так, как код не

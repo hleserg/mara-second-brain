@@ -20,8 +20,8 @@ def frontmatter(text):
     if not m: return {}
     out, key = {}, None
     for line in m.group(1).split("\n"):
-        if line.startswith("- ") and key:            # список из предыдущего ключа
-            out.setdefault(key, []).append(line[2:].strip().strip("'\""))
+        if line.lstrip().startswith("- ") and key:   # список из предыдущего ключа, с отступом или без
+            out.setdefault(key, []).append(line.lstrip()[2:].strip().strip("'\""))
         elif ":" in line and not line.startswith(" "):
             key, _, val = line.partition(":")
             key, val = key.strip(), val.strip().strip("'\"")
