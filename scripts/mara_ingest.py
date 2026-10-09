@@ -366,7 +366,7 @@ create table if not exists outbox(
   object_kind text, object_id text, payload_json text not null,
   created text not null, attempts integer not null default 0,
   state text not null default 'pending' check(state in
-    ('pending', 'sent', 'failed', 'skipped')),
+    ('pending', 'sending', 'sent', 'failed', 'skipped')),
   last_attempt text, sent text, error text);
 create index if not exists outbox_state on outbox(state, created)
 """
@@ -725,35 +725,63 @@ def в_outbox(con, kind, payload, object_kind=None, object_id=None, когда=N
     return oid
 
 
-def из_outbox(con, отправить, kind=None, object_id=None, limit=100):
+# Аренда строки outbox: `sending` старше этого — брошенная попытка (процесс
+# умер между захватом и пометкой), её можно брать снова.
+АРЕНДА_OUTBOX_С = 600
+
+
+def из_outbox(con, отправить, kind=None, object_id=None, ид=None, limit=100,
+              продолжать=False):
     """Разослать ждущие строки outbox. Возвращает список `(id, исход)`.
 
     `отправить(kind, payload)` → исход: `sent`, `failed`, либо любая другая
-    строка — «не сейчас» (нет транспорта, адресат не тот): строка остаётся
-    `pending` с этой строкой в `error`, попытка считается. Исключение из
-    `отправить` — тоже попытка и тоже `pending`, с текстом исключения, и
-    летит дальше: решать, ретрай это или DLQ, вызывающему.
-    Попытка пишется в строку **до** отправки: обрыв между отправкой и
-    пометкой оставит строку `pending` с `attempts > 0` — так повтор хотя
-    бы виден.
+    строка — «не сейчас» (нет транспорта, адресат не тот): строка
+    возвращается в `pending` с этой строкой в `error`, попытка считается.
+    Исключение из `отправить` — тоже попытка и тоже `pending`, с текстом
+    исключения; без `продолжать` оно летит дальше (решать, ретрай это или
+    DLQ, вызывающему), с `продолжать` — исход `error`, и очередь идёт
+    дальше.
+    Захват строки — её же запись: `pending` → `sending` с `attempts+1` и
+    `last_attempt` **до** отправки, одним `update … where state='pending'`,
+    который проходит ровно у одного из двух процессов, взявших одну строку
+    (`--outbox` владельца рядом с воркером; ревью PR #120, P2-1); второй
+    её не видит и не шлёт. Обрыв между отправкой и пометкой оставляет
+    `sending`: такую строку берут снова через `АРЕНДА_OUTBOX_С` — повтор
+    возможен (at-least-once), но виден по `attempts`. Строк, которые
+    забрал другой, в итогах нет.
     """
-    sql, args = "select * from outbox where state='pending'", []
+    # порог аренды в том же формате и поясе, что `now_iso`: сравнение
+    # строк, а не времени, но формат фиксированный, и пояс один
+    просрочено = (datetime.now(TZ) - timedelta(seconds=АРЕНДА_OUTBOX_С)
+                  ).isoformat(timespec="seconds")
+    sql = ("select * from outbox where (state='pending' or "
+           "(state='sending' and last_attempt < ?))")
+    args = [просрочено]
     if kind:
         sql, args = sql + " and kind=?", args + [kind]
     if object_id:
         sql, args = sql + " and object_id=?", args + [object_id]
+    if ид:
+        sql, args = sql + " and id=?", args + [ид]
     rows = con.execute(sql + " order by created limit ?", args + [limit]).fetchall()
     итоги = []
     for r in rows:
         когда = now_iso()
-        con.execute("update outbox set attempts=attempts+1, last_attempt=? where id=?",
-                    (когда, r["id"]))
+        взял = con.execute(
+            "update outbox set state='sending', attempts=attempts+1, last_attempt=? "
+            "where id=? and (state='pending' or (state='sending' and last_attempt=?))",
+            (когда, r["id"], r["last_attempt"])).rowcount
+        if not взял:
+            continue
         try:
             исход = отправить(r["kind"], json.loads(r["payload_json"]))
         except Exception as e:
-            con.execute("update outbox set error=? where id=?",
+            con.execute("update outbox set state='pending', error=? where id=?",
                         ("%s: %s" % (type(e).__name__, e), r["id"]))
-            raise
+            if not продолжать:
+                raise
+            итоги.append((r["id"], "error"))
+            continue
         if исход == "sent":
             con.execute("update outbox set state='sent', sent=?, error=null where id=?",
                         (когда, r["id"]))
@@ -761,7 +789,8 @@ def из_outbox(con, отправить, kind=None, object_id=None, limit=100):
             con.execute("update outbox set state='failed', error=? where id=?",
                         (исход, r["id"]))
         else:
-            con.execute("update outbox set error=? where id=?", (исход, r["id"]))
+            con.execute("update outbox set state='pending', error=? where id=?",
+                        (исход, r["id"]))
         итоги.append((r["id"], исход))
     return итоги
 

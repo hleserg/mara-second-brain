@@ -580,6 +580,11 @@ class ПравкаПоКоду(_СтендПравки):
         out = self.правка(5, item="покрасить забор", note="третья", id=oid,
                           expected_version=2)
         self.assertNotIn("merged", out)
+        # версии больше текущей нет — это не старая заметка, а конфликт
+        # (ревью #120, P3-4)
+        out = self.правка(6, item="покрасить забор", note="четвёртая", id=oid,
+                          expected_version=7)
+        self.assertEqual(out["error"], "version_conflict")
 
     def test_повтор_конфликта_не_плодит_тревог(self):
         oid, _ = self.завести("покрасить забор", 1)
@@ -631,8 +636,6 @@ def когда():
     return "2026-09-02T18:00:00+03:00"
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class СледПравки(_СтендПравки):
@@ -722,3 +725,21 @@ class СледПравки(_СтендПравки):
             mi.audit = было
         self.assertEqual(self.con.execute("select version from commitments").fetchone()[0], 1)
         self.assertEqual(self.con.execute("select count(*) from revisions").fetchone()[0], 1)
+
+    def test_тревога_конфликта_и_её_аудит_одной_транзакцией(self):
+        """Ревью #120, P3-1: упал аудит — нет и тревоги."""
+        oid, _ = self.завести("покрасить забор", 1)
+        self.правка(2, item="покрасить забор", due="2026-10-10")
+        было = mi.audit
+        mi.audit = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("сбой аудита"))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.правка(3, item="покрасить забор", status="done", id=oid,
+                            expected_version=1)
+        finally:
+            mi.audit = было
+        self.assertEqual(self.con.execute("select count(*) from alerts").fetchone()[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

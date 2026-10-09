@@ -14,7 +14,7 @@ SQLite только очередь.
     python3 scripts/call_project.py --event call_<uuid> --vault /srv/vault
     python3 scripts/call_project.py --self-check
 """
-import os, sys, re, json, glob, hashlib, argparse
+import os, sys, re, json, glob, hashlib, argparse, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -709,7 +709,12 @@ def apply_correction(vault, event, con=None):
     ид = p["id"].strip() if isinstance(p.get("id"), str) else ""
     ожидали = _целое(p.get("expected_version"))
     когда = mi.now_iso()
-    with locked(vault):
+    # Реестр — одной транзакцией на всю команду: тревога конфликта, перенос
+    # карточки и строка аудита ложатся вместе или никак (§5.2, ревью PR
+    # #120, P3-1). Замок записи берётся уже под флоком волта, а не до него,
+    # и держится миллисекунды — файл карточки пишется внутри, но он мал.
+    with locked(vault), (mi.транзакция(con) if con is not None
+                         else contextlib.nullcontext()):
         cards = _карточки(vault)
         адреса = _адреса(con)
         # код из пакета — точный адрес, поиск по словам ему не нужен; нет
@@ -728,7 +733,10 @@ def apply_correction(vault, event, con=None):
                             or (due and due != fm.get("due")))
             row = _строка_реестра(con, found[0], адреса)
             проверено = row is not None
-            if меняет_шапку:
+            if меняет_шапку or (note and row is not None and ожидали > row["version"]):
+                # версия больше текущей — такой нет; это не «старая
+                # заметка», а чужое представление о карточке (ревью PR
+                # #120, P3-4)
                 конфликт = _конфликт(con, found[0], ожидали, dict(p), когда, адреса)
             elif note and row is not None:
                 слияние = row["version"] != ожидали

@@ -228,7 +228,7 @@ retention в 04:40, `context_pack` в 04:25, `gmail_ingest --sync` каждые
 (`scripts/contextd.py:974`, `mi.add_job(con, event_id, "asr")`), и цепочка
 `asr → extract → project → digest` отработала ровно на 171 звонке. Сообщения
 и письма в неё не попадают **by design**: первый `insert into commitments`
-появляется в Т2.5. Формулировка «36 805 событий прошли мимо обработки»
+появляется в Т-У.3. Формулировка «36 805 событий прошли мимо обработки»
 недоказуема — `daily-page.log` и `context-pack.log` отработали, значит
 `events` читает не только `jobs`.
 
@@ -467,7 +467,7 @@ ASR идёт с просроченной арендой. Сейчас безоп
 | Ledger документирован и единственный write authority | наоборот: authority — волт (`call_project.py:6-7`), в базе 5 служебных таблиц | — | нет |
 | Immutable stable IDs, не зависящие от имени файла | разговор и обязательство: uuid7 в шапке (`id:`) и в реестре, выдаёт `call_project` через реестр, занятый путь — различитель из id (Т2.2, 2026-10-05); `events.id` — uuid4 с префиксом, как было; люди — по slug имени | `tests/test_call_project.py::Идентичность`, `tests/test_ledger_import.py::Идентичность` | частично: карточки — есть, события и люди — нет; на doctor ждёт `--write-ids` |
 | Regression-тесты на коллизии двух карточек и двух звонков в минуту | путь из даты и slug получает различитель из id (`call_project._свободный`), повтор — квитанция (Т2.9) | `tests/test_collisions.py` (три сценария §17.1), `tests/test_call_project.py::Идентичность` | **есть** (2026-10-09, Т2.7) |
-| Updates через revisions и `expected_version` | `version` и `revisions` растут на каждое принятое изменение (`ledger_import._записать_объект`); `mara_correction` принимает `id` и `expected_version`, расхождение — `version_conflict` в `alerts` (Т2.3, части 1–2) | `tests/test_ledger_import.py::Версия`, `tests/test_call_project.py::ПравкаПоКоду` | частично (2026-10-09): `expected_version` необязателен, HTTP 409 — за доменными командами Т2.5 |
+| Updates через revisions и `expected_version` | `version` и `revisions` растут на каждое принятое изменение (`ledger_import._записать_объект`); `mara_correction` принимает `id` и `expected_version`, расхождение — `version_conflict` в `alerts` (Т2.3, части 1–2) | `tests/test_ledger_import.py::Версия`, `tests/test_call_project.py::ПравкаПоКоду` | частично (2026-10-09): `expected_version` необязателен, HTTP 409 нет — хвост Т2.3 после правки плагина |
 | Потерянное обновление невозможно | правка с `expected_version` при расхождении не применяется (конфликт); без версии — по-прежнему last-write-wins (п.3 ADR-0003, legacy) | `test_расхождение_версии_это_конфликт_а_не_перезапись` | частично (2026-10-09) |
 | Evidence валидируется по существующему сегменту и диапазону | проверяется только наличие ключа `start_ms` | `test_пункт_без_спана_выбрасывается` | нет |
 | Markdown полностью перестраивается из ledger | пересборка сегодня уничтожит правки | — | нет |

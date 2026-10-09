@@ -1128,8 +1128,6 @@ class Версия(unittest.TestCase):
         self.assertEqual(self.ревизии(), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class Аудит(_СтендПереноса):
@@ -1184,3 +1182,7 @@ class Аудит(_СтендПереноса):
             mi.audit = было
         self.assertEqual(self.строки("commitments"), [], "объект без следа не записан")
         self.assertEqual(self.строки("revisions"), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

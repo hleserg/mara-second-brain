@@ -1,5 +1,5 @@
 """Формат дайджеста (ТЗ §16). Рендер без модели и без сети."""
-import contextlib, io, os, sys, json, tempfile, subprocess, unittest
+import contextlib, io, os, sys, json, tempfile, subprocess, unittest, datetime
 from unittest import mock
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -305,8 +305,8 @@ class Outbox(_СтендДоставки):
         cd.deliver = стук
         self.addCleanup(setattr, cd, "deliver", было)
         cd.run(self.eid, root=self.dir, env_file=self.env())
-        self.assertEqual(увидели, [("queued", ("pending", 1))],
-                         "попытка считается до отправки, строка — зафиксирована")
+        self.assertEqual(увидели, [("queued", ("sending", 1))],
+                         "захват и попытка — до отправки, строка — зафиксирована")
         r, = self.строки()
         self.assertEqual((r["kind"], r["object_kind"], r["object_id"], r["state"],
                           r["attempts"]), (cd.ВИД, "event", self.eid, "sent", 1))
@@ -366,6 +366,125 @@ class Outbox(_СтендДоставки):
             cd.run(self.eid, root=self.dir, env_file=self.env())
         self.assertEqual(self.строки(), [])
         self.assertEqual((self.дайджест()["state"], self.состояние()), ("stale", "done"))
+
+    def test_строку_забирает_один_из_двух(self):
+        """Ревью #120, P2-1: `--outbox` владельца рядом с воркером. Строку
+        захватывает запись попытки; второй её пропускает, а не шлёт."""
+        звали = self.доставка("sent")
+        другой = mi.connect(self.dir)
+        # «другой процесс» успел целиком между фиксацией намерения и
+        # рассылкой шага: моделируем его работой `--outbox` из транспорта
+        # первого вызова
+
+        def стук(text, token, chat):
+            звали.append((text, chat))
+            cd.deliver = lambda t, tk, c: звали.append((t, c)) or "sent"
+            cd._разослать(другой, cd.env(self.env()), продолжать=True)
+            return "sent"
+        было = cd.deliver
+        cd.deliver = стук
+        self.addCleanup(setattr, cd, "deliver", было)
+        cd.run(self.eid, root=self.dir, env_file=self.env())
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"]), ("sent", 1), "строка ушла один раз")
+        self.assertEqual(len(звали), 1, "второй процесс пропустил занятую строку")
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("sent", "done"))
+
+    def test_шаг_не_падает_если_строку_забрали(self):
+        """Та же гонка, но второй процесс успел до рассылки шага: шаг
+        видит исход чужой, не шлёт и не роняет работу."""
+        было_в = mi.в_outbox
+
+        def в_outbox(con, *a, **kw):
+            oid = было_в(con, *a, **kw)
+            # пока транзакция шага не зафиксирована, другой процесс строку
+            # не видит; захватим её сразу после фиксации — подменой
+            # `_разослать`-входа: тут проще взять ту же строку заранее
+            return oid
+        self.доставка("sent")
+        было = cd._разослать
+
+        def разослать(con, e, ид=None, продолжать=False):
+            другой = mi.connect(self.dir)
+            было(другой, e, ид=ид)                    # забрал и отправил
+            return было(con, e, ид=ид, продолжать=продолжать)   # шагу — пусто
+        cd._разослать = разослать
+        self.addCleanup(setattr, cd, "_разослать", было)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        self.assertIn("взял другой процесс", out.getvalue())
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"]), ("sent", 1))
+        self.assertEqual((self.дайджест()["state"], self.состояние()), ("sent", "done"))
+
+    def test_outbox_продолжает_после_сбоя_одной_строки(self):
+        """Ревью #120, P3-3: исключение транспорта на одной строке не
+        прерывает очередь, строка ждёт с `error`, остальные уходят."""
+        второй, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "d2",
+            "occurred_at": EVENT["occurred"], "ended_at": EVENT["ended"],
+            "payload": EVENT["payload"]})
+        self.con.execute("update events set state='projected' where id=?", (второй,))
+        mi.write_json(mi.extraction_path(self.dir, второй), ПУСТО)
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        cd.run(self.eid, root=self.dir, env_file=пусто)
+        cd.run(второй, root=self.dir, env_file=пусто)
+        n = []
+
+        def стук(text, token, chat):
+            n.append(1)
+            if len(n) == 1:
+                raise OSError("сеть упала")
+            return "sent"
+        было = cd.deliver
+        cd.deliver = стук
+        self.addCleanup(setattr, cd, "deliver", было)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cd.outbox(self.dir, self.env()), 1)
+        a, b = self.строки()
+        self.assertEqual((a["state"], a["attempts"]), ("pending", 2))
+        self.assertIn("сеть упала", a["error"])
+        self.assertEqual(b["state"], "sent")
+        self.assertIn("ещё ждут: 1", out.getvalue())
+
+    def test_брошенную_строку_берут_снова_после_аренды(self):
+        """Процесс умер между захватом и пометкой: строка `sending`. Пока
+        аренда жива — её никто не трогает, после — берут снова."""
+        self.доставка(OSError("умер"))
+        with self.assertRaises(OSError):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        r, = self.строки()
+        self.assertEqual(r["state"], "pending", "исключение возвращает строку в очередь")
+        # смоделируем смерть без пометки: строка осталась `sending`
+        self.con.execute("update outbox set state='sending', error=null")
+        звали = self.доставка("sent")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 0, "аренда жива — не трогаем")
+        self.assertEqual(звали, [])
+        давно = (datetime.datetime.now(mi.TZ) - datetime.timedelta(
+            seconds=mi.АРЕНДА_OUTBOX_С + 5)).isoformat(timespec="seconds")
+        self.con.execute("update outbox set last_attempt=?", (давно,))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 1)
+        r, = self.строки()
+        self.assertEqual((r["state"], r["attempts"]), ("sent", 2), "повтор виден по счётчику")
+        self.assertEqual(self.состояние(), "done")
+
+    def test_шаг_не_дублирует_строку_которую_сейчас_шлют(self):
+        """Ретрай шага, пока `--outbox` держит строку события: второго
+        намерения не кладём, дайджест не пересобираем."""
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        cd.run(self.eid, root=self.dir, env_file=пусто)
+        self.con.execute("update outbox set state='sending', last_attempt=?",
+                         (mi.now_iso(),))
+        звали = self.доставка("sent")
+        было = self.дайджест()["id"]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertIsNone(cd.run(self.eid, root=self.dir, env_file=self.env()))
+        self.assertIn("не дублирую", out.getvalue())
+        self.assertEqual(len(self.строки()), 1)
+        self.assertEqual(self.дайджест()["id"], было)
+        self.assertEqual(звали, [])
 
     def test_outbox_в_командной_строке(self):
         r = subprocess.run([sys.executable, os.path.join(СКРИПТЫ, "call_digest.py"),
