@@ -677,13 +677,20 @@ def _в_реестр(con, vault, event, p, out, found, адреса, прове�
         if rel:
             # актор — владелец: правка словами это его решение, Мара лишь записала
             oid = li.перенести_карточку(con, vault, rel, актор=("human", "owner", причина))
-            if oid:
-                row = con.execute("select version from commitments where id=?",
-                                  (oid,)).fetchone()
-                # id и версия в ответе — чтобы следующая правка пришла с ними
-                # (ADR-0003 п.3: сперва id в ответ, потом expected_version
-                # обязателен)
-                out["id"], out["version"] = oid, row["version"] if row else None
+            if not oid:
+                # перенос отверг карточку (спор по ключу или занятому id, см.
+                # `ledger_import._спор`) — это отказ команды, а не её успех:
+                # без исключения транзакция записала бы аудит `applied`, а
+                # файл остался бы с правкой без строки (Codex по #120, круг 3).
+                # `call_project.run` тот же None считает ошибкой.
+                raise RuntimeError("правка %s: карточка %s спорная, реестр её не принял"
+                                   % (eid, rel))
+            row = con.execute("select version from commitments where id=?",
+                              (oid,)).fetchone()
+            # id и версия в ответе — чтобы следующая правка пришла с ними
+            # (ADR-0003 п.3: сперва id в ответ, потом expected_version
+            # обязателен)
+            out["id"], out["version"] = oid, row["version"] if row else None
         elif "id" not in out and out.get("found") and len(found) == 1:
             # «уже так»: ничего не писали, но адрес и версия у карточки есть
             row = _строка_реестра(con, found[0], адреса)

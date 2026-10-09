@@ -471,20 +471,47 @@ class Outbox(_СтендДоставки):
         self.assertEqual(self.состояние(), "done")
 
     def test_шаг_не_дублирует_строку_которую_сейчас_шлют(self):
-        """Ретрай шага, пока `--outbox` держит строку события: второго
-        намерения не кладём, дайджест не пересобираем."""
+        """Ретрай шага, пока строку события держит другой процесс: второго
+        намерения не кладём, дайджест не пересобираем — и не выходим нулём
+        (Codex по #120, круг 3: процесс мог умереть после захвата, и шаг,
+        вышедший нулём, закрыл бы работу, оставив строку висеть). Ошибка —
+        ретрай; после аренды строку берут снова."""
         пусто = os.path.join(self.dir, "нет-такого.env")
         cd.run(self.eid, root=self.dir, env_file=пусто)
         self.con.execute("update outbox set state='sending', last_attempt=?",
                          (mi.now_iso(),))
         звали = self.доставка("sent")
         было = self.дайджест()["id"]
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertIsNone(cd.run(self.eid, root=self.dir, env_file=self.env()))
-        self.assertIn("не дублирую", out.getvalue())
+        with self.assertRaises(RuntimeError):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
         self.assertEqual(len(self.строки()), 1)
         self.assertEqual(self.дайджест()["id"], было)
         self.assertEqual(звали, [])
+        # аренда истекла — ретрай шага пересобирает и шлёт
+        давно = (datetime.datetime.now(mi.TZ) - datetime.timedelta(
+            seconds=mi.АРЕНДА_OUTBOX_С + 5)).isoformat(timespec="seconds")
+        self.con.execute("update outbox set last_attempt=?", (давно,))
+        cd.run(self.eid, root=self.dir, env_file=self.env())
+        старая, новая = self.строки()
+        self.assertEqual((старая["state"], новая["state"]), ("skipped", "sent"))
+        self.assertEqual(self.состояние(), "done")
+
+    def test_отправленный_дайджест_повтор_шага_не_шлёт_снова(self):
+        """`--outbox` владельца отправил, пока работа ждала ретрая: повтор
+        шага видит `sent` и закрывает событие, не пересобирая."""
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        cd.run(self.eid, root=self.dir, env_file=пусто)
+        звали = self.доставка("sent")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cd.outbox(self.dir, self.env())
+        self.assertEqual(len(звали), 1)
+        было = self.дайджест()["id"]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertIsNone(cd.run(self.eid, root=self.dir, env_file=self.env()))
+        self.assertIn("уже отправлен", out.getvalue())
+        self.assertEqual(len(звали), 1, "второго сообщения нет")
+        self.assertEqual(len(self.строки()), 1)
+        self.assertEqual((self.дайджест()["id"], self.состояние()), (было, "done"))
 
     def test_исход_и_строка_outbox_ложатся_вместе(self):
         """Codex по #120, P1: нет окна, где outbox уже `sent`, а дайджест ещё

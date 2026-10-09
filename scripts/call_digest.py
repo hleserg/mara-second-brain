@@ -245,18 +245,32 @@ def run(event_id, root=None, env_file=None):
     # ещё одну; прежнее намерение, если его не успели отправить, снимается —
     # иначе `--outbox` отправил бы оба.
     with mi.транзакция(con):
+        # дайджест этого события уже ушёл (строка `sent`): повтор шага после
+        # того, как его отправил `--outbox` владельца или прежняя попытка,
+        # — не повод слать второй раз. Принудительная досылка старья идёт
+        # мимо этой ветки: `stale` в outbox не кладётся.
+        ушёл = con.execute("select 1 from outbox where kind=? and object_id=? and "
+                           "state='sent'", (ВИД, event_id)).fetchone()
+        if ушёл:
+            print("call_digest: %s — дайджест уже отправлен, не дублирую" % event_id)
+            con.execute("update events set state='done' where id=?", (event_id,))
+            return None
         # строку этого события прямо сейчас шлёт другой процесс (`--outbox`
-        # владельца): второе намерение рядом дало бы два сообщения — ждём
-        # его исхода, шаг выходит нулём, событие закроет он
+        # владельца) — либо шлёт, либо умер между захватом и отправкой; снаружи
+        # не отличить, пока аренда жива. Второе намерение рядом дало бы два
+        # сообщения, а выйти нулём значило бы закрыть работу и оставить
+        # строку висеть, если процесс умер: сверка `sending` не считает
+        # (Codex по #120, круг 3). Поэтому — ошибка: работа уйдёт в ретрай
+        # (60 с, 5 мин, 30 мин), и либо увидит `sent`, либо переживёт
+        # аренду и пересоберёт.
         летит = con.execute(
             "select 1 from outbox where kind=? and object_id=? and state='sending' "
             "and last_attempt >= ?", (ВИД, event_id, (
                 datetime.datetime.now(mi.TZ) - datetime.timedelta(
                     seconds=mi.АРЕНДА_OUTBOX_С)).isoformat(timespec="seconds"))).fetchone()
         if летит:
-            print("call_digest: %s — дайджест сейчас шлёт другой процесс, не дублирую"
-                  % event_id)
-            return None
+            raise RuntimeError("дайджест %s сейчас шлёт другой процесс — ретрай после "
+                               "аренды" % event_id)
         con.execute("delete from digests where event_id=?", (event_id,))
         con.execute("update outbox set state='skipped', error='пересобран' "
                     "where kind=? and object_id=? and state in ('pending','sending')",

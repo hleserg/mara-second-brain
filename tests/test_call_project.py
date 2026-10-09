@@ -1,5 +1,5 @@
 """Карточки разговора и обязательств (ТЗ §10)."""
-import os, sys, json, uuid, tempfile, unittest, sqlite3
+import os, sys, json, uuid, tempfile, unittest, sqlite3, contextlib, io
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import call_project as cp
@@ -782,6 +782,25 @@ class СледПравки(_СтендПравки):
         self.assertFalse(self.con.in_transaction, "соединение не осталось в транзакции")
         out = self.правка(4, item="покрасить забор", status="done")
         self.assertTrue(out["applied"] and out["version"] == 2)
+
+    def test_спорную_карточку_правка_не_считает_успехом(self):
+        """Codex по #120, круг 3: перенос отвергает карточку молча (None) —
+        правка обязана это считать отказом: файл назад, аудита `applied` нет."""
+        oid, rel = self.завести("покрасить забор", 1)
+        # карточка с чужим id в шапке: занят объектом с другим ключом — спор
+        p = os.path.join(self.vault, "kb/commitments/krysha.md")
+        текст = ("---\ntitle: заменить крышу\nid: %s\ntype: commitment\nstatus: open\n"
+                 "source_id: commitment/call_9/requests/1\n---\n" % oid)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                self.правка(2, item="заменить крышу", status="done")
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), текст, "файл возвращён")
+        self.assertEqual([json.loads(r["detail_json"])["outcome"] for r in self.след()],
+                         ["created"], "аудита об успехе нет")
+        self.assertEqual(self.con.execute("select count(*) from commitments").fetchone()[0], 1)
 
     def test_тревога_конфликта_и_её_аудит_одной_транзакцией(self):
         """Ревью #120, P3-1: упал аудит — нет и тревоги."""
