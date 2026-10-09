@@ -441,10 +441,13 @@ def проекция_разошлась(con, vault):
     объекта, шапка или evidence не как в реестре). Правки, которые ночной
     перенос ещё не забрал, находкой не считаются: до Т2.8 это норма дня.
     """
-    if not vault or not os.path.isdir(vault):
-        return []
+    if волт_пропал(vault):
+        return []                       # о волте уже сказано, не дублировать
     import vault_drift as vd
-    итог, замечания = vd.проверить(con, vault)
+    try:
+        итог, замечания = vd.проверить(con, vault)
+    except vd.ВолтНеПрочитан:
+        return []
     if not vd.расхождение(итог):
         return []
     чем = ", ".join("%s %d" % (k, итог[k]) for k in vd.РАСХОЖДЕНИЯ if итог[k])
@@ -452,8 +455,7 @@ def проекция_разошлась(con, vault):
                     "волт и реестр разошлись: %s — python3 scripts/vault_drift.py "
                     "--check покажет каждую" % чем,
                     count=sum(итог[k] for k in vd.РАСХОЖДЕНИЯ),
-                    sample=[з for з in замечания
-                            if "ещё не перенос" not in з and "ещё не переносилась" not in з][:5])]
+                    sample=[з for к, з in замечания if к in vd.РАСХОЖДЕНИЯ][:5])]
 
 
 def ретеншен_просрочен(con):

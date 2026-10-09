@@ -866,6 +866,9 @@ def _в_реестр(con, vault, event, p, out, found, адреса, прове�
                 # `call_project.run` тот же None считает ошибкой.
                 raise RuntimeError("правка %s: карточка %s спорная, реестр её не принял"
                                    % (eid, rel))
+            # §4.8: карточку правки рисует тот же проектор — та же версия
+            con.execute("update projections set projector_version=? where path=?",
+                        (mi.PIPELINE_VERSION, rel))
             row = con.execute("select version from commitments where id=?",
                               (oid,)).fetchone()
             # id и версия в ответе — чтобы следующая правка пришла с ними

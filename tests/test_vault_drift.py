@@ -69,24 +69,84 @@ class Дрейф(unittest.TestCase):
         li.run(self.con, self.vault)
         self.assertFalse(vd.расхождение(self.дрейф()[0], strict=True))
 
+    def test_правка_статуса_рукой_не_расхождение_шапки(self):
+        """Ревью: самый частый случай — статус закрыт рукой в Obsidian до
+        переноса. Это «изменены после переноса», а не «шапка разошлась»:
+        расхождение объяснено правкой файла, и сверка о нём не кричит."""
+        with open(self.card, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(self.card, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: proposed", "status: done"))
+        итог, зам = self.дрейф()
+        self.assertEqual((итог["изменены после переноса"], итог["шапка разошлась"],
+                          итог["evidence разошлось"]), (1, 0, 0))
+        self.assertFalse(vd.расхождение(итог))
+        self.assertEqual([f["check"] for f in rc.run(self.con, self.root, vault=self.vault,
+                                                     bm_db=None, targets=[])
+                          if f["check"] == "проекция-разошлась"], [])
+
+    def test_переименованная_рукой_не_удалена(self):
+        новый = self.card.replace(".md", "-x.md")
+        os.rename(self.card, новый)
+        итог, зам = self.дрейф()
+        self.assertEqual((итог["переименованы"], итог["проекций без файла"],
+                          итог["карточек без проекции"]), (1, 0, 1))
+        self.assertFalse(vd.расхождение(итог))
+        self.assertTrue(vd.расхождение(итог, strict=True))
+        li.run(self.con, self.vault)
+        self.assertFalse(vd.расхождение(self.дрейф()[0], strict=True),
+                         "перенос перевесил проекцию")
+
+    def test_неполный_волт_отказ_а_не_удалено_руками(self):
+        with self.assertRaises(vd.ВолтНеПрочитан):
+            vd.проверить(self.con, os.path.join(self.vault, "нет"))
+        import shutil
+        shutil.rmtree(os.path.join(self.vault, "kb"))
+        with self.assertRaises(vd.ВолтНеПрочитан):
+            vd.проверить(self.con, self.vault)
+        находки = rc.run(self.con, self.root, vault=self.vault, bm_db=None, targets=[])
+        self.assertNotIn("проекция-разошлась", [f["check"] for f in находки],
+                         "о волте говорит волт_пропал, не детектор")
+
+    def test_evidence_сравнивается_только_с_model(self):
+        """Строка `human` в реестре (когда появится) карточку не ломает:
+        карточка перечисляет только ссылки из извлечения."""
+        sid = self.con.execute("select id from transcript_segments").fetchone()[0]
+        oid = self.con.execute("select id from commitments").fetchone()[0]
+        self.con.execute("insert into evidence_refs(id,object_kind,object_id,kind,segment_id,"
+                         "start_ms,end_ms,producer,created) values(?,?,?,?,?,?,?,?,?)",
+                         (mi.uuid7(), "commitment", oid, "audio", sid, 250000, 275000,
+                          "human", mi.now_iso()))
+        self.assertEqual(self.дрейф()[0]["evidence разошлось"], 0)
+
+    def test_база_только_для_чтения(self):
+        con = vd.только_чтение(self.root)
+        self.assertEqual(vd.проверить(con, self.vault)[1], [])
+        with self.assertRaises(__import__("sqlite3").OperationalError):
+            vd.только_чтение(os.path.join(self.root, "нет-такого"))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "нет-такого")),
+                         "опечатка в --root не заводит базу")
+
     def test_удалённая_руками_карточка_при_живом_объекте(self):
         os.remove(self.card)
         итог, зам = self.дрейф()
         self.assertEqual(итог["проекций без файла"], 1)
         self.assertTrue(vd.расхождение(итог))
-        self.assertIn("удалена руками", зам[0])
+        self.assertEqual(зам[0][0], "проекций без файла")
+        self.assertIn("удалена руками", зам[0][1])
 
     def test_шапка_разошлась_с_реестром(self):
         self.con.execute("update commitments set status='done', due='2026-09-10'")
         итог, зам = self.дрейф()
         self.assertEqual(итог["шапка разошлась"], 2)
-        self.assertTrue(any("status в шапке 'proposed', в реестре 'done'" in з for з in зам), зам)
+        self.assertTrue(any("status в шапке 'proposed', в реестре 'done'" in з
+                            for _, з in зам), зам)
 
     def test_evidence_разошлось(self):
         self.con.execute("delete from evidence_refs")
         итог, зам = self.дрейф()
         self.assertEqual(итог["evidence разошлось"], 1)
-        self.assertIn("evidence в шапке 1, в реестре 0", зам[0])
+        self.assertIn("evidence в шапке 1, в реестре 0", зам[0][1])
 
     def test_чужая_карточка_без_проекции(self):
         with open(os.path.join(self.vault, "kb/commitments/ruka.md"), "w", encoding="utf-8") as fh:
@@ -107,12 +167,18 @@ class Дрейф(unittest.TestCase):
         self.assertEqual([f for f in rc.run(self.con, self.root, vault=self.vault, bm_db=None,
                                             targets=[]) if f["check"] == "проекция-разошлась"],
                          [])
+        # правка рукой другой карточки в образец находки не попадает (ревью)
+        conv = os.path.join(self.vault, [w for w in self.written
+                                         if w.startswith("kb/conversations/")][0])
+        with open(conv, "a", encoding="utf-8") as fh:
+            fh.write("\nзаметка\n")
         os.remove(self.card)
         f, = [f for f in rc.run(self.con, self.root, vault=self.vault, bm_db=None, targets=[])
               if f["check"] == "проекция-разошлась"]
         self.assertEqual((f["level"], f["count"]), ("warn", 1))
         self.assertIn("vault_drift.py --check", f["detail"])
-        self.assertTrue(f["sample"][0].startswith("kb/commitments/"))
+        self.assertEqual(len(f["sample"]), 1)
+        self.assertIn("удалена руками", f["sample"][0])
 
     def test_командная_строка(self):
         скрипт = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts",
@@ -126,6 +192,11 @@ class Дрейф(unittest.TestCase):
                             "--root", self.root], capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
         self.assertIn("удалена руками", r.stdout)
+        r = subprocess.run([sys.executable, скрипт, "--check", "--vault",
+                            os.path.join(self.vault, "нет"), "--root", self.root],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("волт не прочитан", r.stderr)
 
 
 if __name__ == "__main__":
