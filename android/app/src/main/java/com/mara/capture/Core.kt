@@ -239,7 +239,10 @@ object CallLogMatcher {
     fun хвостНомера(number: String?): String? =
         number?.filter { it.isDigit() }?.takeLast(10)?.takeIf { it.length >= 7 }
 
-    /** Есть ли номер звонка в подсказке (uri или имя файла, с %XX-кодировкой). */
+    /** Есть ли номер звонка в подсказке (uri или имя файла, с %XX-кодировкой).
+     *  Подсказка сводится к одной строке цифр: рекордеры пишут номер в имя с
+     *  пробелами, скобками и дефисами. Цена — дата и счётчики из пути тоже
+     *  там; ложное совпадение требует хвоста в десять цифр на их стыке. */
     fun номерВ(hint: String, number: String?): Boolean {
         val хвост = хвостНомера(number) ?: return false
         val раскодирован = runCatching { java.net.URLDecoder.decode(hint, "UTF-8") }

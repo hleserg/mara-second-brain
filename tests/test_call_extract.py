@@ -271,6 +271,7 @@ class Шаг(unittest.TestCase):
         self.assertEqual(extr["config"]["outcome_rule"],
                          {"direction": "outgoing", "duration_s": 0, "words": 8,
                           "journal": "no-answer", "match": None})
+        self.assertEqual(extr["config"]["model"], ce.MODEL, "настройки модели на месте")
 
     def test_сопоставление_по_номеру_даёт_право_на_недозвон_и_при_речи(self):
         """Телефон нашёл номер звонка в пути записи (`match: number`) — запись
