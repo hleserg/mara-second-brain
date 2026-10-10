@@ -43,7 +43,7 @@ class Пересборка(unittest.TestCase):
                           "deadline_phrase": "до пятницы", "disposition": "task",
                           "evidence": [{"segment": "s0011", "segment_id": self.sid,
                                         "start_ms": 252000, "end_ms": 260000}]}],
-            "commitments": [{"action": "позвонить в банк", "explicit": True, "confidence": 0.95,
+            "commitments": [{"action": "позвонить \"в банк\"", "explicit": True, "confidence": 0.95,
                              "due_at": None, "deadline_explicit": False, "deadline_phrase": "",
                              "disposition": "task",
                              "evidence": [{"segment": "s0011", "segment_id": self.sid}]}],
@@ -83,6 +83,8 @@ class Пересборка(unittest.TestCase):
         self.assertTrue(out["applied"])
         self.правка(item="позвонить в банк", due="2026-09-10")
         self.правка(item="позвонить в банк", due="2026-09-12", note="Анна попросила")
+        self.assertIn('title: "позвонить \\"в банк\\""', self.читать(self.card.replace(
+            "prislat-smetu", "pozvonit-v-bank")), "заголовок с кавычкой в конце (Codex, круг 3)")
         text = self.читать(self.card)
         self.assertIn("\nПравки:\n- ", text)
         self.assertIn(", Мара, correction/", text)
@@ -185,6 +187,23 @@ class Пересборка(unittest.TestCase):
         итог, карточки = self.пересборка()
         self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
 
+    def test_соседние_строки_рукой_с_одним_временем_и_разными_полями(self):
+        """Codex по #125, круг 3: граница строки журнала — по id строки
+        реестра, а не по ключу: две строки рукой в одну минуту с разными
+        полями не сливаются."""
+        with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:
+            fh.write("\nПравки:\n"
+                     "- 2026-09-21T15:08, владелец: статус proposed → open\n"
+                     "- 2026-09-21T15:08, владелец: срок 2026-09-04 → 2026-09-05\n"
+                     "- 2026-09-21T15:08, владелец: статус open → done; закрыл\n")
+        text = self.читать(self.card).replace("status: proposed", "status: done")
+        with open(os.path.join(self.vault, self.card), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        li.run(self.con, self.vault)
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
+        self.assertEqual(карточки[self.card][1].count("\n- 2026-09-21T15:08, владелец:"), 3)
+
     def test_заметка_с_переносом_и_точкой_с_запятой_переживает_круг(self):
         self.правка(item="прислать смету", status="done", note="а ;б;;в\nвторая строка")
         text = self.читать(self.card)
@@ -204,7 +223,7 @@ class Пересборка(unittest.TestCase):
         self.assertEqual(self.con.execute("select title from commitments where id=?", (
             self.con.execute("select object_id from projections where path=?",
                              (self.card,)).fetchone()[0],)).fetchone()[0],
-            'прислать \\"большую\\" смету Анне')
+            'прислать "большую" смету Анне', "в реестре — без кавычек и экранирований")
         итог, карточки = self.пересборка()
         self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
         self.assertIn('title: "прислать \\"большую\\" смету Анне"', карточки[self.card][1])
@@ -268,6 +287,15 @@ class Пересборка(unittest.TestCase):
         open(файл, "w").close()
         with self.assertRaises(RuntimeError):
             vr.записать(карточки, файл, self.vault)
+
+    def test_скаляр_шапки_снимает_экранирование(self):
+        """Codex по #125, круг 3: разбор шапки — обратный к `yaml_str`."""
+        from vault_common import yaml_str
+        mb = cp.context_pack.mb
+        for т in ('позвонить "Анне"', 'а \\ б', 'конец \\"', "без кавычек", ""):
+            self.assertEqual(mb.скаляр(yaml_str(т)), т, repr(т))
+        self.assertEqual(mb.скаляр("'одинарные'"), "одинарные")
+        self.assertEqual(mb.скаляр('"незакрытая'), "незакрытая")
 
     def test_неполный_волт_отказ(self):
         with self.assertRaises(vd.ВолтНеПрочитан):

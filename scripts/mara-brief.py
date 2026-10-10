@@ -48,6 +48,19 @@ read_note, build_context, recent_activity) — молча, до того как 
 и скажи, не выдумывай."""
 
 
+def скаляр(val):
+    """Значение шапки без кавычек. Строка в двойных кавычках с обеих сторон
+    — как её пишет `yaml_str`: внутренние `\"` и `\\` снимаются. Раньше
+    кавычки просто срезались с краёв (`strip`), и заголовок, кончающийся
+    кавычкой (`"позвонить \"Анне\""`), терял её вместе с экранирующей
+    косой — в реестр уезжал хвост `\` (Codex по #125). Остальное — как
+    было: одиночные кавычки и незакрытые срезаются с краёв."""
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] == '"':
+        return re.sub(r"\\(.)", r"\1", val[1:-1])
+    return val.strip("'\"")
+
+
 def frontmatter(text):
     """Плоский YAML наших карточек: скаляры и списки через «- ». Без PyYAML —
     его нет на doctor, а карточки пишут свои же скрипты одним форматом."""
@@ -62,10 +75,10 @@ def frontmatter(text):
         if line.lstrip().startswith("- ") and key is not None:
             if not isinstance(fm[key], list):
                 fm[key] = []
-            fm[key].append(line.lstrip()[2:].strip().strip("'\""))
+            fm[key].append(скаляр(line.lstrip()[2:]))
         elif line and not line[0].isspace() and ":" in line:
             key, _, val = line.partition(":")
-            key, val = key.strip(), val.strip().strip("'\"")
+            key, val = key.strip(), скаляр(val)
             fm[key] = val
     return fm, m.group(2)
 
