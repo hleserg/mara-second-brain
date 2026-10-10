@@ -254,7 +254,10 @@ class КарточкиПропали(unittest.TestCase):
         self.assertIn("kb/conversations/b.md", f["карточки-пропали"]["sample"])
         # #96 п.1: находка называет первое действие, как соседняя
         # `лаг-индекса`, и оба пути, которыми она закрывается.
-        self.assertIn("git log --diff-filter=D", f["карточки-пропали"]["detail"])
+        self.assertIn("git log --diff-filter=D --no-renames --name-only",
+                      f["карточки-пропали"]["detail"])
+        for sub in rc.КАРТОЧКИ:
+            self.assertIn(sub, f["карточки-пропали"]["detail"])
         self.assertIn("обходе Basic Memory", f["карточки-пропали"]["detail"])
 
     def test_чужие_записи_базы_не_считаются(self):
