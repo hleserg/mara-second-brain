@@ -70,6 +70,8 @@ class MainActivity : AppCompatActivity() {
         // момент, когда владелец рядом; политика UPDATE делает повтор
         // безвредным.
         if (s.paired) SyncWorker.schedule(this)
+        // здоровье проверяется и без спаривания: папка и разрешения — про телефон
+        HealthWorker.schedule(this)
 
         b.url.setText(s.baseUrl)
         b.token.setText(s.token)
@@ -116,7 +118,14 @@ class MainActivity : AppCompatActivity() {
     private fun здоровье() = фоном {
         val q = Queue(this)
         val последняя = Device.scan(this, s).maxByOrNull { it.modifiedMs }
+        // тот же прогон, что у воркера: экран и уведомление не расходятся
+        val оценка = HealthWorker.проверить(this, s)
         listOf(
+            "состояние: " + Здоровье.словами(оценка),
+            "тревог «звонок был, записи нет»: ${s.alertCount}" +
+                (if (s.alertCallMs != 0L) ", одна открыта" else "") +
+                ", последняя закрыта: " + когда(s.alertRecoveredMs),
+            "проверка здоровья по расписанию: " + расписание(HealthWorker.ПЕРИОД),
             "спарено: " + if (s.paired) "да, " + s.baseUrl else "нет",
             "папка: " + (s.folderUri.ifEmpty { "не выбрана, смотрю медиатеку" }),
             "последняя запись: " + (последняя?.let { "${it.name} · ${когда(it.modifiedMs)}" }
@@ -136,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             "застряло: " + (q.pending().filter { it.error != null && it.attempts >= 3 }
                 .maxByOrNull { it.attempts }
                 ?.let { "${it.name}: ${it.error} (попыток ${it.attempts})" } ?: "—"),
-            "сверка по расписанию: " + расписание(),
+            "сверка по расписанию: " + расписание(SyncWorker.ПЕРИОД),
             "последняя отправка: " + когда(s.lastUploadMs),
             // пишется при любой попытке, и неудачной тоже: удачные видно на сервере
             "последняя попытка связи: " + когда(s.lastContactMs),
@@ -167,10 +176,10 @@ class MainActivity : AppCompatActivity() {
      * весь экран целиком, а здесь стоит одной строки. `get()` блокирующий,
      * но `здоровье` и так считается не на главном потоке.
      */
-    private fun расписание(): String = SyncWorker.расписаниеСловами(
+    private fun расписание(имя: String): String = SyncWorker.расписаниеСловами(
         runCatching {
             WorkManager.getInstance(this)
-                .getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
+                .getWorkInfosForUniqueWork(имя).get()
                 .map { it.state to it.nextScheduleTimeMillis }
         }.getOrNull(),
         System.currentTimeMillis()
@@ -292,13 +301,15 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         /** До 33 медиатеку открывало общее чтение хранилища, с 33 — отдельное на аудио. */
-        val НУЖНЫ: Array<String> = arrayOf(
+        val НУЖНЫ: Array<String> = listOfNotNull(
             Manifest.permission.READ_CALL_LOG,
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.READ_SMS,
             if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
             else Manifest.permission.READ_EXTERNAL_STORAGE,
-        )
+            // тревога здоровья (Т4.2) без этого на 33+ не покажется
+            if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else null,
+        ).toTypedArray()
     }
 }
