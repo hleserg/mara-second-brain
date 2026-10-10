@@ -234,7 +234,7 @@ class Правка(unittest.TestCase):
                      "due: 2026-09-05", "due_explicit: true", "sensitive: true",
                      "cloud_allowed: false"):
             self.assertIn(line, text)
-        self.assertIn("покрасить забор — до 2026-09-05",
+        self.assertIn("«покрасить забор» — до 2026-09-05",
                       open(os.path.join(v, "_system/context/now.md"), encoding="utf-8").read())
 
     def test_два_похожих_не_угадываем(self):
