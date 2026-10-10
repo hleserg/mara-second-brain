@@ -254,10 +254,10 @@ class MainActivity : AppCompatActivity() {
     /** Скан медиатеки, обход SAF и разбор кодека — не на главном потоке. */
     private fun фоном(сбор: () -> String) {
         Thread {
-            // текст исключения SAF/MediaStore может нести путь с номером — тоже через затиралку
-            val t = runCatching(сбор).getOrElse {
-                Затирание.текст("не собралось: ${it.javaClass.simpleName}: ${it.message}")
-            }
+            // Только класс исключения: сообщение SAF/MediaStore несёт URI или
+            // путь, а в дереве ACR это каталог контакта — затиралкой по цифрам
+            // имя не снять, а отчёт обещан безопасным (Codex по #134).
+            val t = runCatching(сбор).getOrElse { "не собралось: ${it.javaClass.simpleName}" }
             runOnUiThread { покажи(t) }
         }.start()
     }
