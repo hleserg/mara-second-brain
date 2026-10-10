@@ -588,6 +588,46 @@ class Сущности(unittest.TestCase):
         self.assertLessEqual({"config_json", "pipeline_version"}, колонки())
         con.close()
 
+    def test_миграция_6_ревизии_извлечения_и_путь_вниз(self):
+        """Т5.0: таблица `extractions` и `commitments.extraction_id`; откат
+        6 → 5 проходит только пока ревизий нет и карточки на них не
+        ссылаются, иначе отказ с именем того, что стёр бы."""
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        таблицы = lambda: {r[0] for r in con.execute(
+            "select name from sqlite_master where type='table'")}
+        колонки = lambda: {r[1] for r in con.execute("pragma table_info(commitments)")}
+        self.assertIn("extractions", таблицы())
+        self.assertIn("extraction_id", колонки())
+        con.execute("insert into events(id,kind,source,source_id,occurred,received,"
+                    "dedupe_key,state) values('e1','call','phone','d','t','t','k','new')")
+        con.execute("insert into extractions(id,event_id,data_json,created) "
+                    "values('x1','e1','{}','t')")
+        con.close()
+        with self.assertRaises(RuntimeError) as e:
+            mi.migrate(self.dir, 5)
+        self.assertIn("extractions", str(e.exception))
+        self.assertEqual(self.версия(), mi.ВЕРСИЯ)
+        con = mi.migrate(self.dir)
+        con.execute("delete from extractions")
+        con.execute("update commitments set extraction_id='x1'")   # карточка базы v1
+        con.close()
+        with self.assertRaises(RuntimeError) as e:
+            mi.migrate(self.dir, 5)
+        self.assertIn("commitments", str(e.exception))
+        con = mi.migrate(self.dir)
+        con.execute("update commitments set extraction_id=null")
+        con.close()
+        con = mi.migrate(self.dir, 5)
+        self.assertNotIn("extractions", таблицы())
+        self.assertNotIn("extraction_id", колонки())
+        self.assertEqual(self.версия(), 5)
+        con.close()
+        con = mi.migrate(self.dir)
+        self.assertIn("extractions", таблицы())
+        self.assertIn("extraction_id", колонки())
+        con.close()
+
     def test_откат_не_стирает_данные_молча(self):
         """Путь вниз без потерь только пока в новое никто не писал. Записали
         — отказ: такой откат идёт через восстановление из бэкапа."""

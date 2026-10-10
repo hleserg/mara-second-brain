@@ -426,12 +426,64 @@ def _откат_5(con):
         con.execute("alter table %s drop column %s" % (таблица, поле))
 
 
+# Миграция 6 (Т5.0, ТЗ §9.1): извлечение — производная ревизия в реестре.
+# До неё `call_extract` переписывал `extractions/<event>.json` на месте, и
+# переобработка была неотличима от первой обработки: ни когда, ни чем, ни по
+# какому входу сделан прошлый результат, не узнать. Теперь каждый прогон —
+# строка `extractions` с происхождением (модель, версии промпта, правил и
+# конвейера, конфигурация, хеш входа) и самим результатом (`data_json`);
+# файл остаётся проекцией последней ревизии для читателей, которые знают
+# только его. `commitments.extraction_id` — из какой ревизии карточка:
+# объект отвечает «чем и по какой версии» (ADR-0004 п.4), и ссылка на
+# ревизию — тот самый ответ целиком. Аддитивно: таблица пустая, колонка без
+# ограничений, `drop column` на откате проходит.
+SCHEMA_6 = """
+create table if not exists extractions(
+  id text primary key not null,
+  event_id text not null references events(id),
+  transcript_id text references transcripts(id),
+  extractor text, prompt_version integer, rules_version integer,
+  pipeline_version integer, config_json text, input_sha256 text,
+  data_json text not null, created text not null);
+create index if not exists extractions_event on extractions(event_id, created)
+"""
+КОЛОНКИ_6 = (
+    ("commitments", "extraction_id", "text"),
+)
+
+
+def _миграция_6(con):
+    for о in _операторы(SCHEMA_6):
+        con.execute(о)
+    for таблица, поле, тип in КОЛОНКИ_6:
+        con.execute("alter table %s add column %s %s" % (таблица, поле, тип))
+
+
+def _откат_6(con):
+    """Назад к 5 — пока ревизий извлечения нет и ни одна карточка на них не
+    ссылается: строка `extractions` — единственный след того, чем и из чего
+    сделан результат, и стереть её командой нельзя."""
+    занято = []
+    if con.execute("select 1 from extractions limit 1").fetchone():
+        занято.append("extractions")
+    занято += sorted({т for т, п, _ in КОЛОНКИ_6 if con.execute(
+        "select 1 from %s where %s is not null limit 1" % (т, п)).fetchone()})
+    if занято:
+        raise RuntimeError("contextd.db: откат 6 → 5 стёр бы записанное в %s"
+                           " — только восстановлением из бэкапа" % ", ".join(занято))
+    for таблица, поле, _ in КОЛОНКИ_6:
+        con.execute("alter table %s drop column %s" % (таблица, поле))
+    con.execute("drop index if exists extractions_event")
+    con.execute("drop table extractions")
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
-МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3, _миграция_4, _миграция_5)
+МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3, _миграция_4, _миграция_5,
+            _миграция_6)
 # Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
 # ниже него только пустая база.
-ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5)
+ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5, _откат_6)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 

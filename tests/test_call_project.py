@@ -289,6 +289,42 @@ class Идентичность(unittest.TestCase):
         mi.write_json(mi.extraction_path(root, eid), EXTR)
         return eid
 
+    def test_карточка_и_реестр_несут_ревизию_извлечения(self):
+        """Т5.0: `extraction_id` в шапке обязательства и в строке
+        `commitments` — из какой ревизии извлечения карточка; проектор
+        читает последнюю ревизию из реестра, а не файл."""
+        import call_extract as ce
+        root, vault, con = self.стенд()
+        eid = self.звонок(con, root, "r1")
+        xid = mi.uuid7()
+        ce.записать_ревизию(con, xid, dict(EXTR, event_id=eid, extraction_id=xid))
+        con.commit()
+        written = cp.run(eid, vault, root)
+        card = [w for w in written if w.startswith("kb/commitments/")][0]
+        with open(os.path.join(vault, card), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("\nextraction_id: %s\n" % xid, text)
+        self.assertEqual(con.execute("select extraction_id from commitments where id=?",
+                                     (_id(text),)).fetchone()[0], xid)
+        # новая ревизия → проекция обновляет ссылку, версия объекта растёт
+        xid2 = mi.uuid7()
+        ce.записать_ревизию(con, xid2, dict(EXTR, event_id=eid, extraction_id=xid2))
+        con.commit()
+        cp.run(eid, vault, root)
+        row = con.execute("select extraction_id, version from commitments where id=?",
+                          (_id(text),)).fetchone()
+        self.assertEqual((row["extraction_id"], row["version"]), (xid2, 2))
+        # файл без строки (до миграции 6) — поля нет и строка пуста
+        con.execute("delete from extractions")
+        con.commit()
+        eid2 = self.звонок(con, root, "r2", occurred="2026-09-03T10:00:00+03:00")
+        text2 = open(os.path.join(vault, [w for w in cp.run(eid2, vault, root)
+                                          if w.startswith("kb/commitments/")][0]),
+                     encoding="utf-8").read()
+        self.assertNotIn("extraction_id", text2)
+        self.assertIsNone(con.execute("select extraction_id from commitments where id=?",
+                                      (_id(text2),)).fetchone()[0])
+
     def test_карточки_несут_id_uuid7(self):
         cards = cp.all_cards(EVENT, EXTR, {})
         ids = [_id(text) for rel, text in cards if "/kb/" in "/" + rel]

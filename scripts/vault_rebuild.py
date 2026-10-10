@@ -46,6 +46,7 @@ sys.path.insert(0, HERE)
 import mara_ingest as mi
 import ledger_import as li
 import call_project as cp
+import call_extract as ce
 import vault_drift as vd
 from vault_common import canon_map, scrub, yaml_str
 
@@ -74,7 +75,7 @@ def _как_есть(v):
                    ("due", _как_есть), ("due_explicit", _как_есть), ("valid_from", _как_есть),
                    ("confidence", lambda v: "%.2f" % float(v)), ("supersedes", _кавычки),
                    ("classification", _как_есть), ("extractor", _как_есть),
-                   ("prompt_version", _как_есть)),
+                   ("prompt_version", _как_есть), ("extraction_id", _как_есть)),
     "conversation": (("title", _кавычки), ("created", _как_есть), ("occurred", _как_есть),
                      ("valid_from", _как_есть), ("classification", _как_есть))}
 СОСТОЯНИЯ = ("совпало", "разошлось", "без файла", "без источника", "не сравнивалось")
@@ -202,14 +203,14 @@ def _из_звонка(con, root, event_id, canon, пути):
     реестра: `{rel: (вид, oid, текст)}`."""
     ev = _событие(con, event_id)
     epath = mi.extraction_path(root, event_id)
-    if not os.path.exists(epath):
-        raise НеПересобрать("извлечения %s нет" % os.path.relpath(epath, root))
     try:
-        with open(epath, encoding="utf-8") as fh:
-            extraction = json.load(fh)
+        # из реестра (ревизия, миграция 6); файл — у извлечений до неё
+        extraction = ce.прочитать_извлечение(con, root, event_id)
     except (OSError, ValueError) as e:
         raise НеПересобрать("извлечение %s не читается: %s"
                             % (os.path.relpath(epath, root), type(e).__name__))
+    if extraction is None:
+        raise НеПересобрать("извлечения %s нет" % os.path.relpath(epath, root))
     extraction = cp._сверить_с_реестром(con, event_id, extraction)
     # ссылки — из реестра, где они есть: пересобранная карточка показывает
     # принятое реестром, а не список модели

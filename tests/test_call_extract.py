@@ -222,9 +222,11 @@ class Шаг(unittest.TestCase):
                          ("model", ce.MODEL, self.eid))
         self.assertEqual((д["why"], д["segment"], д["list"], д["item"], д["transcript_id"]),
                          ("нет такого сегмента", "s0007", "requests", 0, self.tid))
-        self.assertEqual(sorted(д), ["end_ms", "item", "list", "prompt_version",
-                                     "rules_version", "segment", "start_ms",
-                                     "transcript_id", "why"])
+        self.assertEqual(sorted(д), ["end_ms", "extraction_id", "item", "list",
+                                     "prompt_version", "rules_version", "segment",
+                                     "start_ms", "transcript_id", "why"])
+        self.assertEqual(д["extraction_id"], extr["extraction_id"],
+                         "отказ привязан к ревизии, из которой он")
         for r in рows:
             self.assertNotIn("смет", r["detail_json"], "содержимого в аудите нет (§6.2)")
             self.assertNotIn("цитат", r["detail_json"])
@@ -252,6 +254,58 @@ class Шаг(unittest.TestCase):
             ce.transcript_text(self.segs).encode("utf-8")).hexdigest())
         self.assertEqual(ce.конфигурация()["options"], {"temperature": 0, "num_ctx": 8192},
                          "параметры запроса — те же, что уходят в ollama")
+
+    def test_каждый_прогон_новая_ревизия_в_реестре(self):
+        """Т5.0, ТЗ §9.1: переобработка — новая строка `extractions` с
+        происхождением и результатом целиком; прежняя не трогается, файл
+        — проекция последней, читатели берут последнюю из реестра."""
+        первое = self.прогон({"requests": [
+            {"action": "прислать смету", "explicit": True, "confidence": 0.95,
+             "deadline_phrase": "", "evidence": [{"segment": "s0001"}]}]})
+        второе = self.прогон({"requests": [], "commitments": [
+            {"action": "позвонить", "explicit": True, "confidence": 0.95,
+             "deadline_phrase": "", "evidence": [{"segment": "s0001"}]}]})
+        строки = [dict(r) for r in self.con.execute(
+            "select * from extractions where event_id=? order by created, id", (self.eid,))]
+        self.assertEqual([r["id"] for r in строки],
+                         [первое["extraction_id"], второе["extraction_id"]])
+        self.assertNotEqual(первое["extraction_id"], второе["extraction_id"])
+        for r, data in zip(строки, (первое, второе)):
+            self.assertEqual((r["transcript_id"], r["extractor"], r["prompt_version"],
+                              r["rules_version"], r["pipeline_version"], r["input_sha256"]),
+                             (self.tid, ce.MODEL, ce.PROMPT_VERSION, ce.RULES_VERSION,
+                              self.mi.PIPELINE_VERSION, data["input_sha256"]))
+            self.assertEqual(json.loads(r["config_json"]), data["config"])
+            # результат в строке — тот же словарь, что в файле: ревизия
+            # восстановима из реестра без файла
+            self.assertEqual(json.loads(r["data_json"]), data)
+        self.assertEqual(json.loads(строки[0]["data_json"])["requests"][0]["action"],
+                         "прислать смету", "прежняя ревизия не перезаписана")
+        xid, data = ce.извлечение_события(self.con, self.eid)
+        self.assertEqual((xid, data), (второе["extraction_id"], второе))
+        self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid), второе)
+        # без строки — файл (извлечение до миграции 6)
+        self.con.execute("delete from extractions")
+        self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid), второе)
+        os.remove(self.mi.extraction_path(self.dir, self.eid))
+        self.assertIsNone(ce.прочитать_извлечение(self.con, self.dir, self.eid))
+
+    def test_строка_раньше_файла(self):
+        """Файл пишется после фиксации строки: смерть между ними оставляет
+        строку без свежего файла, а не файл без строки (как у `call_asr`)."""
+        было = self.mi.write_json
+        def падает(path, data):
+            raise OSError(28, "диск полон")
+        self.mi.write_json = падает
+        try:
+            with self.assertRaises(OSError):
+                self.прогон({"requests": [], "commitments": []})
+        finally:
+            self.mi.write_json = было
+        xid, data = ce.извлечение_события(self.con, self.eid)
+        self.assertIsNotNone(xid, "строки нет — результат прогона потерян")
+        self.assertFalse(os.path.exists(self.mi.extraction_path(self.dir, self.eid)))
+        self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid), data)
 
     def test_промпт_и_сверка_из_одной_расшифровки(self):
         """Codex по #121: файл и строки реестра разошлись (ASR умер между

@@ -162,6 +162,20 @@ class Пересборка(unittest.TestCase):
         итог, карточки = self.пересборка()
         self.assertEqual(итог["без источника"], 4, "без извлечения звонок не пересобрать")
 
+    def test_извлечение_из_реестра_а_не_из_файла(self):
+        """Т5.0: ревизия в реестре (миграция 6) — источник пересборки; файл
+        нужен только извлечениям до неё. Файла нет, строка есть — сходится."""
+        import call_extract as ce
+        xid = mi.uuid7()
+        ce.записать_ревизию(self.con, xid, dict(self.extr, extraction_id=xid))
+        self.con.commit()
+        cp.run(self.eid, self.vault, self.root)
+        os.remove(mi.extraction_path(self.root, self.eid))
+        итог, карточки = self.пересборка()
+        self.assertEqual((итог["без источника"], итог["разошлось"]), (0, 0), dict(итог))
+        self.assertEqual(карточки[self.card][0], "совпало")
+        self.assertIn("extraction_id: %s" % xid, карточки[self.card][1])
+
     def test_в_живой_волт_и_в_непустой_каталог_не_пишет(self):
         итог, карточки = self.пересборка()
         with self.assertRaises(RuntimeError) as e:
