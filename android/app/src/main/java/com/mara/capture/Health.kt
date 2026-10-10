@@ -47,7 +47,10 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         const val ПЕРИОД_МИН = 60L
         const val ПОВТОРОВ = 3
         const val КАНАЛ = "health"
-        const val УВЕДОМЛЕНИЕ = 1
+        /** Два уведомления, не одно: тревога по звонку живёт до появления
+         *  записи, «сломано» — до починки; одно перезаписывало бы другое. */
+        const val ТРЕВОГА = 1
+        const val СЛОМАНО = 2
         private const val НЕДЕЛЯ_МС = 7 * 24 * 3600_000L
 
         /** Без этих двух захват не работает; остальные из `MainActivity.НУЖНЫ`
@@ -59,8 +62,9 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         )
 
         /** Всё, что видно телефону, без единого решения. Что не прочиталось
-         *  — честный `null` или пустой список, а не «всё хорошо». */
-        fun собрать(ctx: Context, s: Settings): Приметы {
+         *  — честный `null` или пустой список, а не «всё хорошо». `скан` —
+         *  записи, если зовущий их уже собрал: обход SAF дважды не нужен. */
+        fun собрать(ctx: Context, s: Settings, скан: List<Recording>? = null): Приметы {
             val сейчас = System.currentTimeMillis()
             val неделя = сейчас - НЕДЕЛЯ_МС
             return Приметы(
@@ -75,40 +79,44 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 рекордерЕсть = Device.producers(ctx).isNotEmpty(),
                 // без разрешения журнал бросает — это уже учтено строкой выше
                 звонки = runCatching { Device.callLog(ctx, неделя) }.getOrDefault(emptyList()),
-                записи = runCatching { Device.scan(ctx, s, неделя) }.getOrDefault(emptyList())
-                    .map { it.modifiedMs },
+                записи = (скан ?: runCatching { Device.scan(ctx, s, неделя) }.getOrDefault(emptyList()))
+                    .map { it.modifiedMs }.filter { it >= неделя },
                 расписаниеЖиво = runCatching {
                     WorkManager.getInstance(ctx).getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
                         .any { !it.state.isFinished }
                 }.getOrNull(),
                 свободноБайт = runCatching { StatFs(ctx.filesDir.path).availableBytes }.getOrNull(),
+                уведомленияРазрешены = Build.VERSION.SDK_INT < 33 ||
+                    Device.granted(ctx, Manifest.permission.POST_NOTIFICATIONS),
             )
         }
 
         /**
          * Один прогон: оценить, запомнить, поднять или снять тревогу. Зовётся
          * и воркером, и экраном здоровья — состояние на экране и в
-         * уведомлении одно и то же, а не два разных мнения.
+         * уведомлении одно и то же, а не два разных мнения. Под замком: экран
+         * и воркер в одну секунду подняли бы одну тревогу дважды (ревью).
          */
-        fun проверить(ctx: Context, s: Settings): Оценка {
-            val п = собрать(ctx, s)
+        @Synchronized
+        fun проверить(ctx: Context, s: Settings, п: Приметы = собрать(ctx, s)): Оценка {
             val о = Здоровье.оценить(п)
             when (Здоровье.событие(о, s.alertCallMs, п.записи)) {
                 Здоровье.Событие.ТРЕВОГА -> {
                     s.alertCallMs = о.тревога ?: 0L
                     s.alertCount = s.alertCount + 1
-                    уведомить(ctx, "Звонок был, записи нет", о.причина)
+                    уведомить(ctx, ТРЕВОГА, "Звонок был, записи нет", о.причина)
                 }
                 Здоровье.Событие.ВОССТАНОВЛЕНО -> {
                     s.alertCallMs = 0L
                     s.alertRecoveredMs = п.сейчас
+                    снять(ctx, ТРЕВОГА)
                 }
                 null -> {}
             }
-            // сломанное разрешение или папка — тоже тревога, одна на причину
-            if (о.состояние == Состояние.unhealthy && о.тревога == null && о.причина != s.healthReason)
-                уведомить(ctx, "Захват сломан", о.причина)
-            if (о.состояние != Состояние.unhealthy && s.alertCallMs == 0L) снять(ctx)
+            // сломанное разрешение или папка — своё уведомление, одно на причину
+            if (о.состояние == Состояние.unhealthy && о.тревога == null) {
+                if (о.причина != s.healthReason) уведомить(ctx, СЛОМАНО, "Захват сломан", о.причина)
+            } else снять(ctx, СЛОМАНО)
             s.healthState = о.состояние.name
             s.healthReason = о.причина
             s.healthAtMs = п.сейчас
@@ -136,7 +144,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
          * `POST_NOTIFICATIONS` на 33+ система молча не покажет — разрешение
          * спрашивает кнопка на экране.
          */
-        private fun уведомить(ctx: Context, заголовок: String, текст: String) {
+        private fun уведомить(ctx: Context, id: Int, заголовок: String, текст: String) {
             val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(
                 NotificationChannel(КАНАЛ, "Здоровье захвата", NotificationManager.IMPORTANCE_HIGH))
@@ -149,11 +157,11 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 .setContentIntent(открыть)
                 .setOngoing(true)
                 .build()
-            runCatching { nm.notify(УВЕДОМЛЕНИЕ, n) }
+            runCatching { nm.notify(id, n) }
         }
 
-        private fun снять(ctx: Context) {
-            (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(УВЕДОМЛЕНИЕ)
+        private fun снять(ctx: Context, id: Int) {
+            (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(id)
         }
     }
 }
