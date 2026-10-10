@@ -216,16 +216,36 @@ class Правка(unittest.TestCase):
         """Заголовок длиннее `MAX_TITLE` Мара видит обрезанным с «…»; правка
         этим текстом обязана найти карточку без `id` (Codex по #129, круг 2)."""
         import context_pack
-        title = "согласовать с подрядчиком смету на ремонт кухни, прихожей и балкона " \
-                "до конца следующей недели и прислать её на почту с разбивкой по этапам"
+        # хвост из многих разных слов: доля общих слов ниже порога, и найти
+        # карточку можно только по показанному виду, не по словам (Codex,
+        # круг 3: ярус слов маскировал несработавшее снятие «…»)
+        title = ("согласовать с подрядчиком смету на ремонт кухни и прихожей до пятницы "
+                 + " ".join("слово%d" % i for i in range(40)))
         self.assertGreater(len(title), context_pack.MAX_TITLE)
         v = self.волт()
         p = self.карточка(v, "long.md", title)
         показ = context_pack.данные(title, context_pack.MAX_TITLE)
         self.assertTrue(показ.endswith("…"), показ)
+        qw, tw = cp._слова(показ.lower()), cp._слова(title.lower())
+        self.assertLess(len(qw & tw) / len(tw), 0.5, "иначе тест держится на ярусе слов")
         out = self.правка(v, item=показ, status="done")
         self.assertTrue(out["found"], out)
         self.assertIn("\nstatus: done\n", open(p, encoding="utf-8").read())
+        # то же с «...» вместо «…» — так модель может переписать многоточие
+        v2 = self.волт()
+        p2 = self.карточка(v2, "long.md", title)
+        out = self.правка(v2, item=показ[:-1] + "...", status="done")
+        self.assertTrue(out["found"], out)
+
+    def test_пустой_после_очистки_запрос_ничего_не_находит(self):
+        """«#» после `данные` — пустая строка, а пустая строка — подстрока любого
+        заголовка: единственная открытая карточка закрывалась бы по ней
+        (Codex, круг 3)."""
+        v = self.волт()
+        p = self.карточка(v, "smeta.md", "прислать смету")
+        out = self.правка(v, item="#", status="done")
+        self.assertFalse(out["found"], out)
+        self.assertIn("status: proposed", open(p, encoding="utf-8").read())
 
     def test_срок_меняется_а_история_остаётся(self):
         v = self.волт()
