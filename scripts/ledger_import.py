@@ -609,6 +609,20 @@ def вписать_id(con, vault, dry_run=False):
                 вписано += 1
                 if dry_run:
                     continue
+                # Отпечаток проекции — на новые байты, иначе следующая сверка
+                # сочтёт нашу же правку чужой; и в реестр — до записи файла:
+                # прерванный между ними прогон при повторе видит карточку ещё
+                # без id и переписывает её, а обратный порядок оставлял бы
+                # окно, которое повтор не чинит — id на месте, отпечаток
+                # старый (Codex по #138, круг 4). Байты те же, что пишет
+                # `fh.write(новый)` в utf-8. По объекту, не по пути:
+                # переименованная до ночного переноса карточка держит проекцию
+                # под старым путём, и обновление по пути не нашло бы ни строки
+                # (ревью P3-6)
+                sha = hashlib.sha256(новый.encode("utf-8")).hexdigest()
+                con.execute("update projections set content_sha256=?, path=? "
+                            "where object_id=? and object_kind=?",
+                            (sha, rel, row["id"], вид))
                 p = os.path.join(vault, rel)
                 tmp = p + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
@@ -620,16 +634,6 @@ def вписать_id(con, vault, dry_run=False):
                     os.fsync(fh.fileno())
                 os.replace(tmp, p)
                 vault_manifest.fsync_каталога(os.path.dirname(p))
-                # отпечаток проекции — на новые байты, иначе следующая
-                # сверка сочтёт нашу же правку чужой
-                with open(p, "rb") as fh:
-                    sha = hashlib.sha256(fh.read()).hexdigest()
-                # по объекту, не по пути: переименованная до ночного переноса
-                # карточка держит проекцию под старым путём, и обновление по
-                # пути не нашло бы ни строки (ревью P3-6)
-                con.execute("update projections set content_sha256=?, path=? "
-                            "where object_id=? and object_kind=?",
-                            (sha, rel, row["id"], вид))
         if not dry_run:
             # хеши и пути проекций сменились — манифест и точка следом, тем же
             # флоком (§4.8/§5.2); иначе до следующей проекции сверка видела бы
