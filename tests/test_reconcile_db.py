@@ -130,6 +130,22 @@ class БазаЦела(unittest.TestCase):
         self.assertEqual([x["check"] for x in f], ["база-не-открывается"])
         self.assertIn("Permission denied", f[0]["detail"])
 
+    def test_файл_пропал_между_stat_и_открытием(self):
+        # Codex по #141, круг 3: проверка «файл есть» до `connect` не защищает
+        # от тома, отвалившегося между ними, — `connect` в режиме создания
+        # завёл бы свежую базу. Открытие без создания: `stat` подменён
+        # «файл есть», файла нет.
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        есть = os.stat(os.path.join(self.root, "contextd.db"))
+        # первый `stat` — «файл есть», дальше правда: файла нет
+        with unittest.mock.patch.object(rc.os, "stat",
+                                        side_effect=[есть, FileNotFoundError()]):
+            con, f = rc.открыть_реестр(root)
+        self.assertIsNone(con)
+        self.assertEqual([x["check"] for x in f], ["база-нет"])
+        self.assertFalse(os.path.exists(os.path.join(root, "contextd.db")), "завёл базу")
+
     def test_нет_базы_это_находка_и_ничего_не_заводится(self):
         # опечатка в --root крона раньше давала пустую базу и «всё сходится»
         root = os.path.join(tempfile.mkdtemp(), "opechatka")

@@ -379,6 +379,20 @@ class Версия(unittest.TestCase):
         self.assertEqual(self.версия(), mi.ВЕРСИЯ)
         self.assertGreaterEqual(mi.ВЕРСИЯ, 1)
 
+    def test_без_создания_не_заводит_ни_файла_ни_каталога_ни_схемы(self):
+        """`connect(…, создавать=False)` — для сверки: опечатка в --root или
+        отвалившийся том не должны родить пустой реестр (Codex по #141)."""
+        нет = os.path.join(self.dir, "opechatka")
+        with self.assertRaises(sqlite3.OperationalError):
+            mi.connect(нет, создавать=False)
+        self.assertFalse(os.path.exists(нет))
+        open(self.путь, "wb").close()
+        with self.assertRaisesRegex(RuntimeError, "пустой файл"):
+            mi.connect(self.dir, создавать=False)
+        self.assertEqual(os.path.getsize(self.путь), 0, "завёл схему в пустом файле")
+        mi.connect(self.dir).close()                       # обычный путь заводит
+        mi.connect(self.dir, создавать=False).close()      # и теперь открывается
+
     def test_прагмы_соединения_по_adr_0005(self):
         """§5.1 и ADR-0005: WAL, `synchronous=FULL` явной строкой, внешние
         ключи, `busy_timeout` 30 с.
