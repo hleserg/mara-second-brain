@@ -121,10 +121,12 @@ def коррекций_в_час():
     v = os.environ.get("MARA_CORRECTIONS_PER_HOUR")
     if v is None or v == "":
         return КОРРЕКЦИЙ_В_ЧАС
-    if v.isdecimal() and int(v) >= 1:
+    # Длина — до `int`: строка цифр длиннее предела преобразования Python
+    # (4300 знаков) роняла бы `int` на каждой правке (Codex, круг 4).
+    if v.isdecimal() and len(v) <= 9 and int(v) >= 1:
         return int(v)
-    print("MARA_CORRECTIONS_PER_HOUR=%r — нужно целое от 1, беру %d"
-          % (v, КОРРЕКЦИЙ_В_ЧАС), flush=True)
+    print("MARA_CORRECTIONS_PER_HOUR=%r — нужно целое от 1 до девяти знаков, "
+          "беру %d" % (v[:20], КОРРЕКЦИЙ_В_ЧАС), flush=True)
     return КОРРЕКЦИЙ_В_ЧАС
 
 

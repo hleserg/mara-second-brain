@@ -1583,7 +1583,7 @@ class ТестЧастотаПравок(unittest.TestCase):
         self.assertEqual(self.правка("четвёртая")[0], 429)
 
     def test_порог_из_окружения(self):
-        for кривое in ("abc", "0", "-1", "1.5"):
+        for кривое in ("abc", "0", "-1", "1.5", "1234567890", "9" * 5000):
             os.environ["MARA_CORRECTIONS_PER_HOUR"] = кривое
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(contextd.коррекций_в_час(), 3, кривое)
