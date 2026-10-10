@@ -2,7 +2,7 @@
 import contextlib, os, sys, io, json, hashlib, socket, stat, struct
 import tempfile, threading, time, unittest, unittest.mock, sqlite3
 import urllib.request, urllib.error, urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -1371,6 +1371,203 @@ class ТестКвитанции(unittest.TestCase):
         self.assertEqual(заголовки.get("Idempotent-Replay"), "true")
         self.assertEqual(self.con.execute("select count(*) from ingest_attempts").fetchone()[0],
                          1, "вторая квитанция не записалась")
+
+
+class ТестЧастотаПравок(unittest.TestCase):
+    """Хвост Т3.1 (#39, #96 п.2), политика — мешок М5 п.3: правок словами с
+    одного устройства не больше N в час, дальше 429 с `Retry-After`. Счёт — по
+    строкам `events`, так что дубль, повтор по ключу и отказ 400 не считаются,
+    а рестарт демона окно не сбрасывает. Ключ — устройство по токену: поле
+    `source` в теле ставит клиент."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.vault = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.vault, ".git"))
+        os.makedirs(os.path.join(self.vault, "kb/commitments"))
+        self.srv = contextd.make_server(self.dir, port=0, vault=self.vault)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        self.con = mi.connect(self.dir)
+        self.dev, self.token = contextd.pair(self.con, "мак")
+        # Порог и окружение — через patch с addCleanup: упавший посреди тест
+        # иначе оставил бы порог или переменную всем следующим в процессе.
+        # Сервер читает константу на каждом запросе, так что патч модуля
+        # действует на него.
+        for патч in (unittest.mock.patch.object(contextd, "КОРРЕКЦИЙ_В_ЧАС", 3),
+                     unittest.mock.patch.dict(os.environ)):
+            патч.start()
+            self.addCleanup(патч.stop)
+        os.environ.pop("MARA_CORRECTIONS_PER_HOUR", None)
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def правка(self, sid, source="mara", ключ=None, payload=None, token=None):
+        тело = {"kind": "correction", "source": source, "source_id": sid,
+                "payload": payload or {"item": "дело " + sid, "status": "done"}}
+        req = urllib.request.Request(self.base + "/v1/ingest/event", method="POST",
+                                     data=json.dumps(тело).encode("utf-8"))
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + (token or self.token))
+        if ключ:
+            req.add_header("Idempotency-Key", ключ)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read() or b"{}"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}"), dict(e.headers)
+
+    def строк(self):
+        return self.con.execute("select count(*) from events where kind='correction' "
+                                "and device_id=?", (self.dev,)).fetchone()[0]
+
+    def test_предел_на_устройство_и_retry_after(self):
+        for i in range(3):
+            код, _, _ = self.правка("п%d" % i)
+            self.assertEqual(код, 200)
+        с_429 = contextd._отказы.get(429, 0)
+        код, ответ, заголовки = self.правка("п3")
+        self.assertEqual(код, 429)
+        self.assertIn("подождать", ответ["error"])
+        ждать = int(заголовки["Retry-After"])
+        self.assertTrue(1 <= ждать <= 3600, ждать)
+        self.assertEqual(self.строк(), 3, "отвергнутая правка строки не оставляет")
+        self.assertEqual(contextd._отказы.get(429, 0), с_429 + 1, "429 виден в счётчике")
+        # Переименование источника в теле окно не обходит: ключ — устройство.
+        код, _, _ = self.правка("ч0", source="человек")
+        self.assertEqual(код, 429)
+        # Другое устройство — своё окно.
+        _, чужой = contextd.pair(self.con, "второй мак")
+        код, _, _ = self.правка("в0", token=чужой)
+        self.assertEqual(код, 200)
+
+    def test_дубль_и_повтор_по_ключу_не_считаются(self):
+        self.assertEqual(self.правка("а")[0], 200)
+        код, первый, _ = self.правка("б", ключ="k-b")
+        self.assertEqual(код, 200)
+        код, снова, _ = self.правка("а")
+        self.assertEqual((код, снова["duplicate"]), (200, True))
+        код, повтор, заголовки = self.правка("б", ключ="k-b")
+        self.assertEqual((код, заголовки.get("Idempotent-Replay")), (200, "true"))
+        self.assertEqual(self.правка("в")[0], 200, "дубль и повтор окно не заняли")
+        self.assertEqual(self.правка("г")[0], 429)
+        код, _, заголовки = self.правка("б", ключ="k-b")
+        self.assertEqual((код, заголовки.get("Idempotent-Replay")), (200, "true"),
+                         "повтор по ключу проходит и при полном окне")
+        # Дубль без ключа при полном окне — «дубль», а не 429: плагин ключа
+        # не шлёт, а повтор той же правки в ту же минуту — его штатный путь.
+        код, снова, _ = self.правка("а")
+        self.assertEqual((код, снова["duplicate"]), (200, True))
+
+    def test_отказ_400_не_считается(self):
+        self.assertEqual(self.правка("а")[0], 200)
+        self.assertEqual(self.правка("б")[0], 200)
+        код, _, _ = self.правка("кривая", payload={"item": "x", "due": "пятница"})
+        self.assertEqual(код, 400)
+        self.assertEqual(self.правка("в")[0], 200)
+        self.assertEqual(self.правка("г")[0], 429)
+
+    def test_окно_отпускает_по_времени(self):
+        for i in range(3):
+            self.assertEqual(self.правка("п%d" % i)[0], 200)
+        self.assertEqual(self.правка("п3")[0], 429)
+        давно = (datetime.now(mi.TZ) - timedelta(hours=2)).isoformat(timespec="seconds")
+        self.con.execute("update events set received=? where kind='correction'", (давно,))
+        self.con.commit()
+        self.assertEqual(self.правка("п3")[0], 200)
+
+    def test_строка_без_времени_не_запирает(self):
+        for i in range(3):
+            self.assertEqual(self.правка("п%d" % i)[0], 200)
+        self.con.execute("update events set received='вчера' where kind='correction'")
+        self.con.commit()
+        self.assertEqual(contextd.ждать_с_правкой(self.con, self.dev), 0)
+
+    def test_свежесть_по_received_а_не_по_id(self):
+        # `events.id` — `<kind>_<uuid4>`, порядок по нему случаен. Три свежие
+        # и одна старая строка с такими id, что по `id desc` в тройку
+        # попадает старая (z, y, x), а свежая `a` — нет: порядок по id
+        # отвечал бы «можно», хотя свежих три.
+        сейчас = datetime.now(mi.TZ)
+        давно = (сейчас - timedelta(hours=2)).isoformat(timespec="seconds")
+        свежо = (сейчас - timedelta(minutes=5)).isoformat(timespec="seconds")
+        for ид, когда in (("correction_z", свежо), ("correction_y", свежо),
+                          ("correction_x", давно), ("correction_a", свежо)):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, когда))
+        self.con.commit()
+        ждать = contextd.ждать_с_правкой(self.con, self.dev, сейчас)
+        self.assertTrue(3000 <= ждать <= 3300, ждать)
+        self.assertEqual(self.правка("ещё")[0], 429)
+
+    def test_смешанные_сдвиги_received_считаются_по_времени(self):
+        # После смены MARA_TZ_HOURS в столбце разные сдвиги: строка «+00:00»
+        # c меньшим местным временем лексически старше, хотя по времени
+        # свежее. Две свежие в +03:00 и одна свежая в +00:00 (местное время
+        # на три часа «раньше») — три свежих, окно полно.
+        сейчас = datetime.now(mi.TZ)
+        своя = (сейчас - timedelta(minutes=5)).isoformat(timespec="seconds")
+        чужая = (сейчас - timedelta(minutes=3)).astimezone(
+            timezone(timedelta(hours=0))).isoformat(timespec="seconds")
+        старая = (сейчас - timedelta(hours=3)).isoformat(timespec="seconds")
+        for ид, когда in (("correction_1", своя), ("correction_2", своя),
+                          ("correction_3", чужая), ("correction_4", старая)):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, когда))
+        self.con.commit()
+        self.assertGreater(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
+        self.assertEqual(self.правка("ещё")[0], 429)
+
+    def test_смена_сдвига_на_26_часов_не_теряет_свежие(self):
+        # Крайние сдвиги −12 и +14: местное время одной и той же минуты
+        # расходится на 26 часов. Три свежие правки записаны в −12:00, а
+        # «сейчас» считается в +14:00 — лексически они на сутки с лишним
+        # старше границы в сутки, и окно казалось бы пустым.
+        сейчас = datetime.now(timezone(timedelta(hours=14)))
+        в_минус = (сейчас - timedelta(minutes=5)).astimezone(
+            timezone(timedelta(hours=-12))).isoformat(timespec="seconds")
+        for ид in ("correction_1", "correction_2", "correction_3"):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, в_минус))
+        self.con.commit()
+        self.assertGreater(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
+
+    def test_кривая_строка_не_занимает_окно(self):
+        # «zzzz» лексически старше любой даты: раньше попадала в выборку
+        # `limit`, вытесняла живую строку и запирала окно двумя правками.
+        сейчас = datetime.now(mi.TZ)
+        свежо = (сейчас - timedelta(minutes=5)).isoformat(timespec="seconds")
+        for ид, когда in (("correction_1", свежо), ("correction_2", свежо),
+                          ("correction_3", "zzzz")):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, когда))
+        self.con.commit()
+        self.assertEqual(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
+        self.assertEqual(self.правка("третья")[0], 200)
+        self.assertEqual(self.правка("четвёртая")[0], 429)
+
+    def test_порог_из_окружения(self):
+        for кривое in ("abc", "0", "-1", "1.5"):
+            os.environ["MARA_CORRECTIONS_PER_HOUR"] = кривое
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(contextd.коррекций_в_час(), 3, кривое)
+            self.assertIn("нужно целое от 1", out.getvalue())
+        os.environ["MARA_CORRECTIONS_PER_HOUR"] = ""
+        self.assertEqual(contextd.коррекций_в_час(), 3)
+        os.environ["MARA_CORRECTIONS_PER_HOUR"] = "1"
+        self.assertEqual(self.правка("а")[0], 200)
+        self.assertEqual(self.правка("б")[0], 429, "порог из окружения действует")
 
 
 class ТестScopes(unittest.TestCase):
