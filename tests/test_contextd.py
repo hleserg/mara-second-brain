@@ -2,7 +2,7 @@
 import contextlib, os, sys, io, json, hashlib, socket, stat, struct
 import tempfile, threading, time, unittest, unittest.mock, sqlite3
 import urllib.request, urllib.error, urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -1500,6 +1500,42 @@ class ТестЧастотаПравок(unittest.TestCase):
         ждать = contextd.ждать_с_правкой(self.con, self.dev, сейчас)
         self.assertTrue(3000 <= ждать <= 3300, ждать)
         self.assertEqual(self.правка("ещё")[0], 429)
+
+    def test_смешанные_сдвиги_received_считаются_по_времени(self):
+        # После смены MARA_TZ_HOURS в столбце разные сдвиги: строка «+00:00»
+        # c меньшим местным временем лексически старше, хотя по времени
+        # свежее. Две свежие в +03:00 и одна свежая в +00:00 (местное время
+        # на три часа «раньше») — три свежих, окно полно.
+        сейчас = datetime.now(mi.TZ)
+        своя = (сейчас - timedelta(minutes=5)).isoformat(timespec="seconds")
+        чужая = (сейчас - timedelta(minutes=3)).astimezone(
+            timezone(timedelta(hours=0))).isoformat(timespec="seconds")
+        старая = (сейчас - timedelta(hours=3)).isoformat(timespec="seconds")
+        for ид, когда in (("correction_1", своя), ("correction_2", своя),
+                          ("correction_3", чужая), ("correction_4", старая)):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, когда))
+        self.con.commit()
+        self.assertGreater(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
+        self.assertEqual(self.правка("ещё")[0], 429)
+
+    def test_кривая_строка_не_занимает_окно(self):
+        # «zzzz» лексически старше любой даты: раньше попадала в выборку
+        # `limit`, вытесняла живую строку и запирала окно двумя правками.
+        сейчас = datetime.now(mi.TZ)
+        свежо = (сейчас - timedelta(minutes=5)).isoformat(timespec="seconds")
+        for ид, когда in (("correction_1", свежо), ("correction_2", свежо),
+                          ("correction_3", "zzzz")):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, когда))
+        self.con.commit()
+        self.assertEqual(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
+        self.assertEqual(self.правка("третья")[0], 200)
+        self.assertEqual(self.правка("четвёртая")[0], 429)
 
     def test_порог_из_окружения(self):
         for кривое in ("abc", "0", "-1", "1.5"):
