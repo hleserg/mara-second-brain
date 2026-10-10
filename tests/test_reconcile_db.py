@@ -119,6 +119,17 @@ class БазаЦела(unittest.TestCase):
         self.assertIn("права", f[0]["detail"])
         self.assertIn("из копии не восстанавливать", f[0]["detail"])
 
+    def test_каталог_без_прав_это_не_опечатка(self):
+        # Codex по #141, круг 2: `isfile` глотает EACCES, и каталог с чужими
+        # правами после восстановления выглядел бы как «базы нет».
+        # Права в контейнере обходит root — отказ подменяется у `os.stat`.
+        with unittest.mock.patch.object(rc.os, "stat",
+                                        side_effect=PermissionError(13, "Permission denied")):
+            con, f = rc.открыть_реестр(self.root)
+        self.assertIsNone(con)
+        self.assertEqual([x["check"] for x in f], ["база-не-открывается"])
+        self.assertIn("Permission denied", f[0]["detail"])
+
     def test_нет_базы_это_находка_и_ничего_не_заводится(self):
         # опечатка в --root крона раньше давала пустую базу и «всё сходится»
         root = os.path.join(tempfile.mkdtemp(), "opechatka")
