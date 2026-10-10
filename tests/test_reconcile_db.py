@@ -106,6 +106,19 @@ class БазаЦела(unittest.TestCase):
         self.assertEqual([(x["check"], x["level"]) for x in f],
                          [("база-повреждена", "error")])
 
+    def test_база_только_на_чтение_это_не_повреждение(self):
+        # Codex по #141: `OperationalError` — подкласс `DatabaseError`; совет
+        # «восстанавливать из копии» здоровой базе с чужими правами был бы вреден.
+        # Права в контейнере обходит root, поэтому отказ подменяется у `connect`.
+        with unittest.mock.patch.object(mi, "connect", side_effect=sqlite3.OperationalError(
+                "attempt to write a readonly database")):
+            con, f = rc.открыть_реестр(self.root)
+        self.assertIsNone(con)
+        self.assertEqual([(x["check"], x["level"]) for x in f],
+                         [("база-не-открывается", "error")])
+        self.assertIn("права", f[0]["detail"])
+        self.assertIn("из копии не восстанавливать", f[0]["detail"])
+
     def test_нет_базы_это_находка_и_ничего_не_заводится(self):
         # опечатка в --root крона раньше давала пустую базу и «всё сходится»
         root = os.path.join(tempfile.mkdtemp(), "opechatka")
