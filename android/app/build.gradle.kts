@@ -33,6 +33,15 @@ android {
     }
 }
 
+// Закрепление версий ради сканера уязвимостей в CI (job `osv`, Т0.9 п.6):
+// `./gradlew :app:dependencies --write-locks` пишет gradle.lockfile со всеми
+// транзитивными зависимостями, и его читает osv-scanner. Самого файла в
+// репозитории нет (см. комментарий в .github/workflows/tests.yml), так что
+// на сборку это не влияет: без лок-файла режим закрепления ничего не требует.
+dependencyLocking {
+    lockAllConfigurations()
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.6.1")

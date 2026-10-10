@@ -1,0 +1,9 @@
+# Языковые модели spaCy для redact.py — не на PyPI, а в релизах
+# explosion/spacy-models; версии как в ADR-0012 §В. Ставятся вместе с
+# requirements-venv.txt (там spacy 3.8.x, под который они собраны).
+# Отдельным файлом, потому что osv-scanner сканирует экосистему PyPI, а
+# у ссылок экосистемы нет.
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl \
+    --hash=sha256:1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
+https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.8.0/ru_core_news_sm-3.8.0-py3-none-any.whl \
+    --hash=sha256:69978d47b43e2c4f329bebdb155e8e9d3861bba1a58ba25551419dae7d7e07fc
