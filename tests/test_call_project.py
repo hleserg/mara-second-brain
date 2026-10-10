@@ -102,6 +102,23 @@ class Исход(unittest.TestCase):
         self.assertIsNone(mi.исход_звонка({"direction": "unknown", "duration_s": 0}))
         self.assertTrue(mi.звонок_состоялся({}))
         self.assertFalse(mi.звонок_состоялся({"direction": "outgoing", "duration_s": 0}))
+        # ревизия извлечения — авторитет: она видела и журнал, и расшифровку
+        недозвон = {"direction": "outgoing", "duration_s": 0}
+        self.assertIsNone(mi.исход_звонка(недозвон, {"outcome": "uncertain"}))
+        self.assertIsNone(mi.исход_звонка(недозвон, {"outcome": "unknown"}))
+        self.assertEqual(mi.исход_звонка({}, {"outcome": "no-answer"}), "no-answer")
+        self.assertEqual(mi.исход_звонка(недозвон, {}), "no-answer", "ревизия без поля — журнал")
+
+    def test_сомнительное_совпадение_рисуется_как_звонок(self):
+        """Журнал говорит «недозвон», извлечение решило `uncertain` (длинная
+        расшифровка) — карточка и дайджест как у состоявшегося."""
+        ev = self.событие(direction="outgoing", duration_s=0)
+        _, text = cp.conversation_card(ev, dict(EXTR, outcome="uncertain"), {})
+        self.assertIn('title: "Звонок · Анна · 14:05"', text)
+        self.assertNotIn("outcome:", text)
+        self.assertNotIn("Исход:", text)
+        _, text = cp.conversation_card(ev, dict(EXTR, outcome="no-answer"), {})
+        self.assertIn('title: "Недозвон · Анна · 14:05"', text)
 
     def test_состоявшийся_и_неизвестный_карточку_не_меняют(self):
         def без_свежего(text):      # id и created у новой карточки свои

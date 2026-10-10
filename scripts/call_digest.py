@@ -127,11 +127,11 @@ def render(event, extraction, created_count):
     """(текст дайджеста, пункты для таблицы digests)."""
     day, _, human = cp.when(event)
     end = (event.get("ended") or "")[11:16]
-    head = "%s · %s · %s%s" % (cp.заголовок(event), cp.contact(event), human,
+    head = "%s · %s · %s%s" % (cp.заголовок(event, extraction), cp.contact(event), human,
                                 "–" + end if end else "")
     out, items = [head], []
-    if cp.строка_исхода(event):
-        out.append(cp.строка_исхода(event))
+    if cp.строка_исхода(event, extraction):
+        out.append(cp.строка_исхода(event, extraction))
     maybe = []
     for key, title in SECTIONS:
         rows = []

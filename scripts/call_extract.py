@@ -58,6 +58,9 @@ def конфигурация():
             "schema_sha256": hashlib.sha256(json.dumps(
                 SCHEMA, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()}
 
+# Т4.3: расшифровка длиннее этого при «не состоялся» по журналу — не гудки,
+# а разговор, и сопоставление с журналом (по времени) сомнительно
+СЛОВ_РАЗГОВОРА = 40
 LISTS = ("requests", "commitments", "decisions", "constraints",
          "open_questions", "changed_instructions", "followups")
 NAMES = ("people_mentioned", "projects_mentioned")
@@ -413,35 +416,57 @@ def run(event_id, root=None):
         segs = call_asr.read_jsonl(tpath)
         сегменты = сегменты_из(segs)
     текст = transcript_text(segs)
-    # Т4.3: пропущенный или недозвон (журнал звонков в payload) — разговора
-    # не было, извлекать нечего: модель не зовётся, иначе из гудков и
-    # автоответчика она выдумывала бы просьбы и обещания; ревизия при этом
-    # пишется как обычно — пустая, с исходом
+    # Т4.3: исход вызова решается здесь — есть и журнал (payload), и
+    # расшифровка. Журнал говорит «пропущен» или «недозвон», расшифровка
+    # короткая (гудки, автоответчик) — разговора не было, модель не зовётся:
+    # из гудков она выдумывала бы просьбы и обещания; ревизия пишется
+    # пустой, с исходом и происхождением правила. Расшифровка при этом
+    # длинная — сопоставление записи с журналом (по времени, окно пять
+    # минут) сомнительно, настоящий разговор прижат к недозвону: исход
+    # `uncertain`, модель зовётся как обычно (Codex по #135).
+    слов = len(текст.split())
     исход = mi.исход_звонка(ev["payload"])
-    if mi.звонок_состоялся(ev["payload"]):
-        raw = ask_model(текст)
-    else:
+    if исход in ("missed", "no-answer") and слов > СЛОВ_РАЗГОВОРА:
+        print("call_extract: %s — по журналу %s, а в расшифровке %d слов: сопоставление "
+              "сомнительно, модель зовётся" % (event_id, mi.ИСХОДЫ[исход], слов),
+              file=sys.stderr)
+        исход = "uncertain"
+    правило = исход in ("missed", "no-answer")
+    if правило:
         raw = {}
-        print("call_extract: %s — звонок %s (%s), модель не звалась"
-              % (event_id, mi.ИСХОДЫ[исход], исход), file=sys.stderr)
+        print("call_extract: %s — звонок %s (%s), %d слов, модель не звалась"
+              % (event_id, mi.ИСХОДЫ[исход], исход, слов), file=sys.stderr)
+    else:
+        raw = ask_model(текст)
     data = normalize(raw, occurred, сегменты)
-    if исход is not None:
-        data["outcome"] = исход
+    data["outcome"] = исход or "unknown"
     отклонено = data.pop("evidence_rejected")
     data["event_id"] = event_id
     data["occurred_at"] = occurred
     data["pipeline_version"] = mi.PIPELINE_VERSION
     data["transcript_id"] = tid
-    # ADR-0004 п.4: чем и по какой версии. Пустая ревизия несостоявшегося
-    # звонка сделана правилом, а не моделью — и ревизия об этом говорит
-    data["extractor"] = MODEL if mi.звонок_состоялся(ev["payload"]) else "rule:outcome"
-    data["prompt_version"] = PROMPT_VERSION
-    # Т5.0, ТЗ §9: правила — версией, конфигурация прогона и хеш входа —
-    # того текста, который ушёл модели (у legacy-расшифровки без строк
-    # `transcript_id` пустой, и хеш — единственный след входа)
     data["rules_version"] = RULES_VERSION
-    data["config"] = конфигурация()
-    data["input_sha256"] = hashlib.sha256(текст.encode("utf-8")).hexdigest()
+    if правило:
+        # ADR-0004 п.4: чем и по какой версии. Ревизия сделана правилом, не
+        # моделью — и происхождение у неё своё: промпта нет, конфигурация —
+        # что правило читало, хеш входа — от этих входов, а не от текста,
+        # которого модели не показывали (Codex по #135)
+        data["extractor"] = "rule:outcome"
+        data["prompt_version"] = None
+        data["config"] = {"rule": "outcome", "direction": ev["payload"].get("direction"),
+                          "duration_s": ev["payload"].get("duration_s"),
+                          "words": слов, "words_max": СЛОВ_РАЗГОВОРА}
+        data["input_sha256"] = hashlib.sha256(
+            json.dumps(data["config"], ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    else:
+        data["extractor"] = MODEL          # ADR-0004 п.4: чем и по какой версии
+        data["prompt_version"] = PROMPT_VERSION
+        # Т5.0, ТЗ §9: конфигурация прогона и хеш входа — того текста, который
+        # ушёл модели (у legacy-расшифровки без строк `transcript_id` пустой,
+        # и хеш — единственный след входа)
+        data["config"] = конфигурация()
+        data["input_sha256"] = hashlib.sha256(текст.encode("utf-8")).hexdigest()
     # Т5.0, ТЗ §9.1: каждый прогон — новая производная ревизия в реестре
     # (миграция 6), прежние строки не трогаются; id ревизии — в самом
     # результате, по нему карточка скажет, из какой ревизии она. Строка,

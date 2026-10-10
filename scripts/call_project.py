@@ -218,15 +218,15 @@ def contact(event):
 ЗАГОЛОВОК = {"missed": "Пропущенный звонок", "no-answer": "Недозвон"}
 
 
-def заголовок(event):
-    return ЗАГОЛОВОК.get(mi.исход_звонка(event.get("payload")), "Звонок")
+def заголовок(event, extraction=None):
+    return ЗАГОЛОВОК.get(mi.исход_звонка(event.get("payload"), extraction), "Звонок")
 
 
-def строка_исхода(event):
+def строка_исхода(event, extraction=None):
     """«Исход: не дозвонился (исходящий, 0 с)» — только у несостоявшихся;
-    у состоявшегося и неизвестного — None, строка не печатается."""
+    у состоявшегося, неизвестного и сомнительного — None, не печатается."""
     p = event.get("payload") or {}
-    код = mi.исход_звонка(p)
+    код = mi.исход_звонка(p, extraction)
     if код in (None, "answered"):
         return None
     направление = {"incoming": "входящий", "outgoing": "исходящий",
@@ -380,7 +380,7 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
             mark = "" if it.get("disposition") == "task" else " · на проверку"
             lines.append("- %s%s%s%s" % (scrub(text), due, mark, метка(it)))
         lines.append("")
-    for line in (строка_исхода(event), people_line(extraction, canon),
+    for line in (строка_исхода(event, extraction), people_line(extraction, canon),
                  projects_line(extraction, canon)):
         if line:
             lines.append(scrub(line))
@@ -389,7 +389,7 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
     # `outcome` — только у несостоявшегося звонка: у состоявшегося поля нет,
     # и карточки, нарисованные до Т4.3, остаются байт в байт теми же
     fm = frontmatter(
-        [("title", yaml_str("%s · %s · %s" % (заголовок(event), who, human))),
+        [("title", yaml_str("%s · %s · %s" % (заголовок(event, extraction), who, human))),
          ("id", oid),
          ("type", "conversation"),
          ("source", "phone"),
@@ -410,8 +410,8 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
          # Т5.0: из какой ревизии извлечения карточка (как у обязательства)
          ("extraction_id", extraction.get("extraction_id")),
          ("valid_from", event.get("ended") or event.get("occurred")),
-         ("outcome", None if mi.звонок_состоялся(event.get("payload"))
-          else mi.исход_звонка(event.get("payload")))],
+         ("outcome", None if mi.звонок_состоялся(event.get("payload"), extraction)
+          else mi.исход_звонка(event.get("payload"), extraction))],
         lists=[("audience", ["mara"])])
     return path, fm + "\n" + body
 

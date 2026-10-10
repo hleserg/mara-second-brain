@@ -107,14 +107,21 @@ create index if not exists projections_object on projections(object_id);
 ИСХОДЫ = {"answered": "поговорили", "missed": "пропущен", "no-answer": "не дозвонился"}
 
 
-def исход_звонка(payload):
-    """`answered` / `missed` / `no-answer` / None — исход вызова по журналу.
+def исход_звонка(payload, extraction=None):
+    """`answered` / `missed` / `no-answer` / None — исход вызова.
 
-    Пропущенный — тип звонка в журнале (`missed`); недозвон — исходящий с
-    нулевой длительностью; поговорили — длительность больше нуля. Журнала
-    нет (старое приложение, звонок не сопоставился с записью) или
-    длительность не число — None: выдумывать исход хуже, чем промолчать,
-    и карточка остаётся прежней."""
+    Решает шаг извлечения (`call_extract.run`): у него есть и журнал, и
+    расшифровка, и записанный им `outcome` в ревизии — авторитет
+    (`uncertain` — журнал говорит «не состоялся», а расшифровка длинная:
+    сопоставление по времени сомнительно, считаем как неизвестный). Ревизия
+    без поля (до Т4.3) — по журналу: пропущенный — тип звонка `missed`;
+    недозвон — исходящий с нулевой длительностью; поговорили — длительность
+    больше нуля. Журнала нет (старое приложение, звонок не сопоставился с
+    записью) или длительность не число — None: выдумывать исход хуже, чем
+    промолчать, и карточка остаётся прежней."""
+    if isinstance(extraction, dict) and "outcome" in extraction:
+        o = extraction.get("outcome")
+        return o if o in ИСХОДЫ else None
     p = payload or {}
     if p.get("direction") == "missed":
         return "missed"             # и голосовая почта: длительность там > 0
@@ -131,9 +138,9 @@ def исход_звонка(payload):
     return "missed" if p.get("direction") == "incoming" else None
 
 
-def звонок_состоялся(payload):
+def звонок_состоялся(payload, extraction=None):
     """Исход неизвестен или поговорили — разговор был или мог быть."""
-    return исход_звонка(payload) in (None, "answered")
+    return исход_звонка(payload, extraction) in (None, "answered")
 
 
 def now_iso():

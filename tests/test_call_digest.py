@@ -42,6 +42,11 @@ class Рендер(unittest.TestCase):
         text, _ = cd.render(ev, ПУСТО, 0)
         self.assertTrue(text.startswith("Звонок · Анна · 14:05–14:23"), text)
         self.assertNotIn("Исход:", text)
+        # ревизия извлечения решила «сомнительно» — заголовок как у состоявшегося
+        ev = dict(EVENT, payload={"contact_name": "Анна", "direction": "outgoing",
+                                  "duration_s": 0})
+        text, _ = cd.render(ev, dict(ПУСТО, outcome="uncertain"), 0)
+        self.assertTrue(text.startswith("Звонок · Анна"), text)
 
     def test_пустые_разделы_не_печатаются(self):
         text, _ = cd.render(EVENT, ПУСТО, 0)
