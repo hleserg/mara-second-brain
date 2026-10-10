@@ -32,7 +32,7 @@ class PhoneStateReceiver : BroadcastReceiver() {
         if (state == TelephonyManager.EXTRA_STATE_IDLE) {
             SyncWorker.kick(ctx, delaySec = 60)
             // §8.4: окно вышло — проверить, оставил ли рекордер файл, не дожидаясь часа
-            HealthWorker.kick(ctx, delaySec = Здоровье.ОКНО_МС / 1000 + 60)
+            HealthWorker.послеОтбоя(ctx)
         }
     }
 }

@@ -44,6 +44,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     companion object {
         const val ПЕРИОД = "health-periodic"
         const val РАЗОВЫЙ = "health-once"
+        const val ПОСЛЕ_ОТБОЯ = "health-after-call"
         const val ПЕРИОД_МИН = 60L
         const val ПОВТОРОВ = 3
         const val КАНАЛ = "health"
@@ -74,9 +75,11 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             val сейчас = System.currentTimeMillis()
             val неделя = сейчас - НЕДЕЛЯ_МС
             if (s.healthSinceMs == 0L) s.healthSinceMs = сейчас
-            // без разрешения журнал бросает, провайдер может и молча отказать:
-            // это «не прочитался», а не «звонков не было» (Codex, круг 3)
-            val журнал = runCatching { Device.callLog(ctx, неделя) }.getOrNull()
+            // «не прочитался» — не «звонков не было» и не «записей нет»: без
+            // разрешения или с молчащим провайдером журнал — null, упавший
+            // скан — null (Codex, круги 3–4)
+            val журнал = runCatching { Device.callLogOrNull(ctx, неделя) }.getOrNull()
+            val скан = runCatching { Device.scan(ctx, s, неделя) }.getOrNull()
             return Приметы(
                 сейчас = сейчас,
                 загрузка = сейчас - SystemClock.elapsedRealtime(),
@@ -88,7 +91,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 },
                 рекордерЕсть = Device.producers(ctx).isNotEmpty(),
                 звонки = журнал ?: emptyList(),
-                записи = runCatching { Device.scan(ctx, s, неделя) }.getOrDefault(emptyList()),
+                записи = скан ?: emptyList(),
                 расписаниеЖиво = runCatching {
                     WorkManager.getInstance(ctx).getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
                         .any { !it.state.isFinished }
@@ -98,6 +101,8 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                     Device.granted(ctx, Manifest.permission.POST_NOTIFICATIONS),
                 наблюдениеС = s.healthSinceMs,
                 журналЧитается = журнал != null,
+                записиЧитаются = скан != null,
+                отбойСлышен = Device.granted(ctx, Manifest.permission.READ_PHONE_STATE),
             )
         }
 
@@ -155,11 +160,27 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             )
         }
 
-        /** Разовая проверка: после загрузки и после отбоя, когда окно вышло. */
+        /** Разовая проверка после загрузки или обновления: одна на имя, повтор заменяет. */
         fun kick(ctx: Context, delaySec: Long = 0) {
             val b = OneTimeWorkRequestBuilder<HealthWorker>()
             if (delaySec > 0) b.setInitialDelay(delaySec, TimeUnit.SECONDS)
             WorkManager.getInstance(ctx).enqueueUniqueWork(РАЗОВЫЙ, ExistingWorkPolicy.REPLACE, b.build())
+        }
+
+        /**
+         * Проверка на выход окна после отбоя — своя на каждый звонок, не
+         * уникальная: второй звонок через девять минут иначе отменял бы срок
+         * первого и сдвигал его ещё на окно, а третий — ещё (Codex по #137,
+         * круг 4). Прогон смотрит все звонки, так что лишняя проверка
+         * безвредна, а пропущенная — нарушение §8.4.
+         */
+        fun послеОтбоя(ctx: Context) {
+            WorkManager.getInstance(ctx).enqueue(
+                OneTimeWorkRequestBuilder<HealthWorker>()
+                    .setInitialDelay(Здоровье.ОКНО_МС / 1000 + 60, TimeUnit.SECONDS)
+                    .addTag(ПОСЛЕ_ОТБОЯ)
+                    .build()
+            )
         }
 
         /**

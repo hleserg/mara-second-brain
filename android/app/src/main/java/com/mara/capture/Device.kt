@@ -122,17 +122,24 @@ object Device {
     fun ext(rec: Recording): String =
         rec.name.substringAfterLast('.', "").lowercase().ifEmpty { "bin" }
 
-    /** Журнал звонков за последние сутки: сопоставлять дальше уже незачем. */
-    fun callLog(ctx: Context, sinceMs: Long): List<CallLogEntry> {
-        if (!granted(ctx, Manifest.permission.READ_CALL_LOG)) return emptyList()
+    /** Журнал звонков с `sinceMs`; не прочитался — пустой список: сверке и
+     *  мастеру этого достаточно. Здоровью (Т4.2) — нет, ему `callLogOrNull`. */
+    fun callLog(ctx: Context, sinceMs: Long): List<CallLogEntry> =
+        callLogOrNull(ctx, sinceMs) ?: emptyList()
+
+    /** null — журнал не прочитался: нет разрешения или провайдер не отдал
+     *  курсор. Это не «звонков не было», и здоровье различает (Codex по #137). */
+    fun callLogOrNull(ctx: Context, sinceMs: Long): List<CallLogEntry>? {
+        if (!granted(ctx, Manifest.permission.READ_CALL_LOG)) return null
         val out = mutableListOf<CallLogEntry>()
         val cols = arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME,
             CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION)
-        ctx.contentResolver.query(
+        val c = ctx.contentResolver.query(
             CallLog.Calls.CONTENT_URI, cols,
             CallLog.Calls.DATE + ">=?", arrayOf(sinceMs.toString()),
             CallLog.Calls.DATE + " desc"
-        )?.use {
+        ) ?: return null
+        c.use {
             while (it.moveToNext()) out += CallLogEntry(
                 it.getString(0), it.getString(1),
                 when (it.getInt(2)) {
