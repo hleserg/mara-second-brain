@@ -458,7 +458,12 @@ scripts/core-backup.py --drill-only --targets /mnt/backup/mara
 ( cd /mnt/backup/mara && gpg --batch --pinentry-mode loopback \
     --passphrase-file ~/.config/mara/backup-pass \
     -o /var/tmp/core.tar.gz -d "$(ls -1 core-*.tar.gz.gpg | tail -1)" )
-mkdir -p -m 700 /srv/mara-blobs && tar -xzf /var/tmp/core.tar.gz -C /srv/mara-blobs
+# Старый корень блобов — в сторону: рядом с заменённой базой остались бы
+# contextd.db-wal/-shm, и SQLite дочитал бы из них чужие страницы. Новый
+# лист — с владельцем: /srv за root, непривилегированный mkdir там откажет.
+[ -e /srv/mara-blobs ] && sudo mv /srv/mara-blobs "/srv/mara-blobs.before-restore-$(date +%Y%m%d-%H%M%S)"
+sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" /srv/mara-blobs
+tar -xzf /var/tmp/core.tar.gz -C /srv/mara-blobs
 # Развёрнутое сходится с описью: хеши, размеры, ни лишних, ни пропавших. Код 0.
 scripts/core-backup.py --verify /srv/mara-blobs
 rm /srv/mara-blobs/manifest.json /var/tmp/core.tar.gz
