@@ -237,9 +237,32 @@ class Флаги(unittest.TestCase):
                            "манифест пуст — архив не разворачивали")
         # Аудио сверяется отдельно от файлов манифеста: расшифрованная копия
         # из зеркала обязана сойтись с живым блобом по хешу.
-        # Трое: два засева из `setUp` и разводка. `ПРОБА` в
-        # `core-backup.py:44` тоже 3 — сверяются все.
+        # Свежайших перечитано `ПРОБА` = 3; остальные засевы (их n − 2) идут
+        # в круг старых, и копия обязана быть у каждой строки (Т3.1, #39).
         self.assertEqual(r["аудио_сверено"], 3, r)
+        всего = r["аудио_сверено"] + r["аудио_перечитано"]
+        self.assertEqual(r["зеркало_проверено"], len(self.зеркало()), r)
+        self.assertLessEqual(всего, r["зеркало_проверено"], r)
+
+    def test_пропажа_старой_копии_из_зеркала_роняет_учение(self):
+        """Полнота зеркала — по всем строкам, не по трём свежайшим (Т3.1,
+        #39): копия, стёртая с носителя месяц назад, видна учению."""
+        self.запуск("--no-drill")
+        копии = sorted(self.зеркало(), key=os.path.getmtime)
+        self.assertGreaterEqual(len(копии), 3)
+        # старейшая по имени — не из трёх свежайших по `created`, если их
+        # больше трёх; при ровно трёх стирается любая — всё равно должна быть видна
+        os.unlink(копии[0])
+        r = subprocess.run(
+            [sys.executable, СКРИПТ, "--root", self.root, "--targets", self.цель,
+             "--pass-file", self.пароль, "--work", os.path.join(self.tmp, "work"),
+             "--drill-only"],
+            capture_output=True, text=True,
+            env={**os.environ, "MARA_BACKUP_ALLOW_SAME_DEV": "1",
+                 "MARA_STATE": os.path.join(self.tmp, "state")})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("нет в зеркале", r.stderr)
+        self.assertNotIn("и ещё", r.stderr, "пропала ровно одна копия")
 
     def test_no_audio_и_no_drill_доезжают_до_прогона(self):
         """Оба флага проверяются одним прогоном: пара `--no-audio --no-drill`
