@@ -925,6 +925,17 @@ def _в_реестр(con, vault, event, p, out, found, адреса, прове�
                   "ambiguous_ids": out.get("ambiguous_ids")}, когда)
 
 
+def заметка(raw):
+    """Заметка правки — одной строкой и с одиночным «; »: журнал «Правки:»
+    режется по «;» и читается построчно (`ledger_import.журнал`), и заметка
+    с переносом или двойной точкой с запятой не пережила бы круг волт →
+    реестр → пересборка (ревью PR #125). Одна на запись и на пересборку
+    (`vault_rebuild._из_правки`) — иначе заведённая карточка расходилась бы
+    сама с собой (Codex по #125)."""
+    note = re.sub(r"\s*;+\s*", "; ", " ".join(str(raw or "").split())).strip("; ")
+    return scrub(note) or None
+
+
 def apply_correction(vault, event, con=None):
     """Событие kind=correction → карточка. Возвращает, что сделано, с полем
     `text` для Мары. Пакет для Мары пересобирается сразу, как после звонка.
@@ -936,12 +947,7 @@ def apply_correction(vault, event, con=None):
     p = event.get("payload") or {}
     item = scrub(str(p.get("item") or "").strip())
     status, due = p.get("status") or None, p.get("due") or None
-    # заметка — одной строкой и с одиночным «; »: журнал «Правки:» режется
-    # по «;» и читается построчно (`ledger_import.журнал`), и заметка с
-    # переносом или двойной точкой с запятой не пережила бы круг
-    # волт → реестр → пересборка (ревью PR #125)
-    note = re.sub(r"\s*;+\s*", "; ", " ".join(str(p.get("note") or "").split())).strip("; ")
-    note = scrub(note) or None
+    note = заметка(p.get("note"))
     ид = p["id"].strip() if isinstance(p.get("id"), str) else ""
     ожидали = _целое(p.get("expected_version"))
     когда = mi.now_iso()

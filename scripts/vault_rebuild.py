@@ -47,13 +47,36 @@ import mara_ingest as mi
 import ledger_import as li
 import call_project as cp
 import vault_drift as vd
-from vault_common import canon_map, scrub
+from vault_common import canon_map, scrub, yaml_str
 
-# Поля шапки, которые берутся из строки объекта, а не из извлечения: их
-# двигают правки (`_поправить`) и перенос, извлечение о них не знает.
-ИЗ_СТРОКИ = {"commitment": ("created", "status", "owner", "promised_to", "due",
-                            "due_explicit", "valid_from", "classification"),
-             "conversation": ("created", "valid_from", "classification")}
+def _кавычки(v):
+    """Строка шапки обратно в `yaml_str`: разбор (`mara-brief.frontmatter`)
+    снимает внешние кавычки, но внутренние экранирования оставляет — снять
+    их и экранировать заново, иначе заголовок с кавычкой внутри удваивал бы
+    обратные косые при каждой пересборке."""
+    return yaml_str(v.replace('\\"', '"').replace("\\\\", "\\"))
+
+
+def _как_есть(v):
+    return v
+
+
+# Поля шапки, которые берутся из строки объекта, а не из извлечения, и в
+# каком виде они стоят в шапке: всё, что перенос кладёт в строку (`ВИДЫ`
+# `ledger_import`) и что правки (`_поправить`) или рука могли сдвинуть —
+# реестр авторитет для них, а не извлечение на диске (Codex по #125: иначе
+# заголовок, поправленный рукой и перенесённый, пересборка откатывала бы к
+# извлечению). `occurred` — из события, как у проектора; `source_id`/`origin`
+# — ключи строки, не поля.
+ИЗ_СТРОКИ = {
+    "commitment": (("title", _кавычки), ("created", _как_есть), ("status", _как_есть),
+                   ("owner", _как_есть), ("promised_to", _как_есть), ("due", _как_есть),
+                   ("due_explicit", _как_есть), ("valid_from", _как_есть),
+                   ("confidence", lambda v: "%.2f" % float(v)), ("supersedes", _кавычки),
+                   ("classification", _как_есть), ("extractor", _как_есть),
+                   ("prompt_version", _как_есть)),
+    "conversation": (("title", _кавычки), ("created", _как_есть),
+                     ("valid_from", _как_есть), ("classification", _как_есть))}
 СОСТОЯНИЯ = ("совпало", "разошлось", "без файла", "без источника", "не сравнивалось")
 
 
@@ -64,14 +87,14 @@ class НеПересобрать(RuntimeError):
 def _шапка_из_строки(text, row, поля):
     """Строки шапки — как в реестре: есть значение — заменить на месте или
     дописать в конец шапки (так же дописывает `_поправить`), нет — убрать."""
-    for поле in поля:
+    for поле, вид in поля:
         v = row[поле]
         if v is None:
             head, sep, tail = text.partition("\n---\n")
             text = "\n".join(l for l in head.split("\n")
                              if not l.startswith(поле + ":")) + sep + tail
         else:
-            text = cp._шапка(text, **{поле: v})
+            text = cp._шапка(text, **{поле: вид(str(v))})
     return text
 
 
@@ -193,9 +216,9 @@ def _из_правки(con, row):
     правки и строки объекта."""
     ev = _событие(con, row["origin_event"])
     p = ev["payload"]
+    # заметка — той же нормализацией, что при записи (Codex по #125)
     return cp.карточка_правки(scrub(str(p.get("item") or "").strip()),
-                              p.get("due") or None,
-                              scrub(str(p.get("note") or "").strip()) or None,
+                              p.get("due") or None, cp.заметка(p.get("note")),
                               row["created"], {"id": ev["id"], "occurred_at": ev["occurred"]},
                               row["id"])
 

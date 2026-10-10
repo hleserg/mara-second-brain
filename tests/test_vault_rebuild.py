@@ -192,6 +192,38 @@ class Пересборка(unittest.TestCase):
         итог, карточки = self.пересборка()
         self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
 
+    def test_заголовок_и_уверенность_из_строки_реестра(self):
+        """Codex по #125: заголовок, поправленный рукой и перенесённый, — в
+        реестре; пересборка берёт его оттуда, а не из извлечения; кавычка
+        внутри заголовка не удваивает косых."""
+        text = self.читать(self.card).replace('title: "прислать смету"',
+                                              'title: "прислать \\"большую\\" смету Анне"')
+        with open(os.path.join(self.vault, self.card), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute("select title from commitments where id=?", (
+            self.con.execute("select object_id from projections where path=?",
+                             (self.card,)).fetchone()[0],)).fetchone()[0],
+            'прислать \\"большую\\" смету Анне')
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
+        self.assertIn('title: "прислать \\"большую\\" смету Анне"', карточки[self.card][1])
+        # и перенесённые поля, которых правка словами не трогает
+        self.con.execute("update commitments set confidence=0.5, extractor='другая' "
+                         "where source_native_id like '%/requests/1'")
+        итог, карточки = self.пересборка()
+        self.assertIn("\nconfidence: 0.50\n", карточки[self.card][1])
+        self.assertIn("\nextractor: другая\n", карточки[self.card][1])
+        self.assertEqual(карточки[self.card][0], "разошлось", "реестр ушёл вперёд — видно")
+
+    def test_заведённая_карточка_с_заметкой_с_переносом_совпадает(self):
+        """Codex по #125: заметка заведённой карточки нормализуется той же
+        функцией при записи и при пересборке."""
+        out = self.правка(item="покрасить забор", status="open", note="а ;б;;в\nвторая строка")
+        self.assertIn("- Заметка: а; б; в вторая строка\n", self.читать(out["created"]))
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[out["created"]][0], "совпало", карточки[out["created"]][2])
+
     def test_повторная_проекция_не_меняет_created(self):
         """Ревью PR #125: `created` при перерисовке — из реестра, иначе каждая
         повторная проекция давала бы «разошлось» по одной строке."""
