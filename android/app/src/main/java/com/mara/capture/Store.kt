@@ -126,11 +126,28 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         if (old < 2) { db.execSQL("drop table if exists jobs"); db.execSQL(JOBS) }
         if (old < 3) db.execSQL(MESSAGES)
         // путь медиатеки для сопоставления по номеру (Т4.3); у старых работ
-        // его нет — они сопоставятся по времени, как и раньше. С версии 1
-        // таблица только что пересоздана по `JOBS` уже с колонкой — второй
-        // раз её не добавить (Codex по #136, круг 2)
-        if (old in 2 until 4) db.execSQL("alter table jobs add column path text")
+        // его нет — они сопоставятся по времени, как и раньше. Колонка уже
+        // есть, если таблицу только что пересоздали с версии 1 или если базу
+        // открывал откаченный APK (`onDowngrade` колонок не трогает) — второй
+        // раз её не добавить (Codex по #136, круги 2–3)
+        if (old < 4 && !естьКолонка(db, "jobs", "path")) {
+            db.execSQL("alter table jobs add column path text")
+        }
     }
+
+    /** Откат APK на прежнюю версию: лишняя колонка или таблица старому коду
+     *  не мешают — он называет колонки явно, а новые допускают null. Штатный
+     *  `onDowngrade` бросает, и очередь не открылась бы вовсе (Codex по
+     *  #136, круг 3). Номер версии при этом опускается, и следующий апгрейд
+     *  снова пройдёт через `onUpgrade` — потому там проверка колонки. */
+    override fun onDowngrade(db: SQLiteDatabase, old: Int, new: Int) {}
+
+    private fun естьКолонка(db: SQLiteDatabase, таблица: String, колонка: String): Boolean =
+        db.rawQuery("pragma table_info($таблица)", null).use { c ->
+            var есть = false
+            while (c.moveToNext()) if (c.getString(1) == колонка) есть = true
+            есть
+        }
 
     /**
      * Файл увиден сканом. Новый — заводим работу; знакомый — обновляем приметы,
