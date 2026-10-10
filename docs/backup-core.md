@@ -570,6 +570,13 @@ rm /var/tmp/vault.bundle
 
 # 4. Миграция, если копия старее кода: `--migrate` и есть integrity_check
 MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate
+# 4а. Копия базы старее волта (бандл волта свежее архива ядра): карточки,
+#     которых реестр не видел, и их evidence — из волта в реестр
+#     (`ledger_import`: строка объекта, проекция, история, ссылки `evidence`
+#     из шапки — только на сегменты, которые в реестре есть; остальные
+#     названы в stderr). Сначала проба, затем всерьёз.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/ledger_import.py --dry-run --vault /srv/vault
+MARA_BLOBS=/srv/mara-blobs python3 scripts/ledger_import.py --vault /srv/vault
 
 # 5–8. Целостность, блобы ↔ реестр, пересборка проекций, стабильные id,
 #      образец evidence — одной проверкой. Код 1 с «разошлось» у карточек,
