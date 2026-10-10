@@ -162,6 +162,73 @@ class Пересборка(unittest.TestCase):
         итог, карточки = self.пересборка()
         self.assertEqual(итог["без источника"], 4, "без извлечения звонок не пересобрать")
 
+    def test_извлечение_из_реестра_а_не_из_файла(self):
+        """Т5.0: ревизия в реестре (миграция 6) — источник пересборки; файл
+        нужен только извлечениям до неё. Файла нет, строка есть — сходится."""
+        import call_extract as ce
+        xid = mi.uuid7()
+        ce.записать_ревизию(self.con, xid, dict(self.extr, extraction_id=xid))
+        self.con.commit()
+        cp.run(self.eid, self.vault, self.root)
+        os.remove(mi.extraction_path(self.root, self.eid))
+        итог, карточки = self.пересборка()
+        self.assertEqual((итог["без источника"], итог["разошлось"]), (0, 0), dict(итог))
+        self.assertEqual(карточки[self.card][0], "совпало")
+        self.assertIn("extraction_id: %s" % xid, карточки[self.card][1])
+
+    def test_разговор_без_обязательств_тоже_знает_свою_ревизию(self):
+        """Звонок без обязательств: ссылка на ревизию только у разговора
+        (`conversations.extraction_id`); без неё пересборка брала бы
+        последнюю ревизию и показывала «разошлось» на верном волте
+        (Codex, круг 2)."""
+        import call_extract as ce
+        eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "d2",
+            "occurred_at": "2026-09-03T10:00:00+03:00", "ended_at": "2026-09-03T10:05:00+03:00",
+            "payload": EVENT["payload"]})
+        пусто = dict(self.extr, requests=[], commitments=[], event_id=eid,
+                     people_mentioned=[])
+        первая = mi.uuid7()
+        ce.записать_ревизию(self.con, первая, dict(пусто, extraction_id=первая))
+        self.con.commit()
+        written = cp.run(eid, self.vault, self.root)
+        conv = [w for w in written if w.startswith("kb/conversations/")][0]
+        self.assertFalse([w for w in written if w.startswith("kb/commitments/")])
+        вторая = mi.uuid7()
+        ce.записать_ревизию(self.con, вторая, dict(пусто, extraction_id=вторая,
+                                                  open_questions=["а что со сметой?"]))
+        self.con.commit()
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[conv][0], "совпало", карточки[conv][2])
+        self.assertIn("extraction_id: %s" % первая, карточки[conv][1])
+
+    def test_пересборка_по_ревизии_карточки_а_не_по_последней(self):
+        """Переизвлечение прошло, перепроекция ещё нет: карточки ссылаются
+        на первую ревизию — пересборка рисует по ней (тело и `extraction_id`),
+        а не по последней, иначе «разошлось» на волте, который реестру
+        соответствует (ревью PR #128)."""
+        import call_extract as ce
+        первая = mi.uuid7()
+        ce.записать_ревизию(self.con, первая, dict(self.extr, extraction_id=первая))
+        self.con.commit()
+        cp.run(self.eid, self.vault, self.root)
+        вторая = mi.uuid7()
+        новое = json.loads(json.dumps(self.extr))
+        новое["requests"][0]["action"] = "прислать смету заново"
+        ce.записать_ревизию(self.con, вторая, dict(новое, extraction_id=вторая))
+        self.con.commit()
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
+        self.assertIn("extraction_id: %s" % первая, карточки[self.card][1])
+        self.assertNotIn("заново", карточки[self.card][1])
+        # после перепроекции — по второй
+        cp.run(self.eid, self.vault, self.root)
+        итог, карточки = self.пересборка()
+        card2 = [rel for rel, (s, t, _) in карточки.items() if t and "заново" in t]
+        self.assertTrue(card2, "перепроекция не дошла до второй ревизии")
+        self.assertEqual(карточки[card2[0]][0], "совпало", карточки[card2[0]][2])
+        self.assertIn("extraction_id: %s" % вторая, карточки[card2[0]][1])
+
     def test_в_живой_волт_и_в_непустой_каталог_не_пишет(self):
         итог, карточки = self.пересборка()
         with self.assertRaises(RuntimeError) as e:

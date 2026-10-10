@@ -228,11 +228,12 @@ def run(event_id, root=None, env_file=None):
     root = root or mi.ROOT
     con = mi.connect(root)
     ev = mi.event_row(con, event_id)
-    epath = mi.extraction_path(root, event_id)
-    if not os.path.exists(epath):
-        raise RuntimeError("нет извлечения %s" % epath)
-    with open(epath, encoding="utf-8") as fh:
-        extraction = json.load(fh)
+    # из реестра (ревизия, миграция 6), файл — у извлечений до неё; тот же
+    # читатель, что у проектора, иначе после переизвлечения дайджест и
+    # карточки рисовались бы по разным ревизиям (ревью PR #128)
+    extraction = cp.call_extract.прочитать_извлечение(con, root, event_id)
+    if extraction is None:
+        raise RuntimeError("нет извлечения %s" % mi.extraction_path(root, event_id))
     # та же сверка с реестром, что у проектора: пункт, ушедший там в ревью,
     # и здесь не «создан», а отклонённая ссылка не печатается (Codex по
     # #122, круг 2); аудит отказов пишет проектор, здесь — только фильтр

@@ -193,6 +193,12 @@ class Сквозной(unittest.TestCase):
                          ("s0001", seg["id"], seg["start_ms"], seg["end_ms"]))
         self.assertEqual((extr["extractor"], extr["prompt_version"]),
                          (self.ce.MODEL, self.ce.PROMPT_VERSION))
+        # Т5.0 (миграция 6): извлечение — ревизия в реестре, файл — её копия
+        x = con.execute("select id, data_json, transcript_id from extractions where "
+                        "event_id=?", (self.event_id,)).fetchall()
+        self.assertEqual(len(x), 1, "одна ревизия на один прогон")
+        self.assertEqual((x[0]["id"], x[0]["transcript_id"]), (extr["extraction_id"], t["id"]))
+        self.assertEqual(json.loads(x[0]["data_json"]), extr)
         # Т5.0, ТЗ §9: у расшифровки — конфигурация нарезки и версия конвейера,
         # у извлечения — версия правил, конфигурация и хеш входа
         t = con.execute("select config_json, pipeline_version from transcripts where id=?",

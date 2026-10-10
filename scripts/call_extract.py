@@ -334,6 +334,54 @@ def ask_model(text, base_url=None, model=None):
     return json.loads(strip_fence(d.get("response") or "{}"))
 
 
+def записать_ревизию(con, xid, data):
+    """Строка `extractions` (миграция 6) из готового результата `data`:
+    происхождение — колонками, сам результат — `data_json` целиком, тем же
+    словарём, что уходит в файл. Шаг чужой транзакции (savepoint)."""
+    with mi.транзакция(con):
+        con.execute("insert into extractions(id,event_id,transcript_id,extractor,"
+                    "prompt_version,rules_version,pipeline_version,config_json,"
+                    "input_sha256,data_json,created) values(?,?,?,?,?,?,?,?,?,?,?)",
+                    (xid, data["event_id"], data.get("transcript_id"), data.get("extractor"),
+                     data.get("prompt_version"), data.get("rules_version"),
+                     data.get("pipeline_version"),
+                     json.dumps(data.get("config"), ensure_ascii=False, sort_keys=True),
+                     data.get("input_sha256"),
+                     json.dumps(data, ensure_ascii=False, sort_keys=True), mi.now_iso()))
+
+
+def извлечение_события(con, event_id):
+    """Последняя ревизия извлечения события из реестра — `(extraction_id,
+    data)`; строки нет (извлечение до миграции 6) — `(None, None)`."""
+    r = con.execute("select id, data_json from extractions where event_id=? "
+                    "order by created desc, id desc limit 1", (event_id,)).fetchone()
+    if not r:
+        return None, None
+    return r["id"], json.loads(r["data_json"])
+
+
+def прочитать_ревизию(con, xid):
+    """Результат ревизии по её id (`commitments.extraction_id`); нет строки —
+    `None`. Пересборка читает ту ревизию, на которую ссылается карточка, а
+    не последнюю: между переизвлечением и перепроекцией они разные."""
+    r = con.execute("select data_json from extractions where id=?", (xid,)).fetchone()
+    return json.loads(r["data_json"]) if r else None
+
+
+def прочитать_извлечение(con, root, event_id):
+    """Результат извлечения для читателей (проектор, пересборка): из реестра,
+    где есть ревизия; иначе — файл `extractions/<event>.json` (сделан до
+    миграции 6). Нет ни того ни другого — `None`."""
+    xid, data = извлечение_события(con, event_id)
+    if data is not None:
+        return data
+    epath = mi.extraction_path(root, event_id)
+    if not os.path.exists(epath):
+        return None
+    with open(epath, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def run(event_id, root=None):
     root = root or mi.ROOT
     con = mi.connect(root)
@@ -380,15 +428,36 @@ def run(event_id, root=None):
     data["rules_version"] = RULES_VERSION
     data["config"] = конфигурация()
     data["input_sha256"] = hashlib.sha256(текст.encode("utf-8")).hexdigest()
-    out = mi.write_json(mi.extraction_path(root, event_id), data)
-    # отказ по evidence — строка аудита (ADR-0004 п.3): что прислала модель,
-    # без текста расшифровки; одной транзакцией с переходом события
+    # Т5.0, ТЗ §9.1: каждый прогон — новая производная ревизия в реестре
+    # (миграция 6), прежние строки не трогаются; id ревизии — в самом
+    # результате, по нему карточка скажет, из какой ревизии она. Строка,
+    # аудит отказов и переход события — одной транзакцией, файл — после
+    # фиксации, как у расшифровки (`call_asr.run`): смерть между ними
+    # оставляет строку без свежего файла, а не файл без строки, и читатели
+    # берут результат из реестра, файл — только когда строки нет (legacy).
+    xid = mi.uuid7()
+    data["extraction_id"] = xid
     with mi.транзакция(con):
+        записать_ревизию(con, xid, data)
+        # отказ по evidence — строка аудита (ADR-0004 п.3): что прислала
+        # модель, без текста расшифровки
         for о in отклонено:
             mi.audit(con, "evidence_rejected", ("model", MODEL), "event", event_id,
                      dict(о, transcript_id=tid, prompt_version=PROMPT_VERSION,
-                          rules_version=RULES_VERSION))
+                          rules_version=RULES_VERSION, extraction_id=xid))
         con.execute("update events set state='extracted' where id=?", (event_id,))
+    out = mi.extraction_path(root, event_id)
+    try:
+        mi.write_json(out, data)
+    except OSError as e:
+        # Файл — копия ревизии для тех, кто знает только его (бэкап,
+        # `restore_check`); результат шага — строка, и она уже
+        # зафиксирована. Падать здесь значило бы гонять модель на ретраях
+        # ради копии и уводить работу в DLQ с готовой ревизией в реестре,
+        # которую сверка законно считает сделанной (Codex, PR #128, P1).
+        # Следующий удачный прогон перепишет файл; вслух — в лог.
+        print("call_extract: %s — ревизия %s в реестре, файл %s не записан: %s: %s"
+              % (event_id, xid, out, type(e).__name__, e), file=sys.stderr)
     if отклонено:
         print("call_extract: %s — отклонено ссылок evidence: %d" % (event_id, len(отклонено)),
               file=sys.stderr)

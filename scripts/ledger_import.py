@@ -66,9 +66,10 @@ mb = _brief()
     ("kb/commitments", "commitment", "commitments",
      ("title", "status", "owner", "promised_to", "due", "due_explicit",
       "created", "occurred", "valid_from", "confidence", "supersedes",
-      "classification", "extractor", "prompt_version")),
+      "classification", "extractor", "prompt_version", "extraction_id")),
     ("kb/conversations", "conversation", "conversations",
-     ("title", "occurred", "valid_from", "created", "classification")),
+     ("title", "occurred", "valid_from", "created", "classification",
+      "extraction_id")),
 )
 
 

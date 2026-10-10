@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 import context_pack
+import call_extract
 import ledger_import as li
 from vault_common import canon_map, linkify, locked, scrub, yaml_str
 
@@ -377,6 +378,8 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
          ("content_sha256", hashlib.sha256(body.encode("utf-8")).hexdigest()),
          ("source_revision", "1"),
          ("pipeline_version", str(mi.PIPELINE_VERSION)),
+         # Т5.0: из какой ревизии извлечения карточка (как у обязательства)
+         ("extraction_id", extraction.get("extraction_id")),
          ("valid_from", event.get("ended") or event.get("occurred"))],
         lists=[("audience", ["mara"])])
     return path, fm + "\n" + body
@@ -437,6 +440,9 @@ def commitment_cards(event, extraction, canon, ид=_новый, вольный=
                  # ADR-0004 п.4: чем и по какой версии извлечено
                  ("extractor", extraction.get("extractor")),
                  ("prompt_version", extraction.get("prompt_version")),
+                 # Т5.0: из какой ревизии извлечения карточка (строка
+                 # `extractions`); у извлечений до миграции 6 поля нет
+                 ("extraction_id", extraction.get("extraction_id")),
                  ("cloud_allowed", "false"),
                  ("confidence", "%.2f" % float(it.get("confidence") or 0)),
                  ("supersedes", yaml_str(it["supersedes"]) if it.get("supersedes") else None),
@@ -511,11 +517,10 @@ def run(event_id, vault, root=None):
     root = root or mi.ROOT
     con = mi.connect(root)
     ev = mi.event_row(con, event_id)
-    epath = mi.extraction_path(root, event_id)
-    if not os.path.exists(epath):
-        raise RuntimeError("нет извлечения %s" % epath)
-    with open(epath, encoding="utf-8") as fh:
-        extraction = json.load(fh)
+    # из реестра (ревизия, миграция 6), файл — только у извлечений до неё
+    extraction = call_extract.прочитать_извлечение(con, root, event_id)
+    if extraction is None:
+        raise RuntimeError("нет извлечения %s" % mi.extraction_path(root, event_id))
     blob = con.execute("select audio_until from blobs where sha256=?",
                        (ev["blob_sha256"],)).fetchone()
     if blob:

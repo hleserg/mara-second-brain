@@ -54,7 +54,9 @@ import mara_ingest as mi
            "job_attempts", "audit_events", "provider_health", "alerts",
            "compute_nodes",
            # миграция 4 (Т2.5): outbox
-           "outbox")
+           "outbox",
+           # миграция 6 (Т5.0): ревизии извлечения
+           "extractions")
 ПРОБА = 3                                              # столько блобов сверяем
 # Версия манифеста внутри архива. 1 — то, что писалось с PR #5: `files` с
 # sha256, `counts`, `created`, `root`, `db_bytes`, `excluded`. 2 (Т3б.3) —
