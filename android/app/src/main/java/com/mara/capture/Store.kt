@@ -111,7 +111,9 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
                  seen_size integer default -1, seen_mtime integer default -1,
                  seen_at integer default 0, error text, producer text, updated integer,
                  path text)"""
-    private val MESSAGES = """create table messages(
+    // `if not exists`: после отката APK ниже схемы 3 и возврата таблица уже
+    // есть, а `onDowngrade` её не трогает (Codex по #136, круг 5)
+    private val MESSAGES = """create table if not exists messages(
                  id text primary key, source text, body text, state text,
                  attempts integer default 0, error text, at integer, updated integer)"""
 
