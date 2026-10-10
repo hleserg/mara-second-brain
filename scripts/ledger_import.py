@@ -46,13 +46,14 @@ Evidence (ADR-0004 п.5, обратный путь). Проектор пишет
 только у обязательств без единой строки от модели: реестр со строками —
 авторитет, шапка его не переписывает.
 """
-import os, re, sys, glob, json, uuid, hashlib, argparse, importlib.util, sqlite3, tempfile
+import os, re, sys, glob, json, uuid, hashlib, argparse, importlib.util, sqlite3, tempfile, contextlib
 from collections import Counter
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
+import vault_manifest
 from vault_common import locked
 
 VAULT = os.environ.get("MARA_VAULT", os.environ.get("VAULT", "/srv/vault"))
@@ -203,7 +204,20 @@ def run(con, vault=None, dry_run=False):
             итог[счётчик if новый else "обновлено"] += 1
             итог["правок"] += правок
             итог["evidence"] += ссылок
+    if not dry_run:
+        # перенос меняет `projections` (хеши, версии) — манифест и контрольная
+        # точка за ним (§4.8/§5.2, Т2.6), под флоком волта; проба ничего не пишет
+        with _флок(vault):
+            vault_manifest.записать(con, vault)
     return итог
+
+
+def _флок(vault):
+    """Флок волта там, где он есть: без `.git` нет ни автокоммита, ни bisync,
+    с которыми он делится (§13.8), — так выглядят тестовые волты и каталог
+    пересборки. `вписать_id` берёт `locked` безусловно: он пишет сами карточки."""
+    return (locked(vault) if os.path.isdir(os.path.join(vault, ".git"))
+            else contextlib.nullcontext())
 
 
 # Кто пишет строку «статус без следа» и ревизию переноса: не человек и не
@@ -448,7 +462,8 @@ def _проекция_и_история(con, rel, вид, oid, sha, fm, текс
     # (ревью PR #117, P2-2) — колонки проектора Т2.6, которые перенос не
     # ведёт и трогать не вправе
     # `ledger_version` — версия объекта, которую эта проекция отражает
-    # (§4.8, Т2.6); `projector_version`/`manifest_hash` ставит проектор
+    # (§4.8, Т2.6); `projector_version` ставит проектор, `manifest_hash` —
+    # `vault_manifest.записать` в конце прогона, когда все строки на месте
     версия = (con.execute("select version from commitments where id=?", (oid,)).fetchone()
               or [None])[0] if вид == "commitment" else None
     con.execute("insert into projections"
@@ -594,21 +609,39 @@ def вписать_id(con, vault, dry_run=False):
                 вписано += 1
                 if dry_run:
                     continue
+                # Отпечаток проекции — на новые байты, иначе следующая сверка
+                # сочтёт нашу же правку чужой; и в реестр — до записи файла:
+                # прерванный между ними прогон при повторе видит карточку ещё
+                # без id и переписывает её, а обратный порядок оставлял бы
+                # окно, которое повтор не чинит — id на месте, отпечаток
+                # старый (Codex по #138, круг 4). Байты те же, что пишет
+                # `fh.write(новый)` в utf-8. По объекту, не по пути:
+                # переименованная до ночного переноса карточка держит проекцию
+                # под старым путём, и обновление по пути не нашло бы ни строки
+                # (ревью P3-6)
+                sha = hashlib.sha256(новый.encode("utf-8")).hexdigest()
+                con.execute("update projections set content_sha256=?, path=? "
+                            "where object_id=? and object_kind=?",
+                            (sha, rel, row["id"], вид))
                 p = os.path.join(vault, rel)
                 tmp = p + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
                     fh.write(новый)
+                    # fsync до rename и каталог после: манифест и контрольная
+                    # точка ниже пишутся надёжно, и карточка обязана пережить
+                    # сбой вместе с ними (§5.2, Codex по #138, круг 2)
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 os.replace(tmp, p)
-                # отпечаток проекции — на новые байты, иначе следующая
-                # сверка сочтёт нашу же правку чужой
-                with open(p, "rb") as fh:
-                    sha = hashlib.sha256(fh.read()).hexdigest()
-                # по объекту, не по пути: переименованная до ночного переноса
-                # карточка держит проекцию под старым путём, и обновление по
-                # пути не нашло бы ни строки (ревью P3-6)
-                con.execute("update projections set content_sha256=?, path=? "
-                            "where object_id=? and object_kind=?",
-                            (sha, rel, row["id"], вид))
+                vault_manifest.fsync_каталога(os.path.dirname(p))
+        if not dry_run:
+            # хеши и пути проекций сменились — манифест и точка следом, тем же
+            # флоком (§4.8/§5.2); иначе до следующей проекции сверка видела бы
+            # «прерванный прогон» там, где его не было (ревью). И при нуле
+            # вписанных тоже: прерванный между картами и манифестом прогон
+            # чинится повтором, который карт уже не трогает (Codex, круг 3);
+            # при том же хеше запись холостая
+            vault_manifest.записать(con, vault)
     return вписано, без_строки
 
 

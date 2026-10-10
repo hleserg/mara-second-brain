@@ -763,7 +763,9 @@ class Запись(unittest.TestCase):
     def test_повтор_не_сбрасывает_колонки_проектора_в_projections(self):
         """Ревью P2-2: `insert or replace` заводил строку проекции заново и
         обнулял `projector_version`/`manifest_hash`. `ledger_version` с Т2.6
-        ведёт сам перенос — версия объекта, которую отражает проекция."""
+        ведёт сам перенос — версия объекта, которую отражает проекция;
+        `manifest_hash` после переноса — контрольная точка нового манифеста
+        (`vault_manifest.записать`), а не ноль и не прежняя."""
         p = карточка(self.vault, "kb/commitments/a.md")
         li.run(self.con, self.vault)
         self.con.execute("update projections set projector_version=1, manifest_hash='h'")
@@ -774,7 +776,10 @@ class Запись(unittest.TestCase):
         li.run(self.con, self.vault)
         r = self.con.execute("select ledger_version, projector_version, manifest_hash, "
                              "content_sha256 from projections").fetchone()
-        self.assertEqual(tuple(r)[:3], (2, 1, "h"), "ledger_version = версия после правки")
+        self.assertEqual(tuple(r)[:2], (2, 1), "ledger_version = версия после правки")
+        import vault_manifest as vm
+        self.assertEqual(r["manifest_hash"], vm.хеш(vm.собрать(self.con)),
+                         "контрольная точка манифеста, записанного переносом")
         self.assertEqual(r["content_sha256"],
                          hashlib.sha256(текст.replace("status: proposed", "status: open")
                                         .encode("utf-8")).hexdigest(),

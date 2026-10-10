@@ -14,7 +14,7 @@ SQLite только очередь.
     python3 scripts/call_project.py --event call_<uuid> --vault /srv/vault
     python3 scripts/call_project.py --self-check
 """
-import os, sys, re, json, glob, hashlib, argparse, contextlib
+import os, sys, re, json, glob, hashlib, argparse, contextlib, sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -22,6 +22,7 @@ import mara_ingest as mi
 import context_pack
 import call_extract
 import ledger_import as li
+import vault_manifest
 from vault_common import canon_map, linkify, locked, scrub, yaml_str
 
 OWNER = os.environ.get("MARA_OWNER", "sergey")
@@ -541,7 +542,13 @@ def _atomic(path, text):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+        # fsync до rename: контрольная точка проекций (§5.2, манифест) ставится
+        # после карточек, и после сбоя питания они обязаны нести байты, а не
+        # только имена — иначе манифест с хешами файлов, которых нет (ревью)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    vault_manifest.fsync_каталога(os.path.dirname(path))
 
 
 def run(event_id, vault, root=None):
@@ -606,6 +613,10 @@ def run(event_id, vault, root=None):
         # а там её видно.
         raise RuntimeError("карточки записаны, но в реестр не легли (спор): %s"
                            % ", ".join(спорные))
+    # §4.8/§5.2: манифест с хешами — после карточек, контрольная точка — после
+    # него; под флоком волта, как сами карточки — рядом правка словами
+    with locked(vault):
+        vault_manifest.записать(con, vault, когда)
     con.execute("update events set state='projected' where id=?", (event_id,))
     # пакет для Мары пересобираем сразу: обязательство, о котором она узнает
     # только после ночного крона, — это обязательство, о котором она не узнает
@@ -1032,6 +1043,17 @@ def apply_correction(vault, event, con=None):
             if записано:
                 _вернуть_карточку(vault, записано["out"], записано["found"])
             raise
+        # §5.2: карточка и строка легли — манифест и контрольная точка следом,
+        # ещё под флоком: правка словами меняет проекцию, как и проектор звонка.
+        # Диск или база отказали (замок, I/O) — правка уже принята, и ответ с
+        # id нужен Маре: повтор увидел бы «уже так» и не доделал бы ничего;
+        # манифест и точку догонит следующая проекция, а до неё сверка это
+        # назовёт (ревью, Codex по #138, круг 3)
+        if con is not None and (out.get("applied") or out.get("created")):
+            try:
+                vault_manifest.записать(con, vault, когда)
+            except (OSError, sqlite3.OperationalError) as e:
+                out["manifest_error"] = e.__class__.__name__
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
     return out

@@ -48,6 +48,7 @@ import ledger_import as li
 import call_project as cp
 import call_extract as ce
 import vault_drift as vd
+import vault_manifest as vm
 from vault_common import canon_map, scrub, yaml_str
 
 def _кавычки(v):
@@ -333,9 +334,12 @@ def пересобрать(con, root, vault, сравнивать=True):
     return итог, карточки
 
 
-def записать(карточки, into, vault=None):
+def записать(карточки, into, vault=None, con=None):
     """Пересобранные карточки — в пустой каталог. Живой волт и всё внутри
-    него — отказ (Г4): подкаталог волта попал бы в синк и в коммит."""
+    него — отказ (Г4): подкаталог волта попал бы в синк и в коммит. С `con`
+    — и манифест проекций из реестра (§4.8): `vault_manifest.py --check
+    --vault КАТАЛОГ` покажет, каких карточек пересборка не нарисовала.
+    Реестр при этом не трогается — контрольная точка остаётся за живым волтом."""
     if vault and os.path.isdir(vault) and os.path.commonpath(
             [os.path.realpath(into), os.path.realpath(vault)]) == os.path.realpath(vault):
         raise RuntimeError("в живой волт пересборка не пишет (Г4/Т2.8): "
@@ -348,6 +352,8 @@ def записать(карточки, into, vault=None):
             continue
         cp._atomic(os.path.join(into, rel), text)
         n += 1
+    if con is not None:
+        vm.сохранить(into, vm.собрать(con))
     return n
 
 
@@ -415,7 +421,7 @@ def main():
         con = vd.только_чтение(a.root)
         итог, карточки = пересобрать(con, a.root, a.vault, сравнивать=bool(a.check))
         if a.into:
-            print("записано карточек: %d → %s" % (записать(карточки, a.into, a.vault), a.into))
+            print("записано карточек: %d → %s" % (записать(карточки, a.into, a.vault, con), a.into))
     except (vd.ВолтНеПрочитан, sqlite3.OperationalError, RuntimeError, OSError) as e:
         print("vault_rebuild: %s" % e, file=sys.stderr)
         return 2
