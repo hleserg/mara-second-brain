@@ -237,9 +237,63 @@ class Флаги(unittest.TestCase):
                            "манифест пуст — архив не разворачивали")
         # Аудио сверяется отдельно от файлов манифеста: расшифрованная копия
         # из зеркала обязана сойтись с живым блобом по хешу.
-        # Трое: два засева из `setUp` и разводка. `ПРОБА` в
-        # `core-backup.py:44` тоже 3 — сверяются все.
+        # Свежайших перечитано `ПРОБА` = 3; остальные засевы (их n − 2) идут
+        # в круг старых, и копия обязана быть у каждой строки (Т3.1, #39).
         self.assertEqual(r["аудио_сверено"], 3, r)
+        всего = r["аудио_сверено"] + r["аудио_перечитано"]
+        self.assertEqual(r["зеркало_проверено"], len(self.зеркало()), r)
+        self.assertLessEqual(всего, r["зеркало_проверено"], r)
+
+    def test_пропажа_старой_копии_из_зеркала_роняет_учение(self):
+        """Полнота зеркала — по всем строкам, не по трём свежайшим (Т3.1,
+        #39): копия, стёртая с носителя месяц назад, видна учению. Стирается
+        копия самого старого по `created` блоба, и строк не меньше четырёх:
+        иначе он попадал бы в три свежайших, и мутант «только свежайшие»
+        проходил (ревью PR #130)."""
+        con = mi.connect(self.root)
+        # у засевов `created` одинаковый до секунды — развести явно; четвёртый
+        # блоб — заведомо старый
+        т = b"audio-old"
+        ш = hashlib.sha256(т).hexdigest()
+        п = mi.blob_path(self.root, ш, "wav")
+        os.makedirs(os.path.dirname(п), exist_ok=True)
+        open(п, "wb").write(т)
+        con.execute("insert into blobs(sha256,path,bytes,mime,created) values(?,?,?,?,?)",
+                    (ш, п, len(т), "audio", "2026-01-01T00:00:00+03:00"))
+        for i, r in enumerate(con.execute("select rowid from blobs where sha256!=?", (ш,)).fetchall()):
+            con.execute("update blobs set created=? where rowid=?",
+                        ("2026-09-%02dT12:00:00+03:00" % (i + 1), r[0]))
+        con.commit(); con.close()
+        self.запуск("--no-drill")
+        копии = self.зеркало()
+        self.assertGreaterEqual(len(копии), 4)
+        os.unlink(os.path.join(self.цель, os.path.relpath(п, self.root) + ".gpg"))
+        r = subprocess.run(
+            [sys.executable, СКРИПТ, "--root", self.root, "--targets", self.цель,
+             "--pass-file", self.пароль, "--work", os.path.join(self.tmp, "work"),
+             "--drill-only"],
+            capture_output=True, text=True,
+            env={**os.environ, "MARA_BACKUP_ALLOW_SAME_DEV": "1",
+                 "MARA_STATE": os.path.join(self.tmp, "state")})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        # последняя строка — само исключение; трейсбек на 3.14 несёт исходное
+        # выражение с литералом «и ещё» (Codex по #130)
+        строка = r.stderr.strip().splitlines()[-1]
+        self.assertIn("нет в зеркале", строка)
+        self.assertNotIn("и ещё", строка, "пропала ровно одна копия")
+
+    def test_курсор_перечитки_живёт_в_состоянии(self):
+        """Старые перечитываются следующими за курсором по носителю; курсор —
+        файл в `MARA_STATE` (`mi.КУРСОР_ПЕРЕЧИТКИ`), пишется учением."""
+        r, _ = self.запуск()
+        курсор = os.path.join(self.tmp, "state", "core-reread.json")
+        if r["проверка"]["аудио_перечитано"]:
+            with open(курсор, encoding="utf-8") as fh:
+                self.assertIn(self.цель, json.load(fh))
+        else:
+            # ровно три блоба — все свежайшие, старых нет, курсор не пишется
+            self.assertEqual(r["проверка"]["зеркало_проверено"], 3, r)
+            self.assertFalse(os.path.exists(курсор))
 
     def test_no_audio_и_no_drill_доезжают_до_прогона(self):
         """Оба флага проверяются одним прогоном: пара `--no-audio --no-drill`
