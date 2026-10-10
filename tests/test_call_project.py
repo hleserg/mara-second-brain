@@ -202,6 +202,16 @@ class Правка(unittest.TestCase):
                                                  encoding="utf-8").read(),
                          "пакет пересобран сразу: сделанное из списка ушло")
 
+    def test_правка_словами_находит_карточку_как_её_видит_мара(self):
+        """Карточка без `id`: Мара видит заголовок после `context_pack.данные`
+        (`foo bar baz`), и правка её словами обязана найти карточку с сырым
+        `foo_bar_baz <x>` — поиск нормализует так же, как показ (Codex по #129)."""
+        v = self.волт()
+        p = self.карточка(v, "foo.md", "foo_bar_baz <x> #deadbeef")
+        out = self.правка(v, item="foo bar baz deadbeef", status="done")
+        self.assertTrue(out["found"], out)
+        self.assertIn("\nstatus: done\n", open(p, encoding="utf-8").read())
+
     def test_срок_меняется_а_история_остаётся(self):
         v = self.волт()
         p = self.карточка(v, "smeta.md", "прислать смету")
