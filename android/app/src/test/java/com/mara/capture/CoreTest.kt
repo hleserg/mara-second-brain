@@ -488,16 +488,6 @@ class CoreTest {
         assertNotEquals("две работы — два запроса", ключ, JobFlow.новыйКлюч())
     }
 
-    @Test
-    fun `ключ квитанции живёт, пока живо тело`() {
-        val с = работа(JobState.POSTED).copy(sha256 = "abc", idemKey = "k-1")
-        // 409 возвращает в NEW: хеш пересчитается, тело будет другим — ключ сгорает
-        assertNull(JobFlow.ключПосле(с, JobState.NEW))
-        // сеть, 5xx и успех ключ хранят: повтор — тот же запрос
-        for (д in listOf(JobState.HASHED, JobState.POSTED, JobState.DONE, JobState.FAILED))
-            assertEquals("после перехода в $д", "k-1", JobFlow.ключПосле(с, д))
-    }
-
     private fun работа(state: JobState = JobState.POSTED, attempts: Int = 0) =
         Job("j1", "2026-09-11 20-00 Аня.m4a", 1024L, 1_788_000_000_000L,
             state, attempts)

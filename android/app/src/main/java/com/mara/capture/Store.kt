@@ -272,7 +272,12 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         writableDatabase.update("jobs", ContentValues().apply {
             put("state", job.state.name); put("attempts", job.attempts)
             put("sha256", job.sha256); put("event_id", job.eventId)
-            put("idem_key", job.idemKey)
+            // Ключ квитанции из снимка не переписывается: снимок бывает старее
+            // строки (второй воркер успел выдать ключ или сжечь его в `seen`),
+            // и безусловный `put` вернул бы ключ под новое тело или стёр бы
+            // выданный. Выдаёт ключ только `выдатьКлюч`; сжигает — переход
+            // в NEW, здесь (409) и в `seen`/`retryFailed` (Codex по #139, круг 3)
+            if (job.state == JobState.NEW) putNull("idem_key")
             put("error", job.error); put("updated", nowMs)
         }, "id=?", arrayOf(job.id))
     }
