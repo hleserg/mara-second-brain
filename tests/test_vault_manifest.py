@@ -108,6 +108,17 @@ class Манифест(unittest.TestCase):
         self.assertEqual(vm.проверить(self.con, self.vault)[0]["манифест повреждён"], 1)
         vm.записать(self.con, self.vault)
         self.assertEqual(vm.проверить(self.con, self.vault)[1], [], "перезаписан")
+        # и один `count` под целыми `hash` и `projections`: он в хеш не
+        # входит, и без своей проверки врал бы вечно (Codex, круг 5)
+        док = self.манифест()
+        док["count"] = 0
+        with open(путь, "w", encoding="utf-8") as fh:
+            json.dump(док, fh)
+        итог, зам = vm.проверить(self.con, self.vault)
+        self.assertEqual(итог["манифест повреждён"], 1, зам)
+        self.assertIn("count=0", зам[0][1])
+        vm.записать(self.con, self.vault)
+        self.assertEqual(vm.проверить(self.con, self.vault)[1], [], "count починен")
 
     def test_правка_рукой_видна_только_строго(self):
         with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:

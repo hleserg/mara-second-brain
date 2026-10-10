@@ -116,8 +116,10 @@ def тот_же(vault, h):
     except (OSError, ValueError):
         return False
     # верхний хеш пересчитывается от содержимого: подменённая строка при
-    # нетронутом `hash` иначе осталась бы навсегда (Codex по #138, круг 2)
+    # нетронутом `hash` иначе осталась бы навсегда (Codex по #138, круг 2);
+    # `count` — тоже, он в хеш не входит (круг 5)
     return (док["hash"] == h and хеш(док["projections"]) == h
+            and док.get("count") == len(док["projections"])
             and док.get("pipeline_version") == mi.PIPELINE_VERSION)
 
 
@@ -176,6 +178,12 @@ def проверить(con, vault):
     if док["hash"] != хеш(в_файле):
         заметить("манифест повреждён", "%s: хеш в файле не сходится с его содержимым"
                  % ПУТЬ)
+        return итог, замечания
+    if док.get("count") != len(в_файле):
+        # `count` вне хеша — сверяется отдельно, иначе переносной манифест
+        # врал бы о числе проекций сколько угодно (Codex по #138, круг 5)
+        заметить("манифест повреждён", "%s: count=%r, а проекций в файле %d"
+                 % (ПУТЬ, док.get("count"), len(в_файле)))
         return итог, замечания
     if док["hash"] != h:
         заметить("манифест устарел", "%s: реестр и манифест разошлись — проекций в реестре "
@@ -257,6 +265,15 @@ def self_check():
             fh.seek(0); fh.truncate(); json.dump(док, fh)
         итог, _ = проверить(con, vault)
         assert итог["манифест повреждён"] == 1 and расхождение(итог), dict(итог)
+        записать(con, vault)
+        with open(os.path.join(vault, ПУТЬ), "r+", encoding="utf-8") as fh:
+            док = json.load(fh)
+            док["count"] = 99
+            fh.seek(0); fh.truncate(); json.dump(док, fh)
+        итог, _ = проверить(con, vault)
+        assert итог["манифест повреждён"] == 1, dict(итог)
+        записать(con, vault)
+        assert "манифест повреждён" not in проверить(con, vault)[0], "count не починен"
         with open(os.path.join(vault, ПУТЬ), "w") as fh:
             fh.write("{")
         итог, _ = проверить(con, vault)
