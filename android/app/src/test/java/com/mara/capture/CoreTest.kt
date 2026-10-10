@@ -317,13 +317,14 @@ class CoreTest {
 
     // ── сопоставление по номеру (Т4.3) ────────────────────────────────────
 
-    private val соседка = CallLogEntry("+79990000001", "Борис", "outgoing", начало + 60_000, 0)
+    // недозвон соседке через минуту после разговора с Анной: по времени ближе он
+    private val соседка = CallLogEntry("+79990000001", "Борис", "outgoing", звонок.endMs + 60_000, 0)
     private val uriACR = "content://com.android.externalstorage.documents/document/" +
         "primary%3ARecord%2F2026%2F09%2F02%2F%2B79990000000%2Fcall.m4a call.m4a"
 
     @Test
     fun `номер в пути записи перебивает соседа по времени`() {
-        // mtime ближе к недозвону соседке, но каталог ACR назван номером Анны
+        // mtime — у недозвона соседке, но каталог ACR назван номером Анны
         val ms = соседка.startMs
         val м = CallLogMatcher.match(listOf(звонок, соседка), ms, uriACR)
         assertEquals(звонок, м?.entry)
