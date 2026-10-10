@@ -290,6 +290,15 @@ class CoreTest {
         assertFalse("сервер берёт устройство из токена", ev.has("device_id"))
     }
 
+    @Test
+    fun `ключ квитанции уходит в теле и только когда он есть`() {
+        // ТЗ §4.4, Т2.9: сервер вынимает `idempotency_key` из тела до разбора
+        // события; без ключа поля нет вовсе — фикс контракта его не знает
+        val с = EventJson.build(файл, звонок, ША, "m4a", null, мск, null, "k-1")
+        assertEquals("k-1", с.getString("idempotency_key"))
+        assertFalse(EventJson.build(файл, звонок, ША, "m4a", null, мск).has("idempotency_key"))
+    }
+
     // ── сопоставление с журналом ──────────────────────────────────────────
 
     @Test
@@ -466,6 +475,30 @@ class CoreTest {
     fun `сеть легла — состояние не меняем`() {
         assertEquals(JobState.POSTED, JobFlow.next(JobState.POSTED, ServerReply(0)))
         assertEquals(JobState.HASHED, JobFlow.next(JobState.HASHED, ServerReply(503)))
+    }
+
+    @Test
+    fun `ключ квитанции выдаётся работе один раз`() {
+        // Повтор после потерянного ответа обязан уйти с тем же ключом —
+        // иначе квитанция на сервере не востребуется, а событие посчитается
+        // заново. Мутант «новый ключ на каждый запрос» ловится вторым вызовом.
+        val с = JobFlow.сКлючом(работа(JobState.HASHED))
+        val ключ = с.idemKey
+        assertNotNull(ключ)
+        assertTrue("сервер принимает строку до 128 знаков", ключ!!.length in 1..128)
+        assertEquals(ключ, JobFlow.сКлючом(с).idemKey)
+        assertNotEquals("две работы — два запроса", ключ,
+            JobFlow.сКлючом(работа(JobState.HASHED).copy(id = "j2")).idemKey)
+    }
+
+    @Test
+    fun `ключ квитанции живёт, пока живо тело`() {
+        val с = работа(JobState.POSTED).copy(sha256 = "abc", idemKey = "k-1")
+        // 409 возвращает в NEW: хеш пересчитается, тело будет другим — ключ сгорает
+        assertNull(JobFlow.ключПосле(с, JobState.NEW))
+        // сеть, 5xx и успех ключ хранят: повтор — тот же запрос
+        for (д in listOf(JobState.HASHED, JobState.POSTED, JobState.DONE, JobState.FAILED))
+            assertEquals("после перехода в $д", "k-1", JobFlow.ключПосле(с, д))
     }
 
     private fun работа(state: JobState = JobState.POSTED, attempts: Int = 0) =

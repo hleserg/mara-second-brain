@@ -108,11 +108,16 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             JobState.HASHED -> {
                 // подсказка — uri, путь медиатеки и имя: у ACR номер в каталоге (Т4.3)
                 val м = CallLogMatcher.match(журнал, job.modifiedMs, job.recording().подсказка())
-                val body = EventJson.build(job.recording(), м?.entry, job.sha256!!,
-                    Device.ext(job.recording()), job.producer, ZoneId.systemDefault(), м?.by)
+                // ключ квитанции — в очередь до запроса, не после: повтор
+                // после потерянного ответа обязан уйти с тем же (Т2.9)
+                val с = JobFlow.сКлючом(job)
+                if (с.idemKey != job.idemKey) q.save(с, now)
+                val body = EventJson.build(с.recording(), м?.entry, с.sha256!!,
+                    Device.ext(с.recording()), с.producer, ZoneId.systemDefault(), м?.by,
+                    с.idemKey)
                 val r = api.postEvent(body)
-                q.save(job.copy(state = JobFlow.next(job.state, r), eventId = r.eventId,
-                    attempts = job.attempts + 1, error = ошибка(r)), now)
+                q.save(с.copy(state = JobFlow.next(с.state, r), eventId = r.eventId,
+                    attempts = с.attempts + 1, error = ошибка(r)), now)
                 return r
             }
             JobState.POSTED -> {
@@ -126,6 +131,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 // заново, иначе на сервер уедет половина разговора
                 q.save(job.copy(state = дальше, attempts = job.attempts + 1,
                     sha256 = if (дальше == JobState.NEW) null else job.sha256,
+                    idemKey = JobFlow.ключПосле(job, дальше),
                     error = ошибка(r)), now)
                 // `s`, а не `Settings(ctx)`: это единственное место в `шаг`,
                 // которое бросает **после** `q.save`, а строится оно через

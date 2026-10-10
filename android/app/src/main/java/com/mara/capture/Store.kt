@@ -129,6 +129,9 @@ data class Job(
     val error: String? = null,
     val producer: String? = null,
     val path: String? = null,
+    /** Ключ квитанции идемпотентности (ТЗ §4.4, Т2.9): выдан до первого
+     *  `POST /v1/ingest/event`, повтор уходит с ним же. */
+    val idemKey: String? = null,
 ) {
     fun recording() = Recording(id, name, sizeBytes, modifiedMs, producer, path)
 }
@@ -139,14 +142,14 @@ data class Job(
  * Очередь обязана пережить reboot и force-stop (ТЗ §5.1E), поэтому она на
  * диске, а не в памяти воркера.
  */
-class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 4) {
+class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 5) {
 
     private val JOBS = """create table jobs(
                  id text primary key, name text, size integer, mtime integer,
                  state text, attempts integer default 0, sha256 text, event_id text,
                  seen_size integer default -1, seen_mtime integer default -1,
                  seen_at integer default 0, error text, producer text, updated integer,
-                 path text)"""
+                 path text, idem_key text)"""
     // `if not exists`: после отката APK ниже схемы 3 и возврата таблица уже
     // есть, а `onDowngrade` её не трогает (Codex по #136, круг 5)
     private val MESSAGES = """create table if not exists messages(
@@ -170,6 +173,11 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         // раз её не добавить (Codex по #136, круги 2–3)
         if (old < 4 && !естьКолонка(db, "jobs", "path")) {
             db.execSQL("alter table jobs add column path text")
+        }
+        // ключ квитанции (Т2.9); у работ, уехавших до обновления, его нет —
+        // ключ выдаст первый же шаг `HASHED`, а `DONE` и `FAILED` он не нужен
+        if (old < 5 && !естьКолонка(db, "jobs", "idem_key")) {
+            db.execSQL("alter table jobs add column idem_key text")
         }
     }
 
@@ -234,14 +242,14 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         val out = mutableListOf<Job>()
         readableDatabase.rawQuery(
             "select id,name,size,mtime,state,attempts,sha256,event_id,seen_size,seen_mtime," +
-                "seen_at,error,producer,path from jobs where state not in (?,?) order by mtime",
+                "seen_at,error,producer,path,idem_key from jobs where state not in (?,?) order by mtime",
             arrayOf(JobState.DONE.name, JobState.FAILED.name)
         ).use { c ->
             while (c.moveToNext()) out += Job(
                 c.getString(0), c.getString(1), c.getLong(2), c.getLong(3),
                 JobState.valueOf(c.getString(4)), c.getInt(5), c.getString(6), c.getString(7),
                 c.getLong(8), c.getLong(9), c.getLong(10), c.getString(11), c.getString(12),
-                c.getString(13),
+                c.getString(13), c.getString(14),
             )
         }
         return out
@@ -251,6 +259,7 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         writableDatabase.update("jobs", ContentValues().apply {
             put("state", job.state.name); put("attempts", job.attempts)
             put("sha256", job.sha256); put("event_id", job.eventId)
+            put("idem_key", job.idemKey)
             put("error", job.error); put("updated", nowMs)
         }, "id=?", arrayOf(job.id))
     }
@@ -271,7 +280,9 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         db.compileStatement("update messages set state='NEW', error=null, attempts=0 where state='FAILED'")
             .executeUpdateDelete()
         return db.compileStatement(
-            "update jobs set state='NEW', sha256=null, error=null, attempts=0 where state='FAILED'"
+            // ключ квитанции сгорает вместе с хешем: тело посчитается заново
+            "update jobs set state='NEW', sha256=null, idem_key=null, error=null, attempts=0 " +
+                "where state='FAILED'"
         ).executeUpdateDelete()
     }
 
