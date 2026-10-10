@@ -446,7 +446,18 @@ def run(event_id, root=None):
                      dict(о, transcript_id=tid, prompt_version=PROMPT_VERSION,
                           rules_version=RULES_VERSION, extraction_id=xid))
         con.execute("update events set state='extracted' where id=?", (event_id,))
-    out = mi.write_json(mi.extraction_path(root, event_id), data)
+    out = mi.extraction_path(root, event_id)
+    try:
+        mi.write_json(out, data)
+    except OSError as e:
+        # Файл — копия ревизии для тех, кто знает только его (бэкап,
+        # `restore_check`); результат шага — строка, и она уже
+        # зафиксирована. Падать здесь значило бы гонять модель на ретраях
+        # ради копии и уводить работу в DLQ с готовой ревизией в реестре,
+        # которую сверка законно считает сделанной (Codex, PR #128, P1).
+        # Следующий удачный прогон перепишет файл; вслух — в лог.
+        print("call_extract: %s — ревизия %s в реестре, файл %s не записан: %s: %s"
+              % (event_id, xid, out, type(e).__name__, e), file=sys.stderr)
     if отклонено:
         print("call_extract: %s — отклонено ссылок evidence: %d" % (event_id, len(отклонено)),
               file=sys.stderr)

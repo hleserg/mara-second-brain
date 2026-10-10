@@ -290,22 +290,32 @@ class Шаг(unittest.TestCase):
         os.remove(self.mi.extraction_path(self.dir, self.eid))
         self.assertIsNone(ce.прочитать_извлечение(self.con, self.dir, self.eid))
 
-    def test_строка_раньше_файла(self):
-        """Файл пишется после фиксации строки: смерть между ними оставляет
-        строку без свежего файла, а не файл без строки (как у `call_asr`)."""
-        было = self.mi.write_json
+    def test_строка_раньше_файла_и_файл_не_роняет_шаг(self):
+        """Файл пишется после фиксации строки, и его отказ шаг не роняет:
+        результат — строка, она есть; падение здесь гоняло бы модель на
+        ретраях и уводило работу в DLQ при готовой ревизии (Codex, P1).
+        Отказ — вслух, в stderr."""
+        import io, contextlib
+        было_json, было_модель = self.mi.write_json, ce.ask_model
         def падает(path, data):
             raise OSError(28, "диск полон")
         self.mi.write_json = падает
+        ce.ask_model = lambda text, base_url=None, model=None: {"requests": [],
+                                                                "commitments": []}
+        err = io.StringIO()
         try:
-            with self.assertRaises(OSError):
-                self.прогон({"requests": [], "commitments": []})
+            with contextlib.redirect_stderr(err):
+                ce.run(self.eid, self.dir)
         finally:
-            self.mi.write_json = было
+            self.mi.write_json, ce.ask_model = было_json, было_модель
         xid, data = ce.извлечение_события(self.con, self.eid)
         self.assertIsNotNone(xid, "строки нет — результат прогона потерян")
         self.assertFalse(os.path.exists(self.mi.extraction_path(self.dir, self.eid)))
         self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid), data)
+        self.assertIn("файл", err.getvalue())
+        self.assertIn(xid, err.getvalue())
+        self.assertEqual(self.con.execute("select state from events where id=?",
+                                          (self.eid,)).fetchone()[0], "extracted")
 
     def test_сверка_не_ставит_извлечение_заново_по_строке(self):
         """`транскрипт_без_извлечения`: строка в реестре есть, файла нет —
