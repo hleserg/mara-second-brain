@@ -299,6 +299,41 @@ class Api(unittest.TestCase):
         self.assertTrue(снова["need_blob"],
                         "аудио так и не приехало — просить его снова, а не закрывать")
 
+    def test_долгая_сессия_закрытие_видно_в_новом_пакете(self):
+        """Т6.5, ТЗ §17.4 и §10.1 (P15): закрытое словами Мары обязательство
+        исчезает из нового `now` немедленно, новый пакет называет старый
+        (`supersedes`) и текстуально от него отличается — инжект по истории
+        плагина кладёт его в сессию, где старый уже лежит."""
+        import importlib.util
+        import context_pack
+        with open(os.path.join(self.vault, "kb/commitments", "long.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("---\ntitle: выслать акт сверки\nstatus: open\n---\n")
+        старый = context_pack.build_now(self.vault)
+        _, d = self.get("/v1/context/bootstrap")
+        старый_текст = d["now"]["text"]
+        self.assertIn("выслать акт сверки", старый_текст)
+        code, r = self.post("/v1/ingest/event", {
+            "kind": "correction", "source": "mara", "source_id": "long-1",
+            "payload": {"item": "выслать акт сверки", "status": "done"}})
+        self.assertEqual(code, 200)
+        self.assertTrue(r["applied"]["found"])
+        _, d = self.get("/v1/context/bootstrap")
+        новый = d["now"]
+        self.assertEqual(новый["sha256"], r["applied"]["pack_sha256"])
+        self.assertNotIn("выслать акт сверки", новый["text"], "закрытое — не открытое")
+        self.assertEqual(новый["supersedes"], старый)
+        self.assertIn(context_pack.ОТМЕНА % старый[:12], новый["text"])
+        spec = importlib.util.spec_from_file_location(
+            "mara_context", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                                         "install", "mara-context", "__init__.py"))
+        плагин = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(плагин)
+        история = [{"role": "user", "content": "что у меня висит?\n\n" + старый_текст}]
+        self.assertTrue(плагин._в_истории(старый_текст, история))
+        self.assertFalse(плагин._в_истории(новый["text"], история),
+                         "новый пакет едет в сессию, где лежит старый")
+
     def test_правка_применяется_синхронно(self):
         import context_pack
         with open(os.path.join(self.vault, "kb/commitments", "c.md"), "w",

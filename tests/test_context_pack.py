@@ -296,5 +296,89 @@ class Запись(unittest.TestCase):
         self.assertNotEqual(cp.build_now(v), было)
 
 
+class Отмена(unittest.TestCase):
+    """ADR-0008, решение 4 (ТЗ §10.1): клиент не умеет убрать старый пакет
+    из истории Hermes — новый называет предыдущий (`supersedes`) и говорит,
+    что копия выше устарела; закрытие последнего — надгробие, не пустота."""
+
+    def текст(self, v):
+        with open(os.path.join(v, "_system/context/now.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def манифест(self, v):
+        import json
+        with open(os.path.join(v, "_system/context/manifest.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_первый_пакет_ничего_не_отменяет(self):
+        v = волт()
+        cp.build_now(v)
+        self.assertNotIn("устарела", self.текст(v))
+        self.assertIsNone(self.манифест(v)["supersedes"])
+
+    def test_изменившийся_список_называет_предыдущий_а_неизменный_остаётся_тем_же(self):
+        v = волт()
+        было = cp.build_now(v)
+        карточка(v, "b.md", title="перезвонить", due="2026-09-05")
+        стало = cp.build_now(v)
+        self.assertNotEqual(стало, было)
+        self.assertIn(cp.ОТМЕНА % было[:12], self.текст(v))
+        self.assertEqual(self.манифест(v)["supersedes"], было)
+        self.assertEqual(cp.build_now(v), стало,
+                         "пересборка без изменений не меняет ни текст, ни отмену")
+        self.assertEqual(self.манифест(v)["supersedes"], было)
+
+    def test_возврат_a_b_a_виден_по_тексту(self):
+        """Инжект по истории (`install/mara-context`) кладёт пакет, которого
+        нет в сессии; A' обязан отличаться от A, иначе Мара считала бы
+        текущим B."""
+        v = волт()
+        a = cp.build_now(v); текст_a = self.текст(v)
+        p = карточка(v, "b.md", title="перезвонить", due="2026-09-05")
+        b = cp.build_now(v)
+        os.remove(p)
+        a2 = cp.build_now(v)
+        self.assertNotIn(a2, (a, b))
+        self.assertNotEqual(self.текст(v), текст_a)
+        self.assertIn(b[:12], self.текст(v))
+
+    def test_закрытие_последнего_даёт_надгробие_а_не_пустоту(self):
+        v = волт()
+        было = cp.build_now(v)
+        карточка(v, "2026-09-02-smeta.md", due="2026-09-04", status="done")
+        sha = cp.build_now(v)
+        текст = self.текст(v)
+        self.assertIn(cp.ПУСТО, текст)
+        self.assertIn(cp.ОТМЕНА % было[:12], текст)
+        self.assertEqual(cp.выделить(текст), текст, "читатель берёт надгробие целиком")
+        self.assertLessEqual(len(текст.encode()), cp.MAX_BYTES)
+        self.assertEqual(cp.build_now(v), sha, "надгробие стабильно при пересборке")
+        self.assertEqual(self.манифест(v)["items"], 0)
+        # и contextd отдаёт его клиенту, а не None
+        import contextd
+        пакет = contextd.now_pack(v)
+        self.assertEqual((пакет["text"], пакет["supersedes"]), (текст, было))
+
+    def test_пустой_с_рождения_волт_пакета_не_даёт(self):
+        v = волт(пусто=True)
+        cp.build_now(v)
+        self.assertEqual(self.текст(v), "", "отменять нечего — надгробие не нужно")
+        self.assertIsNone(self.манифест(v)["supersedes"])
+        карточка(v, "a.md", due="2026-09-04")
+        cp.build_now(v)
+        self.assertNotIn("устарела", self.текст(v), "пустой пакет в истории не лежал")
+
+    def test_строка_отмены_входит_в_бюджет(self):
+        v = волт(пусто=True)
+        for i in range(40):
+            карточка(v, "c%02d.md" % i, title="обязательство номер %02d и длинный хвост заголовка"
+                     % i, due="2026-10-%02d" % (1 + i % 28))
+        без, _ = cp.собрать(v)
+        с, _ = cp.собрать(v, "f" * 64)
+        self.assertLessEqual(len(с.encode()), cp.MAX_BYTES)
+        self.assertLessEqual(len(без.encode()), cp.MAX_BYTES)
+        self.assertIn("…и ещё", с)
+
+
 if __name__ == "__main__":
     unittest.main()

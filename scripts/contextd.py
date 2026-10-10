@@ -1311,7 +1311,7 @@ def now_pack(vault=None):
         return None
     if not text:
         return None                      # пусто или один чужой фронтматтер
-    return {"text": text, "sha256": m.get("sha256"),
+    return {"text": text, "sha256": m.get("sha256"), "supersedes": m.get("supersedes"),
             "generated": m.get("generated"), "items": m.get("items")}
 
 
