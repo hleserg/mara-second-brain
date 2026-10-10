@@ -22,3 +22,5 @@ gmail/
 *.apk
 /raw/
 /graft/
+# лок-файл Gradle пишет job osv в CI; в репозитории он протух бы (Т0.9 п.6)
+android/app/gradle.lockfile

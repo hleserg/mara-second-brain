@@ -42,3 +42,42 @@ jobs:
           cache: gradle
       - run: ./gradlew test --console=plain
         working-directory: android
+
+  osv:                                # уязвимости в зависимостях (Т0.9 п.6)
+    # Не обязательная проверка защиты ветки: красный здесь — это новая
+    # запись в OSV про чужую библиотеку, а не наш дифф; что с ней делать,
+    # решает владелец (поднять версию, записать исключение в
+    # .github/osv-scanner.toml с причиной и сроком). Но красный виден в
+    # каждом PR, и молча он не проходит.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: лок-файл Gradle
+        # Транзитивные зависимости Android в репозитории не закреплены
+        # (threat-model §4 п.10): здесь Gradle разрешает их и пишет
+        # gradle.lockfile, который и читает сканер. Файл не коммитится —
+        # в облачной сессии агента dl.google.com закрыт, и держать его
+        # в репозитории значило бы держать его протухшим. Только
+        # runtime-classpath релиза — то, что едет на телефон; инструментарий
+        # AGP сюда не входит (см. app/build.gradle.kts).
+        run: ./gradlew :app:dependencies --configuration releaseRuntimeClasspath --write-locks --console=plain -q > /dev/null
+        working-directory: android
+      - name: osv-scanner
+        # Версия и контрольная сумма прибиты: сканер цепочки поставки сам
+        # не должен приезжать «latest» (threat-model §4 п.10).
+        env:
+          OSV_VERSION: v2.6.0
+          OSV_SHA256: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+        run: |
+          curl -sSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/$OSV_VERSION/osv-scanner_linux_amd64"
+          echo "$OSV_SHA256  osv-scanner" | sha256sum -c
+          chmod +x osv-scanner
+          ./osv-scanner scan source --config .github/osv-scanner.toml \
+            -L gradle.lockfile:android/app/gradle.lockfile \
+            -L requirements.txt:install/requirements-venv.txt \
+            -L requirements.txt:install/requirements-venv-tdlib.txt
