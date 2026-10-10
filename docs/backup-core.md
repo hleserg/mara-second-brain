@@ -427,49 +427,101 @@ scripts/core-backup.py --verify /srv/mara-blobs                     # шаг 2 �
 
 ## Восстановление
 
+Девять шагов ТЗ §5.3, в этом порядке. Проверка после шагов 5–8 — одна
+команда, `scripts/restore_check.py` (Т3б.2): целостность и версия схемы,
+блобы против реестра, пересборка проекций, стабильные id, образец
+evidence; код 0 — сошлось, 1 — расхождения названы строками, 2 — проверить
+нельзя. Учение Т3б.1 проходит эти же шаги на чистом каталоге и записывает
+время каждого. Все команды — из корня репозитория (`$REPO`); на носителе
+работает только расшифровка, в подоболочке.
+
 ```bash
+REPO=~/mara-second-brain; cd "$REPO"
+
 # 0. Парольная фраза из менеджера паролей
 mkdir -p -m 700 ~/.config/mara      # без него install скажет «cannot create»
 install -m 600 /dev/stdin ~/.config/mara/backup-pass   # вставить фразу, Ctrl-D
 
-# 1. Убедиться, что архив читается, прежде чем что-то трогать
+# 1. Остановить писателей. Сначала кроны (сверка в :07, ретеншен, бэкап —
+#    пишут в базу и перепишут архив тем, что восстанавливаем), потом демоны:
+#    приём, слушатель Telegram и Basic Memory — его клиенты правят карточки
+#    волта через MCP (ADR-0009), и живой писатель волта во время клона
+#    испортил бы восстановленное. В crontab живут и чужие строки (см.
+#    install/mara.cron) — копия обязательна, на шаге 9 возвращается целиком.
+crontab -l > /var/tmp/crontab.before && crontab -r
+sudo systemctl stop contextd tdlib-ingest basic-memory-mcp
+#    И писатели с клиента: крон codex-mirror.sh (install/client.sh) и хук
+#    Claude на завершении сессии льют rsync-ом прямо в doctor:/srv/vault мимо
+#    демонов doctor; серверной заставы без правки ключей нет. На клиенте, до
+#    шага 9: снять строку крона и не завершать сессии Claude Code.
+#    (на клиенте)  crontab -l > ~/crontab.before && crontab -l | grep -v codex-mirror.sh | crontab -
+
+# 2. Проверить манифест и хеши копии, прежде чем что-то трогать
 scripts/core-backup.py --drill-only --targets /mnt/backup/mara
 
-# 2. Развернуть базу и метаданные
-cd /mnt/backup/mara
-gpg --batch --pinentry-mode loopback --passphrase-file ~/.config/mara/backup-pass \
-    -o /var/tmp/core.tar.gz -d "$(ls -1 core-*.tar.gz.gpg | tail -1)"
-mkdir -p -m 700 /srv/mara-blobs && tar -xzf /var/tmp/core.tar.gz -C /srv/mara-blobs
+# 3. Развернуть базу, метаданные и аудио; волт — из бандла
+( cd /mnt/backup/mara && gpg --batch --pinentry-mode loopback \
+    --passphrase-file ~/.config/mara/backup-pass \
+    -o /var/tmp/core.tar.gz -d "$(ls -1 core-*.tar.gz.gpg | tail -1)" )
+# Старый корень блобов — в сторону: рядом с заменённой базой остались бы
+# contextd.db-wal/-shm, и SQLite дочитал бы из них чужие страницы. Новый
+# лист — с владельцем: /srv за root, непривилегированный mkdir там откажет.
+[ -e /srv/mara-blobs ] && sudo mv /srv/mara-blobs "/srv/mara-blobs.before-restore-$(date +%Y%m%d-%H%M%S)"
+sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" /srv/mara-blobs
+tar -xzf /var/tmp/core.tar.gz -C /srv/mara-blobs
 # Развёрнутое сходится с описью: хеши, размеры, ни лишних, ни пропавших. Код 0.
 scripts/core-backup.py --verify /srv/mara-blobs
 rm /srv/mara-blobs/manifest.json /var/tmp/core.tar.gz
+( cd /mnt/backup/mara && find calls -name '*.gpg' | while read -r f; do
+    out="/srv/mara-blobs/${f%.gpg}"; mkdir -p "$(dirname "$out")"
+    gpg --batch --quiet --pinentry-mode loopback \
+        --passphrase-file ~/.config/mara/backup-pass -o "$out" -d "$f"
+  done )
+# Волт — из последнего бандла `vault-backup.sh` (третья копия, §10 TZ.md);
+# та же дорога, что у vault-restore-test.sh. Карточки без источника в
+# реестре (перенесённые из волта до проектора) берутся только отсюда.
+( cd /mnt/backup/mara && gpg --batch --pinentry-mode loopback \
+    --passphrase-file ~/.config/mara/backup-pass \
+    -o /var/tmp/vault.bundle -d "$(ls -1 vault-*.bundle.gpg | tail -1)" )
+git bundle verify /var/tmp/vault.bundle
+# Старое дерево — в сторону, не стирать: `git clone` в непустой каталог
+# откажет, а что в старом было правлено после бандла — разбирать потом.
+[ -e /srv/vault ] && sudo mv /srv/vault "/srv/vault.before-restore-$(date +%Y%m%d-%H%M%S)"
+# /srv — за root, свой только лист: завести его заново с тем же владельцем,
+# что ставит install/stage0-doctor.sh, иначе клон упрётся в permission denied
+sudo install -d -o "$(id -u)" -g "$(id -g)" /srv/vault
+git clone -q /var/tmp/vault.bundle /srv/vault
+rm /var/tmp/vault.bundle
 
-# 2а. Карточки, которые реестр умеет нарисовать сам, — из него (Т2.6).
-#     Волт восстанавливается из git (шаг 5 RUNBOOK-deploy); пересборка его
-#     не заменяет, а проверяет: карточки без источника в реестре (перенесённые
-#     из волта до проектора) только из git и берутся. Сухой прогон сравнивает
-#     с волтом из git — код 1 с «разошлось» у правленных рукой до переноса
-#     ожидаем, смотреть дифф. Пустой каталог заполняется и без волта
-#     («Люди:» тогда без ссылок, пока entity-link.py не догонит).
+# 4. Миграция, если копия старее кода: `--migrate` и есть integrity_check
+MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate
+
+# 5–8. Целостность, блобы ↔ реестр, пересборка проекций, стабильные id,
+#      образец evidence — одной проверкой. Код 1 с «разошлось» у карточек,
+#      правленных рукой после последней копии базы, ожидаем: это сведение
+#      о волте, не поломка восстановления; смотреть дифф.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/restore_check.py --root /srv/mara-blobs --vault /srv/vault
 MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --check --diff --vault /srv/vault
+# Карточки, которые реестр умеет нарисовать сам, — в пустой каталог (Т2.6);
+# в живой волт пересборка не пишет до Т2.8.
 MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --into /var/tmp/vault-rebuilt --vault /srv/vault
+# Сверка приёма: манифесты ↔ блобы, расшифровки, извлечения, индекс, пакет.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/contextd_reconcile.py
 
-# 3. Аудио из зеркала
-cd /mnt/backup/mara && find calls -name '*.gpg' | while read -r f; do
-  out="/srv/mara-blobs/${f%.gpg}"; mkdir -p "$(dirname "$out")"
-  gpg --batch --quiet --pinentry-mode loopback \
-      --passphrase-file ~/.config/mara/backup-pass -o "$out" -d "$f"
-done
-
-# 4. Заново войти в Telegram и Gmail (их состояние не бэкапится, см. выше)
-
-# 5. Убедиться, что ядро видит своё
-python3 scripts/contextd_reconcile.py
+# 9. Безопасный возврат сервиса: заново войти в Telegram и Gmail (их
+#    состояние не бэкапится, см. выше), поднять демоны, вернуть crontab
+#    целиком (в нём чужие строки) и сверить блок Мары с install/mara.cron —
+#    --apply только при расхождении, прочитав его список
+sudo systemctl start contextd tdlib-ingest basic-memory-mcp
+crontab /var/tmp/crontab.before && bash install/install-cron.sh --check
+#    (на клиенте)  crontab ~/crontab.before
 ```
 
-Строки `blobs` указывают на пути внутри `/srv/mara-blobs`, поэтому
-разворачивать нужно именно туда. Другой корень — придётся править колонку
-`path`, и это отдельная работа.
+Строки `blobs` указывают на пути внутри `/srv/mara-blobs`; учение на чистом
+каталоге разворачивает копию в другой корень, и `restore_check.py` ищет
+файл под своим `--root` по хвосту `calls/…`. Остальные читатели
+(`contextd`, сверка, бэкап) другого корня не знают: сервис поднимается
+только на `/srv/mara-blobs`.
 
 ## RPO и RTO
 
