@@ -126,8 +126,10 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         if (old < 2) { db.execSQL("drop table if exists jobs"); db.execSQL(JOBS) }
         if (old < 3) db.execSQL(MESSAGES)
         // путь медиатеки для сопоставления по номеру (Т4.3); у старых работ
-        // его нет — они сопоставятся по времени, как и раньше
-        if (old < 4) db.execSQL("alter table jobs add column path text")
+        // его нет — они сопоставятся по времени, как и раньше. С версии 1
+        // таблица только что пересоздана по `JOBS` уже с колонкой — второй
+        // раз её не добавить (Codex по #136, круг 2)
+        if (old in 2 until 4) db.execSQL("alter table jobs add column path text")
     }
 
     /**
