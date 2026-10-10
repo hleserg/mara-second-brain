@@ -232,7 +232,8 @@ class Шаг(unittest.TestCase):
         self.assertIsNone(extr["prompt_version"])
         self.assertEqual(extr["config"]["rule"], "outcome")
         self.assertEqual(extr["config"]["outcome_rule"],
-                         {"direction": "outgoing", "duration_s": 0, "words": 0})
+                         {"direction": "outgoing", "duration_s": 0, "words": 0,
+                          "journal": "no-answer"})
         self.assertNotIn("model", extr["config"], "настроек модели у ревизии правила нет")
         self.assertEqual(extr["rules_version"], 2, "правило исхода — новая версия правил")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(json.dumps(
@@ -245,8 +246,10 @@ class Шаг(unittest.TestCase):
 
     def test_речь_при_недозвоне_по_журналу_извлекается(self):
         """Сопоставление с журналом — по времени; любая речь извлекается
-        моделью, исход остаётся по журналу, входы правила — в конфигурации
-        (Codex по #135, круги 1 и 3). Слова — из речи, не из меток промпта."""
+        моделью, а исход при нулевой длительности — неизвестен: называть
+        разговор недозвоном права нет, журнальный исход остаётся в
+        `outcome_rule.journal` (Codex по #135, круги 1, 3, 5). Слова — из
+        речи, не из меток промпта."""
         self.con.execute("update events set payload_json=? where id=?",
                          (json.dumps({"direction": "outgoing", "duration_s": 0}), self.eid))
         self.con.commit()
@@ -263,10 +266,11 @@ class Шаг(unittest.TestCase):
             ce.ask_model = было
         self.assertEqual(len(звали), 1, "модель позвали — речь есть")
         extr = ce.прочитать_извлечение(self.con, self.dir, self.eid)
-        self.assertEqual(extr["outcome"], "no-answer")
+        self.assertEqual(extr["outcome"], "unknown", "речь при нуле секунд — не недозвон")
         self.assertEqual((extr["extractor"], extr["prompt_version"]), (ce.MODEL, ce.PROMPT_VERSION))
         self.assertEqual(extr["config"]["outcome_rule"],
-                         {"direction": "outgoing", "duration_s": 0, "words": 8})
+                         {"direction": "outgoing", "duration_s": 0, "words": 8,
+                          "journal": "no-answer"})
         self.assertEqual(extr["config"]["model"], ce.MODEL, "настройки модели на месте")
 
     def test_голосовая_почта_извлекается(self):
@@ -279,7 +283,8 @@ class Шаг(unittest.TestCase):
         self.assertEqual(extr["outcome"], "missed")
         self.assertEqual(extr["extractor"], ce.MODEL)
         self.assertNotIn("rule", extr["config"])
-        self.assertEqual(extr["config"]["outcome_rule"]["duration_s"], 30)
+        self.assertEqual((extr["config"]["outcome_rule"]["duration_s"],
+                          extr["config"]["outcome_rule"]["journal"]), (30, "missed"))
 
     def test_состоявшийся_звонок_несёт_исход_в_ревизии(self):
         self.con.execute("update events set payload_json=? where id=?",
@@ -341,7 +346,8 @@ class Шаг(unittest.TestCase):
                                           "schema_sha256": extr["config"]["schema_sha256"],
                                           # Т4.3: входы правила исхода — в каждой ревизии
                                           "outcome_rule": {"direction": None,
-                                                           "duration_s": None, "words": 2}})
+                                                           "duration_s": None, "words": 2,
+                                                           "journal": None}})
         self.assertEqual(len(extr["config"]["schema_sha256"]), 64,
                          "схема ответа тоже под происхождением")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(
