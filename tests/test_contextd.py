@@ -1457,6 +1457,10 @@ class ТестЧастотаПравок(unittest.TestCase):
         код, _, заголовки = self.правка("б", ключ="k-b")
         self.assertEqual((код, заголовки.get("Idempotent-Replay")), (200, "true"),
                          "повтор по ключу проходит и при полном окне")
+        # Дубль без ключа при полном окне — «дубль», а не 429: плагин ключа
+        # не шлёт, а повтор той же правки в ту же минуту — его штатный путь.
+        код, снова, _ = self.правка("а")
+        self.assertEqual((код, снова["duplicate"]), (200, True))
 
     def test_отказ_400_не_считается(self):
         self.assertEqual(self.правка("а")[0], 200)
@@ -1520,6 +1524,22 @@ class ТестЧастотаПравок(unittest.TestCase):
         self.con.commit()
         self.assertGreater(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
         self.assertEqual(self.правка("ещё")[0], 429)
+
+    def test_смена_сдвига_на_26_часов_не_теряет_свежие(self):
+        # Крайние сдвиги −12 и +14: местное время одной и той же минуты
+        # расходится на 26 часов. Три свежие правки записаны в −12:00, а
+        # «сейчас» считается в +14:00 — лексически они на сутки с лишним
+        # старше границы в сутки, и окно казалось бы пустым.
+        сейчас = datetime.now(timezone(timedelta(hours=14)))
+        в_минус = (сейчас - timedelta(minutes=5)).astimezone(
+            timezone(timedelta(hours=-12))).isoformat(timespec="seconds")
+        for ид in ("correction_1", "correction_2", "correction_3"):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, в_минус))
+        self.con.commit()
+        self.assertGreater(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
 
     def test_кривая_строка_не_занимает_окно(self):
         # «zzzz» лексически старше любой даты: раньше попадала в выборку
