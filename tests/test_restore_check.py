@@ -91,6 +91,29 @@ class Проверка(unittest.TestCase):
         self.assertEqual(з, [])
         self.assertEqual(сводка["evidence"]["аудио стёрто по ретеншену"], 1)
 
+    def test_перенесённая_из_волта_без_источника_и_без_source_id_не_поломка(self):
+        """Карточка, перенесённая из волта (`vault:…`): источника в реестре
+        нет по построению и `source_id` в шапке пуст — оба не расхождение."""
+        legacy = os.path.join(self.vault, "kb/commitments/2026-08-01-staroe.md")
+        with open(legacy, "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: старое\nstatus: open\n---\n\n- Обещание: старое\n")
+        li.run(self.con, self.vault)
+        сводка, з = self.проверка()
+        self.assertEqual(з, [], з)
+        self.assertEqual((сводка["проекции"]["без источника"],
+                          сводка["проекции"]["без источника реестра"]), (1, 0))
+        self.assertEqual((сводка["id"]["source_id не тот"], сводка["id"]["id не тот"]), (0, 0),
+                         "`id:` у неё появится только после --write-ids")
+
+    def test_пустой_source_id_у_карточки_звонка_расхождение(self):
+        text = open(os.path.join(self.vault, self.card), encoding="utf-8").read()
+        text = "\n".join(l for l in text.split("\n") if not l.startswith("source_id:"))
+        with open(os.path.join(self.vault, self.card), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        сводка, з = self.проверка()
+        self.assertEqual(сводка["id"]["source_id не тот"], 1, з)
+        self.assertTrue(rc.расхождение(сводка, з))
+
     def test_чужой_id_в_шапке(self):
         text = open(os.path.join(self.vault, self.card), encoding="utf-8").read()
         oid = [l for l in text.splitlines() if l.startswith("id: ")][0][4:]
@@ -131,9 +154,12 @@ class Проверка(unittest.TestCase):
             fh.write("{broken")
         r = subprocess.run([sys.executable, СКРИПТ, "--root", self.root, "--vault", self.vault],
                            env=env, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("без источника 2", r.stdout,
-                      "битое извлечение — карточки без источника, не падение")
+        # карточки звонка реестр обязан уметь нарисовать: битое извлечение —
+        # расхождение восстановления, названное строкой, не падение (Codex)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("без источника у карточек из реестра 2", r.stdout)
+        self.assertIn("без источника у карточки из реестра: " + self.card, r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
         # WAL после прошлого чтения хранит страницы — иначе мусор в файле
         # базы читался бы из него как целая база
         for хвост in ("-wal", "-shm"):
