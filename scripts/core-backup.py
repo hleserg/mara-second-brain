@@ -62,10 +62,20 @@ import mara_ingest as mi
 # `schema_version`. Архив версии 1 читается и сверяется тем же кодом: чего в
 # манифесте нет, о том отчёт говорит «нет», а не падает и не молчит.
 МАНИФЕСТ_ВЕРСИЯ = 2
-# Класс хранения по §5.3. Он сегодня один: суточный архив с ротацией по
-# счёту (`--keep`). GFS-поколений нет (Т3б.5), и писать в манифест «weekly»
-# или «monthly» значило бы обещать то, чего ротация не делает.
+# Класс хранения по §5.3. Пишется архив всегда как суточный; поколения
+# (Т3б.5, «grandfather-father-son») делает ротация: кроме последних `keep`
+# суточных остаются самый свежий архив каждой из последних `weekly` недель
+# ISO и каждого из последних `monthly` месяцев. Политика целиком — в
+# `retention` манифеста, чтобы восстанавливающий видел, на что рассчитывать.
 КЛАСС_ХРАНЕНИЯ = "daily"
+НЕДЕЛЬ = 5
+МЕСЯЦЕВ = 6
+# Частый локальный снимок реестра между суточными прогонами (§5.3 «частый
+# локальный snapshot ledger»): копия базы через backup API на тот же диск,
+# без шифрования — это не копия вне машины, а защита от «потерял день».
+# Каталог — `mi.снимки(root)`, общий с читающей его сверкой. Снимков по
+# счёту — сутки при часовом кроне: суточный архив ночью забирает остальное.
+СНИМКОВ_ХРАНИТЬ = 24
 # Причина живёт одной строкой на два пути: её печатает ночь и её же
 # кладёт в итог ручное учение. Двумя литералами они расходились бы молча,
 # а сверяет их только человек, читающий отчёт.
@@ -194,7 +204,7 @@ def снимок_мелочи(список, куда):
     return out
 
 
-def собрать_манифест(root, копия, keep, файлы_мелочи=None):
+def собрать_манифест(root, копия, keep, файлы_мелочи=None, weekly=0, monthly=0):
     """Опись копии по §5.3: что лежит в архиве и чем это проверить.
 
     `files` — sha256 каждого файла, `bytes` — его размер; оба по одному и тому
@@ -220,7 +230,8 @@ def собрать_манифест(root, копия, keep, файлы_мело�
             "schema_version": сч["user_version"], "files": файлы,
             "bytes": размеры, "excluded": list(СЕКРЕТЫ),
             "db_bytes": размеры["contextd.db"],
-            "retention": {"class": КЛАСС_ХРАНЕНИЯ, "keep": keep}}
+            "retention": {"class": КЛАСС_ХРАНЕНИЯ, "keep": keep,
+                          "weekly": weekly, "monthly": monthly}}
 
 
 def архив(root, снимок_db, манифест, dst, файлы_мелочи=None):
@@ -662,7 +673,8 @@ def сверить_копию(путь, ожидаемый):
         raise OSError("копия прочиталась не тем, чем писалась")
 
 
-def прогон(root, targets, пароль, keep, work, аудио=True, drill=True):
+def прогон(root, targets, пароль, keep, work, аудио=True, drill=True, weekly=0,
+           monthly=0):
     начало = time.time()
     if not os.path.exists(пароль) or os.path.getsize(пароль) == 0:
         raise RuntimeError("нет парольной фразы %s" % пароль)
@@ -683,7 +695,7 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
         # между хешем и tar.add, давал архив, не сходящийся с собственной
         # описью, и ночное учение роняло исправную копию (Codex по #117, P2)
         список = снимок_мелочи(мелочь(root), os.path.join(stage, "мелочь"))
-        м = собрать_манифест(root, копия, keep, список)
+        м = собрать_манифест(root, копия, keep, список, weekly, monthly)
         сч = м["counts"]
         путь_м = os.path.join(stage, "manifest.json")
         with open(путь_м, "w", encoding="utf-8") as fh:
@@ -833,7 +845,7 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
     # ротация последней: свежий архив, не прошедший проверку, не имеет права
     # вытеснить старый, который разворачивался
     for t in записано:
-        ротация(t, keep)
+        ротация(t, keep, weekly, monthly)
     # `.get`, а не `[...]`: у пропущенного носителя счётчиков нет вовсе, и
     # «сбойных файлов ноль» про него — правда, а не умолчание.
     битые = {t: з["битых"] for t, з in зв.items() if з.get("битых")}
@@ -854,7 +866,37 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
     return итог
 
 
-def ротация(target, keep):
+def _дата_архива(path):
+    """`core-ГГГГ-ММ-ДД.*` → дата; чужое имя — None."""
+    имя = os.path.basename(path)
+    try:
+        return datetime.strptime(имя[5:15], "%Y-%m-%d").date() if имя.startswith("core-") else None
+    except ValueError:
+        return None
+
+
+def поколения(даты, keep, weekly=0, monthly=0):
+    """Какие даты архивов остаются (Т3б.5, GFS): последние `keep` суточных,
+    самый свежий архив каждой из последних `weekly` недель ISO и каждого из
+    последних `monthly` месяцев. `weekly`/`monthly` по нулю — прежняя ротация
+    по счёту. Поколения считаются по датам в именах, не по mtime: копия
+    на другой носитель mtime не бережёт."""
+    даты = sorted(set(даты), reverse=True)
+    остаются = set(даты[:keep] if keep > 0 else [])
+    for окно, ключ in ((weekly, lambda d: d.isocalendar()[:2]),
+                       (monthly, lambda d: (d.year, d.month))):
+        видели = []
+        for d in даты:                       # от свежих к старым: первая — свежайшая
+            k = ключ(d)
+            if k not in видели:
+                видели.append(k)
+                if len(видели) > окно:
+                    break
+                остаются.add(d)
+    return остаются
+
+
+def ротация(target, keep, weekly=0, monthly=0):
     for огрызок in glob.glob(os.path.join(target, ".core-*.tmp")):
         # Огрызок неудачной ночи, который не удалось убрать тогда же (носитель
         # ушёл в read-only). Имя с датой — следующая ночь его не перезапишет, а
@@ -870,10 +912,56 @@ def ротация(target, keep):
             # не напечатал бы итог, а ротация не отработала бы на остальных
             # носителях. Не убрался — полежит ещё сутки.
             pass
+    # поколения — по датам архивов; сайдкар манифеста живёт и умирает со
+    # своим архивом, а не по собственному счёту
+    архивы = glob.glob(os.path.join(target, "core-*.tar.gz.gpg"))
+    даты = [d for d in map(_дата_архива, архивы) if d]
+    остаются = поколения(даты, keep, weekly, monthly)
     for шаблон in ("core-*.tar.gz.gpg", "core-*.manifest.json"):
-        файлы = sorted(glob.glob(os.path.join(target, шаблон)))
-        for старый in файлы[:-keep] if keep > 0 else []:
-            os.unlink(старый)
+        for файл in sorted(glob.glob(os.path.join(target, шаблон))):
+            d = _дата_архива(файл)
+            if d is not None and d not in остаются:
+                os.unlink(файл)
+
+
+def снимок_реестра(root, куда=None, keep=СНИМКОВ_ХРАНИТЬ):
+    """Частый локальный снимок базы (Т3б.5, §5.3): backup API в `куда`,
+    `quick_check` на копии до того, как она займёт место, ротация по счёту.
+    Тот же диск и те же права 0700, без шифрования: это защита от «потерял
+    день между ночными архивами», а не копия вне машины (та — пункт 8 §5.3,
+    владелец). Возвращает путь, байты и сколько снимков осталось."""
+    куда = куда or mi.снимки(root)
+    db = os.path.join(root, "contextd.db")
+    if not os.path.exists(db):
+        raise RuntimeError("нет базы %s" % db)
+    os.makedirs(куда, mode=0o700, exist_ok=True)
+    имя = "contextd-%s.db" % datetime.now(mi.TZ).strftime("%Y-%m-%dT%H%M")
+    tmp = os.path.join(куда, "." + имя + ".tmp")
+    снимок(db, tmp)
+    con = sqlite3.connect(tmp)
+    try:
+        # Копия наследует режим WAL из заголовка живой базы, и тогда любой
+        # читатель — хоть эта же проверка на `mode=ro` — заводит рядом
+        # `-wal`/`-shm`, которые ротация по `contextd-*.db` не видит. Снимок
+        # обязан быть одним файлом: его копируют и открывают руками.
+        con.execute("pragma journal_mode=delete")
+        ок = con.execute("pragma quick_check").fetchone()[0]
+    finally:
+        con.close()
+    if ок != "ok":
+        os.unlink(tmp)
+        raise RuntimeError("снимок: quick_check копии — %s" % ок)
+    fd = os.open(tmp, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, os.path.join(куда, имя))
+    снимки = sorted(glob.glob(os.path.join(куда, "contextd-*.db")))
+    for старый in снимки[:-keep] if keep > 0 else []:
+        os.unlink(старый)
+    return {"снимок": os.path.join(куда, имя), "байт": os.path.getsize(os.path.join(куда, имя)),
+            "осталось": min(len(снимки), keep) if keep > 0 else len(снимки)}
 
 
 def подделка(root, work, пароль, dst, порча):
@@ -1533,6 +1621,30 @@ def самопроверка():
                             "core-2020-01-02.tar.gz.gpg",
                             "core-2020-01-03.manifest.json",
                             "core-2020-01-03.tar.gz.gpg"], осталось
+        # Поколения (Т3б.5): ежедневные архивы за два месяца, остаются 3
+        # суточных, свежайший каждой из 3 недель ISO и каждого из 2 месяцев.
+        # 31 марта 2020 — вторник недели 14; неделя 13 кончается воскресеньем
+        # 29-го (оно же третий суточный), неделя 12 — 22-м.
+        from datetime import date, timedelta
+        дни = [date(2020, 3, 31) - timedelta(days=i) for i in range(60)]
+        ост = поколения(дни, 3, weekly=3, monthly=2)
+        assert {date(2020, 3, 31), date(2020, 3, 30), date(2020, 3, 29)} <= ост, ост
+        assert date(2020, 3, 22) in ост, ост          # воскресенье недели 12
+        assert date(2020, 2, 29) in ост, ост          # свежайший февраля
+        assert len(ост) == 5, sorted(ост)
+        assert date(2020, 3, 15) not in поколения(дни, 3, weekly=3, monthly=2)
+        assert поколения(дни, 3) == set(дни[:3]), "без недель и месяцев — как было"
+        assert поколения([], 3, weekly=2, monthly=2) == set(), "пустой носитель — пусто"
+        # снимок реестра: копия, quick_check, ротация по счёту
+        сн = os.path.join(tmp, "snap")
+        первый = снимок_реестра(root, сн, keep=2)
+        assert os.path.exists(первый["снимок"]) and первый["байт"] > 0, первый
+        for n in (1, 2, 3):
+            open(os.path.join(сн, "contextd-2000-01-0%dT0000.db" % n), "w").close()
+        итог_сн = снимок_реестра(root, сн, keep=2)
+        остались = sorted(os.listdir(сн))
+        assert len(остались) == 2 and остались[-1] == os.path.basename(итог_сн["снимок"]), остались
+        assert not [f for f in остались if f.startswith(".")], "хвостов снимка нет"
 
         # Сторожа внутри `проверка` — утечка секретов, целостность базы,
         # счётчики, хеши файлов — до сих пор не срабатывали ни разу: порченый
@@ -1863,7 +1975,17 @@ def main():
         "MARA_CORE_TARGETS", "/mnt/backup/mara /mnt/win-backups/mara"))
     ap.add_argument("--pass-file", default=os.path.expanduser(
         "~/.config/mara/backup-pass"))
-    ap.add_argument("--keep", type=int, default=8)
+    ap.add_argument("--keep", type=int, default=8, help="суточных архивов на носителе")
+    ap.add_argument("--keep-weekly", type=int, default=НЕДЕЛЬ, dest="keep_weekly",
+                    help="недель, от каждой остаётся свежайший архив (0 — выключить)")
+    ap.add_argument("--keep-monthly", type=int, default=МЕСЯЦЕВ, dest="keep_monthly",
+                    help="месяцев, от каждого остаётся свежайший архив (0 — выключить)")
+    ap.add_argument("--snapshot", nargs="?", const="", metavar="КАТАЛОГ",
+                    help="частый локальный снимок базы в КАТАЛОГ (по умолчанию "
+                         "snapshots/ под корнем или $MARA_CORE_SNAPSHOTS) и выход; "
+                         "носители и парольная фраза не нужны")
+    ap.add_argument("--snapshot-keep", type=int, default=СНИМКОВ_ХРАНИТЬ,
+                    dest="snapshot_keep", help="снимков держать по счёту")
     ap.add_argument("--work", default="/var/tmp/mara-backup")
     ap.add_argument("--no-audio", action="store_true", help="без зеркала аудио")
     ap.add_argument("--no-drill", action="store_true",
@@ -1896,6 +2018,15 @@ def main():
         # против которого весь этот файл; свой код у неё затем, чтобы
         # «разошлось» и «нечем» не слились в одно.
         raise SystemExit({"ок": 0, "расхождения": 1}.get(r["итог"], 2))
+    if a.snapshot is not None:
+        # До разбора носителей: снимок локальный, и несмонтированная шара не
+        # повод остаться без него — ровно наоборот, он на такой случай.
+        try:
+            r = снимок_реестра(a.root, a.snapshot or None, a.snapshot_keep)
+        except (RuntimeError, OSError, sqlite3.DatabaseError) as e:
+            raise SystemExit("core-backup --snapshot: %s: %s" % (type(e).__name__, e))
+        print(json.dumps(r, ensure_ascii=False, indent=1, sort_keys=True))
+        return 0
     try:
         targets = mi.носители(a.targets)
     except ValueError as e:
@@ -1915,7 +2046,8 @@ def main():
             сказать_про_пропуск(причина)
     else:
         r = прогон(a.root, targets, a.pass_file, a.keep, a.work,
-                   аудио=not a.no_audio, drill=not a.no_drill)
+                   аудио=not a.no_audio, drill=not a.no_drill,
+                   weekly=a.keep_weekly, monthly=a.keep_monthly)
     print(json.dumps(r, ensure_ascii=False, indent=1, sort_keys=True))
 
 

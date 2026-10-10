@@ -322,5 +322,88 @@ class БэкапЯдра(unittest.TestCase):
                          "носитель, на который ни разу не писали, — не отказ")
 
 
+class СнимокРеестра(unittest.TestCase):
+    """Сверка видит, что частый локальный снимок реестра встал (Т3б.5).
+    Та же логика, что у архива: каталог пуст и каталог со старым снимком —
+    два разных сообщения, а каталога нет — не настроено, не находка."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        os.environ.pop("MARA_CORE_SNAPSHOTS", None)
+        self.каталог = rc.mi.снимки(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        os.environ.pop("MARA_CORE_SNAPSHOTS", None)
+
+    def снимок(self, часов_назад, имя="contextd-2026-10-10T0425.db"):
+        os.makedirs(self.каталог, exist_ok=True)
+        p = os.path.join(self.каталог, имя)
+        open(p, "wb").write(b"db")
+        t = time.time() - часов_назад * 3600
+        os.utime(p, (t, t))
+        return p
+
+    def test_каталога_нет_это_не_находка(self):
+        self.assertEqual(rc.снимок_реестра_устарел(self.root), [])
+
+    def test_пустой_каталог_это_ненастроенность(self):
+        os.makedirs(self.каталог)
+        f = rc.снимок_реестра_устарел(self.root)
+        self.assertEqual([(x["check"], x["level"]) for x in f],
+                         [("снимок-реестра-нет", "warn")])
+
+    def test_свежий_снимок_не_находка(self):
+        self.снимок(0.7)
+        self.assertEqual(rc.снимок_реестра_устарел(self.root), [])
+
+    def test_старый_снимок_это_находка(self):
+        self.снимок(4)
+        f = rc.снимок_реестра_устарел(self.root)
+        self.assertEqual([(x["check"], x["level"]) for x in f],
+                         [("снимок-реестра-устарел", "warn")])
+        self.assertEqual(f[0]["count"], 1)
+        self.assertGreaterEqual(f[0]["hours"], 4)
+
+    def test_возраст_по_свежайшему_а_не_по_имени(self):
+        # Имя старое, mtime свежий — снимок пишется на месте, и считать надо
+        # по тому, что реально легло на диск; старый сосед не делает его старым.
+        self.снимок(30, "contextd-2026-10-09T0025.db")
+        self.снимок(0.5, "contextd-2000-01-01T0000.db")
+        self.assertEqual(rc.снимок_реестра_устарел(self.root), [])
+
+    def test_порог_доезжает(self):
+        self.снимок(1.5)
+        self.assertEqual(rc.снимок_реестра_устарел(self.root), [])
+        self.assertEqual([x["check"] for x in rc.снимок_реестра_устарел(self.root, hours=1)],
+                         ["снимок-реестра-устарел"])
+
+    def test_каталог_из_окружения(self):
+        # Писатель и читатель берут каталог из одного места: подмена через
+        # `MARA_CORE_SNAPSHOTS` обязана переключить обоих.
+        другой = os.path.join(self.root, "elsewhere")
+        os.environ["MARA_CORE_SNAPSHOTS"] = другой
+        self.assertEqual(rc.mi.снимки(self.root), другой)
+        os.makedirs(другой)
+        self.assertEqual([x["check"] for x in rc.снимок_реестра_устарел(self.root)],
+                         ["снимок-реестра-нет"])
+
+    def test_в_общей_сверке_через_заставу(self):
+        # `run()` зовёт проверку: без этой заставы функция может быть идеальной
+        # и никем не вызванной.
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        try:
+            self.снимок(5)
+            con = rc.mi.connect(self.root)
+            носитель = os.path.join(self.root, "backup")
+            os.makedirs(носитель)
+            open(os.path.join(носитель, "core-2026-10-10.tar.gz.gpg"), "wb").write(b"gpg")
+            f = rc.run(con, self.root, vault=None, targets=[носитель])
+            con.close()
+            self.assertIn("снимок-реестра-устарел", [x["check"] for x in f])
+        finally:
+            os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
+
+
 if __name__ == "__main__":
     unittest.main()

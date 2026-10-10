@@ -97,28 +97,37 @@ class Порог(unittest.TestCase):
         with io.open(os.path.join(ROOT, "install", "mara.cron"),
                      encoding="utf-8") as ф:
             строки = ф.readlines()
-        присвоения = [i for i, l in enumerate(строки)
-                      if l.startswith("MARA_CORE_BACKUP_MAX_DAYS=")]
         работы = [i for i, l in enumerate(строки) if "core-backup.py" in l]
-        self.assertEqual(len(присвоения), 1, присвоения)
-        self.assertEqual(len(работы), 1, работы)
-        # `VAR=` в crontab действует только на работы ниже себя — сказано в
-        # самом файле, рядом с этим присвоением. Значение сверялось, место
-        # нет: присвоение, уехавшее под работу, оставляет этот тест зелёным
-        # и порог мёртвым. Дыра не из этого PR, чинится тем же движением,
-        # что и у соседа; нашёл ревьюер, круг 2.
-        self.assertLess(присвоения[0], работы[0],
-                        "присвоение ниже работы — работа его не увидит")
-        код = ("import sys; sys.path.insert(0, %r);"
-               " import contextd_reconcile as rc; print(rc.БЭКАП_СУТКИ)"
-               % os.path.join(ROOT, "scripts"))
-        окр = {k: v for k, v in os.environ.items()
-               if k != "MARA_CORE_BACKUP_MAX_DAYS"}
-        r = subprocess.run([sys.executable, "-c", код], env=окр,
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(float(строки[присвоения[0]].split("=", 1)[1]),
-                         float(r.stdout))
+        # Две работы одного скрипта: суточный архив и часовой снимок (Т3б.5).
+        # Счёт точный, а не «хотя бы одна»: третья строка с тем же скриптом —
+        # повод перечитать, какие присвоения она видит.
+        self.assertEqual(len(работы), 2, работы)
+        # Пороги — парами «присвоение в кроне ↔ дефолт в коде». Разъехавшись,
+        # эти двое молчат: в бою побеждает crontab, и слабина в 0.2 суток
+        # теряется ровно там, где заведена, — на боевой машине.
+        for имя, константа in (("MARA_CORE_BACKUP_MAX_DAYS", "БЭКАП_СУТКИ"),
+                               ("MARA_CORE_SNAPSHOT_MAX_H", "СНИМОК_ЧАСЫ")):
+            with self.subTest(имя):
+                присвоения = [i for i, l in enumerate(строки)
+                              if l.startswith(имя + "=")]
+                self.assertEqual(len(присвоения), 1, присвоения)
+                # `VAR=` в crontab действует только на работы ниже себя —
+                # сказано в самом файле, рядом с этим присвоением. Значение
+                # сверялось, место нет: присвоение, уехавшее под работу,
+                # оставляет этот тест зелёным и порог мёртвым. Дыра не из
+                # этого PR, чинится тем же движением, что и у соседа; нашёл
+                # ревьюер, круг 2.
+                self.assertLess(присвоения[0], min(работы),
+                                "присвоение ниже работы — работа его не увидит")
+                код = ("import sys; sys.path.insert(0, %r);"
+                       " import contextd_reconcile as rc; print(rc.%s)"
+                       % (os.path.join(ROOT, "scripts"), константа))
+                окр = {k: v for k, v in os.environ.items() if k != имя}
+                r = subprocess.run([sys.executable, "-c", код], env=окр,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(float(строки[присвоения[0]].split("=", 1)[1]),
+                                 float(r.stdout))
 
 
 class ПустойНоситель(unittest.TestCase):
