@@ -19,6 +19,20 @@
          становимся. Откажет прошивка — те же уведомления, что для WhatsApp. -->
     <uses-permission android:name="android.permission.READ_SMS" />
 
+    <!-- Android 11+ показывает чужие пакеты только объявленные здесь; без
+         этого «рекордер установлен» (Device.producers, здоровье Т4.2) всегда
+         было бы «нет». Список — тот же, что Device.КАНДИДАТЫ. -->
+    <queries>
+        <package android:name="com.huawei.soundrecorder" />
+        <package android:name="com.android.soundrecorder" />
+        <package android:name="com.huawei.contacts" />
+        <package android:name="com.android.dialer" />
+        <package android:name="com.google.android.dialer" />
+        <package android:name="com.nll.acr" />
+        <package android:name="com.skvalex.callrecorder" />
+        <package android:name="com.appstar.callrecorder" />
+    </queries>
+
     <!-- http без TLS: сервер виден только из домашней локалки, а без этого
          флага с targetSdk 28+ любой запрос падает исключением ещё до сети -->
     <application
@@ -37,12 +51,13 @@
             </intent-filter>
         </activity>
 
-        <!-- после перезагрузки расписание надо ставить заново -->
+        <!-- после перезагрузки и после обновления APK расписание надо ставить заново -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

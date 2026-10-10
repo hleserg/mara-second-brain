@@ -70,6 +70,42 @@ class Settings(ctx: Context) {
         get() = prefs.getString("last_chat", "") ?: ""
         set(v) = prefs.edit().putString("last_chat", v).apply()
 
+    // ── здоровье (Т4.2) ──────────────────────────────────────────────────
+
+    /** Последний вердикт `Здоровье.оценить` — имя состояния §8.5 и причина. */
+    var healthState: String
+        get() = prefs.getString("health_state", "") ?: ""
+        set(v) = prefs.edit().putString("health_state", v).apply()
+
+    var healthReason: String
+        get() = prefs.getString("health_reason", "") ?: ""
+        set(v) = prefs.edit().putString("health_reason", v).apply()
+
+    var healthAtMs: Long
+        get() = prefs.getLong("health_at", 0)
+        set(v) = prefs.edit().putLong("health_at", v).apply()
+
+    /** Открытая тревога «звонок был, записи нет»: `startMs` звонка; 0 — нет.
+     *  Ключ дедупа §8.4 п.4: один звонок — одна тревога. */
+    var alertCallMs: Long
+        get() = prefs.getLong("alert_call", 0)
+        set(v) = prefs.edit().putLong("alert_call", v).apply()
+
+    /** История §8.4 п.7: сколько тревог было и когда закрыта последняя. */
+    var alertCount: Int
+        get() = prefs.getInt("alert_count", 0)
+        set(v) = prefs.edit().putInt("alert_count", v).apply()
+
+    var alertRecoveredMs: Long
+        get() = prefs.getLong("alert_recovered", 0)
+        set(v) = prefs.edit().putLong("alert_recovered", v).apply()
+
+    /** Начало наблюдения за здоровьем: первый прогон `HealthWorker`. Звонки
+     *  до него — до установки приложения, за них тревоги нет. */
+    var healthSinceMs: Long
+        get() = prefs.getLong("health_since", 0)
+        set(v) = prefs.edit().putLong("health_since", v).apply()
+
     val paired: Boolean get() = baseUrl.isNotEmpty() && token.isNotEmpty()
 }
 

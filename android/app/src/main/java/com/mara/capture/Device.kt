@@ -34,7 +34,12 @@ object Device {
      * Путь не зашит: берём всё аудио и оставляем то, в чьём пути есть примета
      * (ТЗ §22 — не hardcode'ить recording path Huawei).
      */
-    fun mediaStore(ctx: Context, sinceMs: Long = 0): List<Recording> {
+    fun mediaStore(ctx: Context, sinceMs: Long = 0): List<Recording> =
+        mediaStoreOrNull(ctx, sinceMs) ?: emptyList()
+
+    /** null — провайдер не отдал курсор: это не «записей нет», здоровье
+     *  (Т4.2) различает; сверке и мастеру хватает пустого списка. */
+    fun mediaStoreOrNull(ctx: Context, sinceMs: Long = 0): List<Recording>? {
         val out = mutableListOf<Recording>()
         val cols = arrayOf(
             MediaStore.Audio.Media._ID, MediaStore.Audio.Media.DISPLAY_NAME,
@@ -44,7 +49,7 @@ object Device {
         val c: Cursor = ctx.contentResolver.query(
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cols, null, null,
             MediaStore.Audio.Media.DATE_MODIFIED + " desc"
-        ) ?: return out
+        ) ?: return null
         c.use {
             while (it.moveToNext()) {
                 val путь = (it.getString(4) ?: "") + (it.getString(1) ?: "")
@@ -88,6 +93,10 @@ object Device {
     fun scan(ctx: Context, s: Settings, sinceMs: Long = 0): List<Recording> =
         (mediaStore(ctx, sinceMs) + folder(ctx, s.folderUri)).distinctBy { it.id }
 
+    /** То же, но `null`, если медиатека не отдала курсор — для здоровья (Т4.2). */
+    fun scanOrNull(ctx: Context, s: Settings, sinceMs: Long = 0): List<Recording>? =
+        mediaStoreOrNull(ctx, sinceMs)?.let { (it + folder(ctx, s.folderUri)).distinctBy { r -> r.id } }
+
     /** null — файла больше нет. `openInputStream` на исчезнувшей строке
      *  MediaStore не возвращает null, а бросает: без этого перехвата
      *  объявленный тут `InputStream?` был обещанием, которого никто не
@@ -122,17 +131,24 @@ object Device {
     fun ext(rec: Recording): String =
         rec.name.substringAfterLast('.', "").lowercase().ifEmpty { "bin" }
 
-    /** Журнал звонков за последние сутки: сопоставлять дальше уже незачем. */
-    fun callLog(ctx: Context, sinceMs: Long): List<CallLogEntry> {
-        if (!granted(ctx, Manifest.permission.READ_CALL_LOG)) return emptyList()
+    /** Журнал звонков с `sinceMs`; не прочитался — пустой список: сверке и
+     *  мастеру этого достаточно. Здоровью (Т4.2) — нет, ему `callLogOrNull`. */
+    fun callLog(ctx: Context, sinceMs: Long): List<CallLogEntry> =
+        callLogOrNull(ctx, sinceMs) ?: emptyList()
+
+    /** null — журнал не прочитался: нет разрешения или провайдер не отдал
+     *  курсор. Это не «звонков не было», и здоровье различает (Codex по #137). */
+    fun callLogOrNull(ctx: Context, sinceMs: Long): List<CallLogEntry>? {
+        if (!granted(ctx, Manifest.permission.READ_CALL_LOG)) return null
         val out = mutableListOf<CallLogEntry>()
         val cols = arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME,
             CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION)
-        ctx.contentResolver.query(
+        val c = ctx.contentResolver.query(
             CallLog.Calls.CONTENT_URI, cols,
             CallLog.Calls.DATE + ">=?", arrayOf(sinceMs.toString()),
             CallLog.Calls.DATE + " desc"
-        )?.use {
+        ) ?: return null
+        c.use {
             while (it.moveToNext()) out += CallLogEntry(
                 it.getString(0), it.getString(1),
                 when (it.getInt(2)) {
@@ -211,6 +227,8 @@ object Device {
     }
 
     /** Кандидаты в производители записи. Список перебираем, показываем найденное. */
+    /** Тот же список объявлен в `AndroidManifest.xml` `<queries>`: без этого
+     *  Android 11+ пакет не покажет, и он сойдёт за неустановленный. */
     private val КАНДИДАТЫ = listOf(
         "com.huawei.soundrecorder", "com.android.soundrecorder", "com.huawei.contacts",
         "com.android.dialer", "com.google.android.dialer",
