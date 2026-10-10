@@ -212,6 +212,21 @@ class Правка(unittest.TestCase):
         self.assertTrue(out["found"], out)
         self.assertIn("\nstatus: done\n", open(p, encoding="utf-8").read())
 
+    def test_правка_словами_по_обрезанному_заголовку(self):
+        """Заголовок длиннее `MAX_TITLE` Мара видит обрезанным с «…»; правка
+        этим текстом обязана найти карточку без `id` (Codex по #129, круг 2)."""
+        import context_pack
+        title = "согласовать с подрядчиком смету на ремонт кухни, прихожей и балкона " \
+                "до конца следующей недели и прислать её на почту с разбивкой по этапам"
+        self.assertGreater(len(title), context_pack.MAX_TITLE)
+        v = self.волт()
+        p = self.карточка(v, "long.md", title)
+        показ = context_pack.данные(title, context_pack.MAX_TITLE)
+        self.assertTrue(показ.endswith("…"), показ)
+        out = self.правка(v, item=показ, status="done")
+        self.assertTrue(out["found"], out)
+        self.assertIn("\nstatus: done\n", open(p, encoding="utf-8").read())
+
     def test_срок_меняется_а_история_остаётся(self):
         v = self.волт()
         p = self.карточка(v, "smeta.md", "прислать смету")
