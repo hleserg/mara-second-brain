@@ -2102,6 +2102,10 @@ class ТестЛогОтказов(unittest.TestCase):
         лог = io.StringIO()
         запрос = ("GET /v1/контекст HTTP/1.1\r\nHost: x\r\n"
                   "Connection: close\r\n\r\n").encode("utf-8")
+        # Паузы после `recv` не нужно (#96 п.3): `say` печатает строку лога
+        # **до** ответа — так написано нарочно, чтобы оборванное соединение не
+        # уносило отказ из журнала, — и первый байт ответа приходит, когда
+        # строка уже в перехваченном stdout.
         with contextlib.redirect_stdout(лог):
             с = socket.create_connection(("127.0.0.1", срв.server_address[1]), 10)
             try:
@@ -2109,7 +2113,6 @@ class ТестЛогОтказов(unittest.TestCase):
                 ответ = с.recv(64)
             finally:
                 с.close()
-            time.sleep(0.2)
         self.assertIn(b"401", ответ, ответ)     # без токена, но строка уже есть
         строки = [l for l in лог.getvalue().splitlines() if "-> 401" in l]
         self.assertEqual(len(строки), 1, лог.getvalue())

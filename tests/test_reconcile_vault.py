@@ -213,6 +213,20 @@ class КарточкиПропали(unittest.TestCase):
         self.assertIn("basic-memory-mcp", f["лаг-индекса"]["detail"])
         self.assertIn("MARA_BM_DB", f["лаг-индекса"]["detail"])
 
+    def test_нечитаемая_база_называет_действие(self):
+        """#96 п.2: текст находки «база не читается» держался только на ревью.
+        Подмены `sqlite3` не нужно: пустой файл базы — это `no such table:
+        entity`, ровно то, что даёт подменённая или обновлённая схема."""
+        self.карточка("a.md")
+        os.unlink(self.bm)
+        sqlite3.connect(self.bm).close()
+        f = rc.лаг_индекса(self.vault, self.bm)
+        self.assertEqual(len(f), 1, f)
+        self.assertEqual(("лаг-индекса", "warn"), (f[0]["check"], f[0]["level"]))
+        self.assertIn("не читается", f[0]["detail"])
+        self.assertIn("no such table", f[0]["detail"])
+        self.assertIn("systemctl status basic-memory-mcp", f[0]["detail"])
+
     def test_индекс_не_настроен_не_повод_кричать(self):
         """Отказ — про «настроено, а файла нет», а не про сверку без индекса."""
         self.assertEqual([], rc.лаг_индекса(self.vault, ""))
@@ -238,6 +252,10 @@ class КарточкиПропали(unittest.TestCase):
         f = self.находки()
         self.assertEqual(f["карточки-пропали"]["count"], 1)
         self.assertIn("kb/conversations/b.md", f["карточки-пропали"]["sample"])
+        # #96 п.1: находка называет первое действие, как соседняя
+        # `лаг-индекса`, и оба пути, которыми она закрывается.
+        self.assertIn("git log --diff-filter=D", f["карточки-пропали"]["detail"])
+        self.assertIn("обходе Basic Memory", f["карточки-пропали"]["detail"])
 
     def test_чужие_записи_базы_не_считаются(self):
         """Basic Memory индексирует весь волт. Пропажу считаем только по
