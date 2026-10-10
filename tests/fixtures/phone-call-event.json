@@ -10,7 +10,8 @@
     "direction": "incoming",
     "contact_source": "call-log",
     "duration_s": 1091,
-    "producer": "com.huawei.soundrecorder"
+    "producer": "com.huawei.soundrecorder",
+    "match": "time"
   },
   "blob": {
     "sha256": "9f2c4a1e0b6d8837f5a1c9e2b4d70a3c6e8f1b2d4a6c8e0f2a4c6e8b0d2f4a6c",

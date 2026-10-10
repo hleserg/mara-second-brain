@@ -21,7 +21,22 @@ data class Recording(
     val sizeBytes: Long,
     val modifiedMs: Long,
     val producer: String? = null,   // пакет, записавший файл; медиатека знает, SAF — нет
-)
+    val path: String? = null,       // относительный путь из медиатеки: у ACR в нём номер; у SAF путь уже в uri
+) {
+    /** Подсказка для `CallLogMatcher.match`: всё, где рекордер мог написать
+     *  номер — uri (SAF несёт путь в нём), относительный путь медиатеки, имя.
+     *  Uri медиатеки — непрозрачный номер строки (`media/1234567`), не путь:
+     *  в подсказку не идёт, иначе он сошёл бы за короткий номер (Codex по
+     *  #136, круг 4). Куски разделены `/`, как в пути: цифры через границу
+     *  кусков не склеиваются. На сервер не уезжает: номер из пути — тот же
+     *  номер, что в журнале. */
+    fun подсказка(): String =
+        listOfNotNull(id.takeUnless { it.startsWith(МЕДИАТЕКА) }, path, name).joinToString("/")
+
+    companion object {
+        const val МЕДИАТЕКА = "content://media/"
+    }
+}
 
 /** Строка журнала звонков. Адресную книгу целиком не трогаем (ТЗ §5.1B). */
 data class CallLogEntry(
@@ -210,6 +225,52 @@ object CallLogMatcher {
 
     fun nearest(entries: List<CallLogEntry>, ms: Long): CallLogEntry? =
         entries.filter { distance(it, ms) <= WINDOW_MS }.minByOrNull { distance(it, ms) }
+
+    /** Чем подтверждено сопоставление: `number` — номер звонка есть в пути
+     *  или имени записи, `time` — только близость по времени. */
+    data class Match(val entry: CallLogEntry, val by: String)
+
+    /**
+     * Сопоставление с подсказкой (Т4.3): ACR кладёт запись в каталог с
+     * номером (`[гггг]/[ММ]/[дд]/[номер]/`), и этот каталог виден в uri SAF
+     * (`%2B79990000000%2F`), а некоторые рекордеры пишут номер в имя файла.
+     * Внутри окна по времени сперва ищется звонок, чей номер есть в
+     * подсказке — он надёжнее любого соседа по минутам; нет такого — как
+     * раньше, ближайший по времени. `by` уезжает на сервер: сопоставление
+     * по времени не даёт права называть запись с речью недозвоном, по номеру
+     * — даёт. Два звонка на один номер в окне (разговор и перезвон следом)
+     * номер не различает: берётся ближайший, но уверенность — `time`
+     * (Codex по #136, круг 4).
+     */
+    fun match(entries: List<CallLogEntry>, ms: Long, hint: String? = null): Match? {
+        val окно = entries.filter { distance(it, ms) <= WINDOW_MS }
+        if (hint != null) {
+            val поНомеру = окно.filter { номерВ(hint, it.number) }
+            поНомеру.minByOrNull { distance(it, ms) }
+                ?.let { return Match(it, if (поНомеру.size == 1) "number" else "time") }
+        }
+        return окно.minByOrNull { distance(it, ms) }?.let { Match(it, "time") }
+    }
+
+    /** Хвост номера для сравнения: цифры, последние десять — код страны и
+     *  `+` рекордеры пишут по-разному; короче семи цифр — не номер. */
+    fun хвостНомера(number: String?): String? =
+        number?.filter { it.isDigit() }?.takeLast(10)?.takeIf { it.length >= 7 }
+
+    /** Символы, из которых рекордеры собирают номер: цифры, пробелы, скобки,
+     *  `+` и дефис. Всё остальное (`/`, `_`, `.`, буквы) режет подсказку на
+     *  куски — дата каталога, счётчик в имени и номер не склеиваются. */
+    private val НЕ_НОМЕР = Regex("[^0-9 ()+-]+")
+
+    /** Есть ли номер звонка в подсказке (uri, путь или имя файла, с
+     *  %XX-кодировкой): хвост ищется внутри одного куска, не в склейке всех
+     *  цифр подсказки (Codex по #136, круг 4). */
+    fun номерВ(hint: String, number: String?): Boolean {
+        val хвост = хвостНомера(number) ?: return false
+        val раскодирован = runCatching { java.net.URLDecoder.decode(hint, "UTF-8") }
+            .getOrDefault(hint)
+        return раскодирован.split(НЕ_НОМЕР).any { кусок -> кусок.filter { it.isDigit() }.contains(хвост) }
+    }
 }
 
 object EventJson {
@@ -229,6 +290,7 @@ object EventJson {
         ext: String,
         producer: String?,
         zone: ZoneId,
+        matchedBy: String? = null,
     ): JSONObject {
         val payload = JSONObject()
         if (call != null) {
@@ -239,6 +301,9 @@ object EventJson {
             // человека: имя, услышанное в разговоре, в реестр сущностей не пускают.
             payload.put("contact_source", "call-log")
             payload.put("duration_s", call.durationS)
+            // чем подтверждено сопоставление записи со звонком (Т4.3):
+            // сервер по времени недозвон не объявляет, по номеру — объявляет
+            payload.put("match", matchedBy ?: "time")
         }
         producer?.let { payload.put("producer", it) }
 
@@ -523,9 +588,12 @@ object Затирание {
     /** Весь отчёт: каждый номер — плейсхолдером, остальное как было. */
     fun текст(отчёт: String): String = НОМЕР.replace(отчёт, НОМЕР_ВМЕСТО)
 
-    /** Строка сопоставления с журналом звонков: без имени и без номера. */
-    fun контакт(e: CallLogEntry?): String =
-        if (e == null) "ни с чем" else "$КОНТАКТ_ВМЕСТО · ${e.direction} · ${e.durationS} с"
+    /** Строка сопоставления с журналом звонков: без имени и без номера;
+     *  `by` — чем подтверждено (`number`/`time`), это диагнозу нужно. */
+    fun контакт(e: CallLogEntry?, by: String? = null): String =
+        if (e == null) "ни с чем"
+        else "$КОНТАКТ_ВМЕСТО · ${e.direction} · ${e.durationS} с" +
+            (by?.let { " · по " + if (it == "number") "номеру" else "времени" } ?: "")
 
     /** Заголовок беседы WhatsApp — это имя собеседника; наружу идёт длина. */
     fun беседа(заголовок: String): String =

@@ -315,6 +315,104 @@ class CoreTest {
         assertNull(CallLogMatcher.nearest(emptyList(), начало))
     }
 
+    // ── сопоставление по номеру (Т4.3) ────────────────────────────────────
+
+    // недозвон соседке через минуту после разговора с Анной: по времени ближе он
+    private val соседка = CallLogEntry("+79990000001", "Борис", "outgoing", звонок.endMs + 60_000, 0)
+    private val uriACR = "content://com.android.externalstorage.documents/document/" +
+        "primary%3ARecord%2F2026%2F09%2F02%2F%2B79990000000%2Fcall.m4a call.m4a"
+
+    @Test
+    fun `номер в пути записи перебивает соседа по времени`() {
+        // mtime — у недозвона соседке, но каталог ACR назван номером Анны
+        val ms = соседка.startMs
+        val м = CallLogMatcher.match(listOf(звонок, соседка), ms, uriACR)
+        assertEquals(звонок, м?.entry)
+        assertEquals("number", м?.by)
+        assertEquals("без подсказки — как раньше, ближайший", соседка, CallLogMatcher.nearest(listOf(звонок, соседка), ms))
+    }
+
+    @Test
+    fun `номер в относительном пути медиатеки — тоже подсказка`() {
+        // медиатека отдаёт uri без пути (`media/42`), номер ACR — в RELATIVE_PATH
+        val изМедиатеки = Recording("content://media/external/audio/media/42", "call.m4a", 4_210_688,
+            соседка.startMs, "com.nll.cb", "Music/Recordings/2026/09/02/+79990000000/")
+        val м = CallLogMatcher.match(listOf(звонок, соседка), изМедиатеки.modifiedMs, изМедиатеки.подсказка())
+        assertEquals(звонок, м?.entry)
+        assertEquals("number", м?.by)
+        val безПути = изМедиатеки.copy(path = null)
+        assertEquals("без пути — по времени", соседка,
+            CallLogMatcher.match(listOf(звонок, соседка), безПути.modifiedMs, безПути.подсказка())?.entry)
+    }
+
+    @Test
+    fun `нет номера в подсказке — по времени, и это сказано`() {
+        val м = CallLogMatcher.match(listOf(звонок, соседка), звонок.endMs, "content://media/external/audio/media/42 call.m4a")
+        assertEquals(звонок, м?.entry)
+        assertEquals("time", м?.by)
+        assertNull(CallLogMatcher.match(listOf(звонок), звонок.endMs + CallLogMatcher.WINDOW_MS + 1, uriACR))
+    }
+
+    @Test
+    fun `номер вне окна по времени не притягивается и по номеру`() {
+        val давно = звонок.copy(startMs = начало - 3_600_000)
+        assertNull(CallLogMatcher.match(listOf(давно), начало + 7_200_000, uriACR))
+    }
+
+    @Test
+    fun `скрытый номер и короткие цифры номером не считаются`() {
+        assertNull(CallLogMatcher.хвостНомера(null))
+        assertNull(CallLogMatcher.хвостНомера("123456"))
+        assertEquals("9990000000", CallLogMatcher.хвостНомера("+7 (999) 000-00-00"))
+        assertEquals("9990000000", CallLogMatcher.хвостНомера("89990000000"))
+        assertFalse(CallLogMatcher.номерВ(uriACR, null))
+        assertTrue(CallLogMatcher.номерВ(uriACR, "8 999 000 00 00"))
+        assertTrue("без %XX тоже", CallLogMatcher.номерВ("2026/09/02/+79990000000/call.m4a", "+79990000000"))
+        assertFalse("кривой процент не роняет", CallLogMatcher.номерВ("%ZZ nope", "+79990000000"))
+        assertFalse("цифры через `/` не склеиваются",
+            CallLogMatcher.номерВ("2026/09/9900000/00.m4a", "+79990000000"))
+        assertTrue("номер с пробелами и дефисами в имени — один кусок",
+            CallLogMatcher.номерВ("call +7 (999) 000-00-00 in.m4a", "+79990000000"))
+    }
+
+    @Test
+    fun `непрозрачный uri медиатеки — не номер`() {
+        // номер строки медиатеки совпал бы с коротким местным номером
+        val запись = Recording("content://media/external/audio/media/1234567", "call.m4a", 1024, начало)
+        assertEquals("call.m4a", запись.подсказка())
+        val местный = звонок.copy(number = "1234567")
+        assertEquals("time", CallLogMatcher.match(listOf(местный), начало, запись.подсказка())?.by)
+        assertTrue("uri SAF несёт путь — остаётся", файл.подсказка().startsWith("uri://1/"))
+    }
+
+    @Test
+    fun `два звонка на один номер в окне — уверенность по времени`() {
+        // разговор и перезвон на тот же номер сразу после: номер не различает
+        val перезвон = звонок.copy(direction = "outgoing", startMs = звонок.endMs, durationS = 0)
+        val м = CallLogMatcher.match(listOf(звонок, перезвон), звонок.endMs, uriACR)
+        assertEquals("time", м?.by)
+        assertTrue(м?.entry == звонок || м?.entry == перезвон)
+        assertEquals("а соседку номер всё равно отсекает", "time",
+            CallLogMatcher.match(listOf(соседка, звонок, перезвон), перезвон.startMs, uriACR)?.by)
+        assertNotEquals(соседка, CallLogMatcher.match(listOf(соседка, звонок, перезвон), перезвон.startMs, uriACR)?.entry)
+    }
+
+    @Test
+    fun `событие несёт чем подтверждено сопоставление`() {
+        val p = EventJson.build(файл, звонок, ША, "m4a", null, мск, "number").getJSONObject("payload")
+        assertEquals("number", p.getString("match"))
+        val q = EventJson.build(файл, звонок, ША, "m4a", null, мск).getJSONObject("payload")
+        assertEquals("по умолчанию — по времени", "time", q.getString("match"))
+        assertFalse(EventJson.build(файл, null, ША, "m4a", null, мск).getJSONObject("payload").has("match"))
+    }
+
+    @Test
+    fun `строка сопоставления в отчёте называет способ`() {
+        assertEquals("<контакт> · incoming · 1091 с · по номеру", Затирание.контакт(звонок, "number"))
+        assertEquals("<контакт> · incoming · 1091 с · по времени", Затирание.контакт(звонок, "time"))
+        assertEquals("<контакт> · incoming · 1091 с", Затирание.контакт(звонок))
+    }
+
     // ── готовность файла ──────────────────────────────────────────────────
 
     @Test

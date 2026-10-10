@@ -92,8 +92,9 @@ data class Job(
     val seenAtMs: Long = 0,
     val error: String? = null,
     val producer: String? = null,
+    val path: String? = null,
 ) {
-    fun recording() = Recording(id, name, sizeBytes, modifiedMs, producer)
+    fun recording() = Recording(id, name, sizeBytes, modifiedMs, producer, path)
 }
 
 /**
@@ -102,14 +103,17 @@ data class Job(
  * Очередь обязана пережить reboot и force-stop (ТЗ §5.1E), поэтому она на
  * диске, а не в памяти воркера.
  */
-class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 3) {
+class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 4) {
 
     private val JOBS = """create table jobs(
                  id text primary key, name text, size integer, mtime integer,
                  state text, attempts integer default 0, sha256 text, event_id text,
                  seen_size integer default -1, seen_mtime integer default -1,
-                 seen_at integer default 0, error text, producer text, updated integer)"""
-    private val MESSAGES = """create table messages(
+                 seen_at integer default 0, error text, producer text, updated integer,
+                 path text)"""
+    // `if not exists`: после отката APK ниже схемы 3 и возврата таблица уже
+    // есть, а `onDowngrade` её не трогает (Codex по #136, круг 5)
+    private val MESSAGES = """create table if not exists messages(
                  id text primary key, source text, body text, state text,
                  attempts integer default 0, error text, at integer, updated integer)"""
 
@@ -123,7 +127,29 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
     override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
         if (old < 2) { db.execSQL("drop table if exists jobs"); db.execSQL(JOBS) }
         if (old < 3) db.execSQL(MESSAGES)
+        // путь медиатеки для сопоставления по номеру (Т4.3); у старых работ
+        // его нет — они сопоставятся по времени, как и раньше. Колонка уже
+        // есть, если таблицу только что пересоздали с версии 1 или если базу
+        // открывал откаченный APK (`onDowngrade` колонок не трогает) — второй
+        // раз её не добавить (Codex по #136, круги 2–3)
+        if (old < 4 && !естьКолонка(db, "jobs", "path")) {
+            db.execSQL("alter table jobs add column path text")
+        }
     }
+
+    /** Откат APK на прежнюю версию: лишняя колонка или таблица старому коду
+     *  не мешают — он называет колонки явно, а новые допускают null. Штатный
+     *  `onDowngrade` бросает, и очередь не открылась бы вовсе (Codex по
+     *  #136, круг 3). Номер версии при этом опускается, и следующий апгрейд
+     *  снова пройдёт через `onUpgrade` — потому там проверка колонки. */
+    override fun onDowngrade(db: SQLiteDatabase, old: Int, new: Int) {}
+
+    private fun естьКолонка(db: SQLiteDatabase, таблица: String, колонка: String): Boolean =
+        db.rawQuery("pragma table_info($таблица)", null).use { c ->
+            var есть = false
+            while (c.moveToNext()) if (c.getString(1) == колонка) есть = true
+            есть
+        }
 
     /**
      * Файл увиден сканом. Новый — заводим работу; знакомый — обновляем приметы,
@@ -144,6 +170,7 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
                     put("state", JobState.NEW.name)
                     put("seen_size", rec.sizeBytes); put("seen_mtime", rec.modifiedMs)
                     put("seen_at", nowMs); put("producer", rec.producer); put("updated", nowMs)
+                    put("path", rec.path)
                 })
                 return
             }
@@ -171,13 +198,14 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         val out = mutableListOf<Job>()
         readableDatabase.rawQuery(
             "select id,name,size,mtime,state,attempts,sha256,event_id,seen_size,seen_mtime," +
-                "seen_at,error,producer from jobs where state not in (?,?) order by mtime",
+                "seen_at,error,producer,path from jobs where state not in (?,?) order by mtime",
             arrayOf(JobState.DONE.name, JobState.FAILED.name)
         ).use { c ->
             while (c.moveToNext()) out += Job(
                 c.getString(0), c.getString(1), c.getLong(2), c.getLong(3),
                 JobState.valueOf(c.getString(4)), c.getInt(5), c.getString(6), c.getString(7),
                 c.getLong(8), c.getLong(9), c.getLong(10), c.getString(11), c.getString(12),
+                c.getString(13),
             )
         }
         return out
