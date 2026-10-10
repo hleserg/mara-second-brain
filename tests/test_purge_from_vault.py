@@ -33,7 +33,7 @@ path=""
 for a in "$@"; do case $a in --*) ;; *) path=${a#r2:bucket}; path=${path#/};; esac; done
 case $cmd in
   lsf)
-    if [ -f "$FAKE_R2/$path" ]; then basename "$path"
+    if [ -f "$FAKE_R2/$path" ]; then basename -- "$path"
     elif [ -d "$FAKE_R2/$path" ]; then ls -1 "$FAKE_R2/$path"
     else exit "${FAKE_R2_MISSING_CODE:-0}"; fi ;;
   deletefile)
@@ -218,6 +218,20 @@ class Вычистка(unittest.TestCase):
             журнал = f.read()
         self.assertIn("r2:bucket/secret/key.md", журнал)
         self.assertNotIn("./", журнал)
+
+    def test_путь_с_ведущим_дефисом(self):
+        # `basename -secret.md` без `--` читает путь как ключ и молчит:
+        # файл в R2 прошёл бы как «нет», история переписана, код ноль
+        # (Codex, круг 1). Такой путь — обычный относительный, чистится.
+        self._пишу("-secret.md", "token\n")
+        self._коммит("дефис")
+        self._в_r2("-secret.md")
+        r = self._прогон("-secret.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self._есть_в_r2("-secret.md"))
+        self.assertFalse(self._в_истории("-secret.md"))
+        self.assertIn("deletefile", self._вызовы())
+        self.assertIn("  R2:       -secret.md\n", r.stdout)
 
     def test_каталог_и_чужие_пути_отвергаются_до_изменений(self):
         self._в_r2("secret/key.md")

@@ -50,7 +50,7 @@ ERR=$(mktemp); trap 'rm -f "$ERR"' EXIT
   local out rc=0
   out=$("$RCLONE" lsf --files-only "$REMOTE/$1" 2>"$ERR") || rc=$?
   case $rc in
-    0) grep -qxF -- "$(basename "$1")" <<<"$out" ;;
+    0) grep -qxF -- "$(basename -- "$1")" <<<"$out" ;;
     3|4) return 1 ;;
     *) echo "  R2 не ответил ($1, код $rc): $(tr '\n' ' ' <"$ERR")" >&2; return 2 ;;
   esac
