@@ -228,8 +228,7 @@ class Шаг(unittest.TestCase):
         self.assertIsNone(extr["prompt_version"])
         self.assertEqual(extr["config"]["rule"], "outcome")
         self.assertEqual((extr["config"]["direction"], extr["config"]["duration_s"],
-                          extr["config"]["words"]),
-                         ("outgoing", 0, len(ce.transcript_text(self.segs).split())))
+                          extr["config"]["words"]), ("outgoing", 0, 2))
         self.assertEqual(extr["input_sha256"], hashlib.sha256(json.dumps(
             extr["config"], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest())
         row = self.con.execute("select extractor, prompt_version from extractions "
@@ -259,6 +258,36 @@ class Шаг(unittest.TestCase):
         self.assertEqual(extr["outcome"], "uncertain")
         self.assertEqual(extr["extractor"], ce.MODEL)
         self.assertEqual(extr["prompt_version"], ce.PROMPT_VERSION)
+
+    def test_метки_сегментов_словами_не_считаются(self):
+        """Шесть сегментов по пять слов — тридцать слов речи; с метками
+        промпта было бы 42, и порог зависел бы от нарезки (Codex)."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "outgoing", "duration_s": 0}), self.eid))
+        self.con.commit()
+        нарезка = [{"segment_id": "s%04d" % i, "start_ms": i * 5000, "end_ms": i * 5000 + 4000,
+                    "speaker": "unknown-A", "text": "пять слов в одном сегменте"}
+                   for i in range(1, 7)]
+        self.asr.записать_сегменты(self.con, self.eid, None, нарезка)
+        было = ce.ask_model
+        ce.ask_model = lambda *a, **k: (_ for _ in ()).throw(AssertionError("модель позвали"))
+        try:
+            ce.run(self.eid, self.dir)
+        finally:
+            ce.ask_model = было
+        extr = ce.прочитать_извлечение(self.con, self.dir, self.eid)
+        self.assertEqual((extr["outcome"], extr["config"]["words"]), ("no-answer", 30))
+
+    def test_голосовая_почта_извлекается(self):
+        """`missed` с длительностью > 0 — голосовая почта (`Device.callLog`):
+        в ней бывает просьба, модель зовётся, исход остаётся `missed`."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "missed", "duration_s": 30}), self.eid))
+        self.con.commit()
+        extr = self.прогон({"requests": []})
+        self.assertEqual(extr["outcome"], "missed")
+        self.assertEqual(extr["extractor"], ce.MODEL)
+        self.assertNotIn("rule", extr["config"])
 
     def test_состоявшийся_звонок_несёт_исход_в_ревизии(self):
         self.con.execute("update events set payload_json=? where id=?",
