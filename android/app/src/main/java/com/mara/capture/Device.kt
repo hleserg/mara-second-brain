@@ -55,6 +55,7 @@ object Device {
                     Uri.withAppendedPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
                         it.getLong(0).toString()).toString(),
                     it.getString(1) ?: "?", it.getLong(2), mtime, it.getString(5),
+                    it.getString(4),   // RELATIVE_PATH: у ACR тут каталог с номером (Т4.3)
                 )
             }
         }

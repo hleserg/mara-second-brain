@@ -235,7 +235,7 @@ class Шаг(unittest.TestCase):
                          {"direction": "outgoing", "duration_s": 0, "words": 0,
                           "journal": "no-answer", "match": None})
         self.assertNotIn("model", extr["config"], "настроек модели у ревизии правила нет")
-        self.assertEqual(extr["rules_version"], 2, "правило исхода — новая версия правил")
+        self.assertEqual(extr["rules_version"], ce.RULES_VERSION, "правило исхода — текущая версия правил")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(json.dumps(
             extr["config"], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest())
         row = self.con.execute("select extractor, prompt_version from extractions "

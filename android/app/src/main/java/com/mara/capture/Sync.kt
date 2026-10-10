@@ -106,8 +106,8 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 return null
             }
             JobState.HASHED -> {
-                // подсказка — uri и имя файла: у ACR номер в каталоге (Т4.3)
-                val м = CallLogMatcher.match(журнал, job.modifiedMs, job.id + " " + job.name)
+                // подсказка — uri, путь медиатеки и имя: у ACR номер в каталоге (Т4.3)
+                val м = CallLogMatcher.match(журнал, job.modifiedMs, job.recording().подсказка())
                 val body = EventJson.build(job.recording(), м?.entry, job.sha256!!,
                     Device.ext(job.recording()), job.producer, ZoneId.systemDefault(), м?.by)
                 val r = api.postEvent(body)

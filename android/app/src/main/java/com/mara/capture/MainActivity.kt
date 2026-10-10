@@ -218,7 +218,7 @@ class MainActivity : AppCompatActivity() {
         val папка = Device.folder(this, s.folderUri)
         val последняя = (медиатека + папка).maxByOrNull { it.modifiedMs }
         val журнал = Device.callLog(this, System.currentTimeMillis() - 7 * 24 * 3600_000L)
-        val совпало = последняя?.let { CallLogMatcher.match(журнал, it.modifiedMs, it.id + " " + it.name) }
+        val совпало = последняя?.let { CallLogMatcher.match(журнал, it.modifiedMs, it.подсказка()) }
         Затирание.текст(listOf(
             "модель: ${Build.MODEL} (${Build.MANUFACTURER})",
             "сборка: ${Build.DISPLAY}, Android ${Build.VERSION.RELEASE}",

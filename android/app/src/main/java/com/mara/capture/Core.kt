@@ -21,7 +21,13 @@ data class Recording(
     val sizeBytes: Long,
     val modifiedMs: Long,
     val producer: String? = null,   // пакет, записавший файл; медиатека знает, SAF — нет
-)
+    val path: String? = null,       // относительный путь из медиатеки: у ACR в нём номер; у SAF путь уже в uri
+) {
+    /** Подсказка для `CallLogMatcher.match`: всё, где рекордер мог написать
+     *  номер — uri (SAF несёт путь в нём), относительный путь медиатеки, имя.
+     *  На сервер не уезжает: номер из пути — тот же номер, что в журнале. */
+    fun подсказка(): String = listOfNotNull(id, path, name).joinToString(" ")
+}
 
 /** Строка журнала звонков. Адресную книгу целиком не трогаем (ТЗ §5.1B). */
 data class CallLogEntry(

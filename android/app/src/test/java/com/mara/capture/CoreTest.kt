@@ -333,6 +333,19 @@ class CoreTest {
     }
 
     @Test
+    fun `номер в относительном пути медиатеки — тоже подсказка`() {
+        // медиатека отдаёт uri без пути (`media/42`), номер ACR — в RELATIVE_PATH
+        val изМедиатеки = Recording("content://media/external/audio/media/42", "call.m4a", 4_210_688,
+            соседка.startMs, "com.nll.cb", "Music/Recordings/2026/09/02/+79990000000/")
+        val м = CallLogMatcher.match(listOf(звонок, соседка), изМедиатеки.modifiedMs, изМедиатеки.подсказка())
+        assertEquals(звонок, м?.entry)
+        assertEquals("number", м?.by)
+        val безПути = изМедиатеки.copy(path = null)
+        assertEquals("без пути — по времени", соседка,
+            CallLogMatcher.match(listOf(звонок, соседка), безПути.modifiedMs, безПути.подсказка())?.entry)
+    }
+
+    @Test
     fun `нет номера в подсказке — по времени, и это сказано`() {
         val м = CallLogMatcher.match(listOf(звонок, соседка), звонок.endMs, "content://media/external/audio/media/42 call.m4a")
         assertEquals(звонок, м?.entry)
