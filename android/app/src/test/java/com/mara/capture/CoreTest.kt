@@ -369,6 +369,32 @@ class CoreTest {
         assertTrue(CallLogMatcher.номерВ(uriACR, "8 999 000 00 00"))
         assertTrue("без %XX тоже", CallLogMatcher.номерВ("2026/09/02/+79990000000/call.m4a", "+79990000000"))
         assertFalse("кривой процент не роняет", CallLogMatcher.номерВ("%ZZ nope", "+79990000000"))
+        assertFalse("цифры через `/` не склеиваются",
+            CallLogMatcher.номерВ("2026/09/9900000/00.m4a", "+79990000000"))
+        assertTrue("номер с пробелами и дефисами в имени — один кусок",
+            CallLogMatcher.номерВ("call +7 (999) 000-00-00 in.m4a", "+79990000000"))
+    }
+
+    @Test
+    fun `непрозрачный uri медиатеки — не номер`() {
+        // номер строки медиатеки совпал бы с коротким местным номером
+        val запись = Recording("content://media/external/audio/media/1234567", "call.m4a", 1024, начало)
+        assertEquals("call.m4a", запись.подсказка())
+        val местный = звонок.copy(number = "1234567")
+        assertEquals("time", CallLogMatcher.match(listOf(местный), начало, запись.подсказка())?.by)
+        assertTrue("uri SAF несёт путь — остаётся", файл.подсказка().startsWith("uri://1/"))
+    }
+
+    @Test
+    fun `два звонка на один номер в окне — уверенность по времени`() {
+        // разговор и перезвон на тот же номер сразу после: номер не различает
+        val перезвон = звонок.copy(direction = "outgoing", startMs = звонок.endMs, durationS = 0)
+        val м = CallLogMatcher.match(listOf(звонок, перезвон), звонок.endMs, uriACR)
+        assertEquals("time", м?.by)
+        assertTrue(м?.entry == звонок || м?.entry == перезвон)
+        assertEquals("а соседку номер всё равно отсекает", "time",
+            CallLogMatcher.match(listOf(соседка, звонок, перезвон), перезвон.startMs, uriACR)?.by)
+        assertNotEquals(соседка, CallLogMatcher.match(listOf(соседка, звонок, перезвон), перезвон.startMs, uriACR)?.entry)
     }
 
     @Test

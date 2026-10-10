@@ -25,8 +25,17 @@ data class Recording(
 ) {
     /** Подсказка для `CallLogMatcher.match`: всё, где рекордер мог написать
      *  номер — uri (SAF несёт путь в нём), относительный путь медиатеки, имя.
-     *  На сервер не уезжает: номер из пути — тот же номер, что в журнале. */
-    fun подсказка(): String = listOfNotNull(id, path, name).joinToString(" ")
+     *  Uri медиатеки — непрозрачный номер строки (`media/1234567`), не путь:
+     *  в подсказку не идёт, иначе он сошёл бы за короткий номер (Codex по
+     *  #136, круг 4). Куски разделены `/`, как в пути: цифры через границу
+     *  кусков не склеиваются. На сервер не уезжает: номер из пути — тот же
+     *  номер, что в журнале. */
+    fun подсказка(): String =
+        listOfNotNull(id.takeUnless { it.startsWith(МЕДИАТЕКА) }, path, name).joinToString("/")
+
+    companion object {
+        const val МЕДИАТЕКА = "content://media/"
+    }
 }
 
 /** Строка журнала звонков. Адресную книгу целиком не трогаем (ТЗ §5.1B). */
@@ -229,13 +238,16 @@ object CallLogMatcher {
      * подсказке — он надёжнее любого соседа по минутам; нет такого — как
      * раньше, ближайший по времени. `by` уезжает на сервер: сопоставление
      * по времени не даёт права называть запись с речью недозвоном, по номеру
-     * — даёт.
+     * — даёт. Два звонка на один номер в окне (разговор и перезвон следом)
+     * номер не различает: берётся ближайший, но уверенность — `time`
+     * (Codex по #136, круг 4).
      */
     fun match(entries: List<CallLogEntry>, ms: Long, hint: String? = null): Match? {
         val окно = entries.filter { distance(it, ms) <= WINDOW_MS }
         if (hint != null) {
-            окно.filter { номерВ(hint, it.number) }.minByOrNull { distance(it, ms) }
-                ?.let { return Match(it, "number") }
+            val поНомеру = окно.filter { номерВ(hint, it.number) }
+            поНомеру.minByOrNull { distance(it, ms) }
+                ?.let { return Match(it, if (поНомеру.size == 1) "number" else "time") }
         }
         return окно.minByOrNull { distance(it, ms) }?.let { Match(it, "time") }
     }
@@ -245,15 +257,19 @@ object CallLogMatcher {
     fun хвостНомера(number: String?): String? =
         number?.filter { it.isDigit() }?.takeLast(10)?.takeIf { it.length >= 7 }
 
-    /** Есть ли номер звонка в подсказке (uri или имя файла, с %XX-кодировкой).
-     *  Подсказка сводится к одной строке цифр: рекордеры пишут номер в имя с
-     *  пробелами, скобками и дефисами. Цена — дата и счётчики из пути тоже
-     *  там; ложное совпадение требует хвоста в десять цифр на их стыке. */
+    /** Символы, из которых рекордеры собирают номер: цифры, пробелы, скобки,
+     *  `+` и дефис. Всё остальное (`/`, `_`, `.`, буквы) режет подсказку на
+     *  куски — дата каталога, счётчик в имени и номер не склеиваются. */
+    private val НЕ_НОМЕР = Regex("[^0-9 ()+-]+")
+
+    /** Есть ли номер звонка в подсказке (uri, путь или имя файла, с
+     *  %XX-кодировкой): хвост ищется внутри одного куска, не в склейке всех
+     *  цифр подсказки (Codex по #136, круг 4). */
     fun номерВ(hint: String, number: String?): Boolean {
         val хвост = хвостНомера(number) ?: return false
         val раскодирован = runCatching { java.net.URLDecoder.decode(hint, "UTF-8") }
             .getOrDefault(hint)
-        return раскодирован.filter { it.isDigit() }.contains(хвост)
+        return раскодирован.split(НЕ_НОМЕР).any { кусок -> кусок.filter { it.isDigit() }.contains(хвост) }
     }
 }
 
