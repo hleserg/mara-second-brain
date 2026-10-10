@@ -22,6 +22,7 @@ import mara_ingest as mi
 import context_pack
 import call_extract
 import ledger_import as li
+import vault_manifest
 from vault_common import canon_map, linkify, locked, scrub, yaml_str
 
 OWNER = os.environ.get("MARA_OWNER", "sergey")
@@ -606,6 +607,8 @@ def run(event_id, vault, root=None):
         # а там её видно.
         raise RuntimeError("карточки записаны, но в реестр не легли (спор): %s"
                            % ", ".join(спорные))
+    # §4.8/§5.2: манифест с хешами — после карточек, контрольная точка — после него
+    vault_manifest.записать(con, vault, когда)
     con.execute("update events set state='projected' where id=?", (event_id,))
     # пакет для Мары пересобираем сразу: обязательство, о котором она узнает
     # только после ночного крона, — это обязательство, о котором она не узнает
@@ -1032,6 +1035,10 @@ def apply_correction(vault, event, con=None):
             if записано:
                 _вернуть_карточку(vault, записано["out"], записано["found"])
             raise
+        # §5.2: карточка и строка легли — манифест и контрольная точка следом,
+        # ещё под флоком: правка словами меняет проекцию, как и проектор звонка
+        if con is not None and (out.get("applied") or out.get("created")):
+            vault_manifest.записать(con, vault, когда)
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
     return out

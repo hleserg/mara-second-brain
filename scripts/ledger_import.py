@@ -203,6 +203,11 @@ def run(con, vault=None, dry_run=False):
             итог[счётчик if новый else "обновлено"] += 1
             итог["правок"] += правок
             итог["evidence"] += ссылок
+    if not dry_run:
+        # перенос меняет `projections` (хеши, версии) — манифест и контрольная
+        # точка за ним (§4.8/§5.2, Т2.6); проба ничего не пишет
+        import vault_manifest
+        vault_manifest.записать(con, vault)
     return итог
 
 
@@ -448,7 +453,8 @@ def _проекция_и_история(con, rel, вид, oid, sha, fm, текс
     # (ревью PR #117, P2-2) — колонки проектора Т2.6, которые перенос не
     # ведёт и трогать не вправе
     # `ledger_version` — версия объекта, которую эта проекция отражает
-    # (§4.8, Т2.6); `projector_version`/`manifest_hash` ставит проектор
+    # (§4.8, Т2.6); `projector_version` ставит проектор, `manifest_hash` —
+    # `vault_manifest.записать` в конце прогона, когда все строки на месте
     версия = (con.execute("select version from commitments where id=?", (oid,)).fetchone()
               or [None])[0] if вид == "commitment" else None
     con.execute("insert into projections"
