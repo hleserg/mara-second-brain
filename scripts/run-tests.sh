@@ -59,13 +59,13 @@ else
   echo "FAIL install/mara-context"; echo "$out" | tail -3 | sed 's/^/     /'; fail=1
 fi
 
-# Из семнадцати шелл-скриптов тесты исполняют четыре: vault-backup.sh и
+# Из восемнадцати шелл-скриптов тесты исполняют четыре: vault-backup.sh и
 # vault-restore-test.sh (test_backup_shell), install-cron.sh
 # (test_install_cron), purge-from-vault.sh (test_purge_from_vault, на
 # игрушечном волте с подделками rclone и git-filter-repo). Но и там
 # разбирается ровно тот кусок, докуда доходит исполнение: битый `case` в
 # хвосте vault-backup.sh оставляет набор зелёным, потому что скрипт выходит
-# раньше по exit 1. Остальные тринадцать не
+# раньше по exit 1. Остальные четырнадцать не
 # гоняет ни один тест; большинство правят руками и запускают на doctor, где
 # опечатка видна ровно в тот момент, когда скрипт уже нужен.
 #

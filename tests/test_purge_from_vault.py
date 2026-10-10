@@ -7,7 +7,9 @@
 игрушечном волте с подделками `rclone` и `git-filter-repo`: подделка R2 —
 каталог, подделка истории — `git filter-branch` с той же сигнатурой.
 Отказ `vault-backup.sh` скрипт раньше глотал через `|| echo`: старые бандлы
-снесены, нового нет, код ноль (Codex, PR #142)."""
+снесены, нового нет, код ноль (Codex, PR #142). Проверка истории через
+`git log | grep -q .` под pipefail на длинной истории ловила SIGPIPE и
+читалась как «чисто» (ревью PR #143)."""
 import os, shutil, stat, subprocess, tempfile, unittest
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -19,6 +21,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 # отвечать на lsf отсутствующего пути (по умолчанию 0 и пусто, как S3);
 # $FAKE_R2_DELETE_FAILS=1 — deletefile отказывает, файл остаётся;
 # $FAKE_R2_DELETE_LIES=1 — deletefile отчитывается нулём, файл остаётся.
+# Флаги вида --x и --x=y пропускаются, путь — последний аргумент без тире.
 RCLONE = r'''#!/usr/bin/env bash
 echo "$*" >>"$FAKE_R2_LOG"
 n=$(wc -l <"$FAKE_R2_LOG")
@@ -43,12 +46,18 @@ esac
 '''
 
 # Подделка git-filter-repo: те же `--invert-paths --path X ... --force`.
+# Пути квотируются (`%q`), каталоги не поддерживаются (`git rm` без `-r`) —
+# скрипт их и не пропускает. $FAKE_FR_NOOP=1 — ничего не переписывать:
+# так проверяется, что финальная проверка истории не врёт.
 FR = r'''#!/usr/bin/env bash
 set -e
-paths=()
-while [ $# -gt 0 ]; do case $1 in --path) paths+=("$2"); shift 2;; *) shift;; esac; done
+[ -z "${FAKE_FR_NOOP:-}" ] || exit 0
+paths=""
+while [ $# -gt 0 ]; do
+  case $1 in --path) paths="$paths $(printf '%q' "$2")"; shift 2;; *) shift;; esac
+done
 FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f \
-  --index-filter "git rm -q --cached --ignore-unmatch -- ${paths[*]}" -- --all >/dev/null 2>&1
+  --index-filter "git rm -q --cached --ignore-unmatch -- $paths" -- --all >/dev/null 2>&1
 rm -rf .git/refs/original
 '''
 
@@ -80,27 +89,27 @@ class Вычистка(unittest.TestCase):
         _git(self.vault, "init", "-q", "-b", "main")
         self._пишу("a.md", "обычная карточка\n")
         self._пишу("secret/key.md", "token=первый\n")
-        _git(self.vault, "add", "-A")
-        _git(self.vault, "commit", "-q", "-m", "раз")
+        self._коммит("раз")
         self._пишу("secret/key.md", "token=второй\n")
-        _git(self.vault, "add", "-A")
-        _git(self.vault, "commit", "-q", "-m", "два")
+        self._коммит("два")
         pass_ = os.path.join(self.tmp, "pass")
         with open(pass_, "w") as f:
             f.write("фраза\n")
         os.chmod(pass_, stat.S_IRUSR | stat.S_IWUSR)
         self.бандлы = os.path.join(self.tmp, "bundles")
         os.makedirs(self.бандлы)
+        self.mirror = os.path.join(self.tmp, "mirror.git")
+        # Всё, что скрипт и vault-backup.sh читают из окружения, прибито:
+        # KEEP из окружения гейта с нулём снёс бы только что собранный бандл.
         self.env = dict(
-            os.environ, VAULT=self.vault,
-            MIRROR=os.path.join(self.tmp, "mirror.git"), REMOTE="r2:bucket",
+            os.environ, VAULT=self.vault, MIRROR=self.mirror, REMOTE="r2:bucket",
             RCLONE=os.path.join(bin_, "rclone"),
             FR=os.path.join(bin_, "git-filter-repo"),
-            BUNDLES=self.бандлы, TARGETS=self.бандлы, PASS=pass_,
+            TARGETS=self.бандлы, PASS=pass_, KEEP="8",
             WORK=os.path.join(self.tmp, "work"), MARA_BACKUP_ALLOW_SAME_DEV="1",
             FAKE_R2=self.r2, FAKE_R2_LOG=self.log, **АВТОР)
-        for к in ("FAKE_R2_FAIL_AFTER", "FAKE_R2_MISSING_CODE",
-                  "FAKE_R2_DELETE_FAILS", "FAKE_R2_DELETE_LIES"):
+        for к in ("BUNDLES", "FAKE_R2_FAIL_AFTER", "FAKE_R2_MISSING_CODE",
+                  "FAKE_R2_DELETE_FAILS", "FAKE_R2_DELETE_LIES", "FAKE_FR_NOOP"):
             self.env.pop(к, None)
 
     def tearDown(self):
@@ -109,6 +118,10 @@ class Вычистка(unittest.TestCase):
     def _пишу(self, путь, текст):
         with open(os.path.join(self.vault, путь), "w", encoding="utf-8") as f:
             f.write(текст)
+
+    def _коммит(self, сообщение):
+        _git(self.vault, "add", "-A")
+        _git(self.vault, "commit", "-q", "-m", сообщение)
 
     def _в_r2(self, путь, текст="token=второй\n"):
         p = os.path.join(self.r2, путь)
@@ -120,16 +133,21 @@ class Вычистка(unittest.TestCase):
         return subprocess.run(["bash", СКРИПТ, *файлы], capture_output=True,
                               text=True, env=dict(self.env, **env), timeout=120)
 
-    def _в_истории(self, путь):
-        return bool(_git(self.vault, "log", "--all", "--full-history",
-                         "--oneline", "--", путь).strip())
+    def _в_истории(self, путь, репо=None):
+        return bool(_git(репо or self.vault, "log", "--all", "--full-history",
+                         "--format=%H", "--", путь).strip())
 
     def _вызовы(self):
+        if not os.path.exists(self.log):
+            return []
         with open(self.log, encoding="utf-8") as f:
             return [с.split()[0] for с in f.read().splitlines()]
 
     def _есть_в_r2(self, путь):
         return os.path.exists(os.path.join(self.r2, путь))
+
+    def _бандлы(self):
+        return [f for f in os.listdir(self.бандлы) if f.endswith(".bundle.gpg")]
 
     def test_обычный_ход_удаляет_из_r2_и_из_истории(self):
         self._в_r2("secret/key.md")
@@ -141,7 +159,11 @@ class Вычистка(unittest.TestCase):
         self.assertIn("чисто в R2:  secret/key.md", r.stdout)
         self.assertIn("чисто в git: secret/key.md", r.stdout)
         self.assertIn("deletefile", self._вызовы())
-        self.assertTrue(os.path.isdir(self.env["MIRROR"]))
+        # Зеркало несёт новую историю, а не старую: тот же HEAD, файла нет.
+        self.assertFalse(self._в_истории("secret/key.md", self.mirror))
+        self.assertEqual(_git(self.mirror, "rev-parse", "HEAD"),
+                         _git(self.vault, "rev-parse", "HEAD"))
+        self.assertEqual(len(self._бандлы()), 1, r.stdout + r.stderr)
 
     def test_файла_в_r2_уже_нет(self):
         r = self._прогон("secret/key.md")
@@ -153,25 +175,67 @@ class Вычистка(unittest.TestCase):
     def test_код_3_и_4_от_lsf_это_нет_файла(self):
         # На отсутствующий путь rclone отвечает по-разному: S3 — пусто и
         # ноль, другие бэкенды — кодом 3 (каталога нет) или 4 (файла нет).
-        # Все три — «нет», а не отказ.
+        # Все три — «нет», а не отказ. Волт между кодами — свежий, иначе
+        # второй прогон шёл бы по уже вычищенной истории.
         for код in ("3", "4"):
             with self.subTest(код=код):
-                if os.path.exists(self.log):
-                    os.remove(self.log)
+                if код != "3":
+                    self.tearDown()
+                    self.setUp()
                 r = self._прогон("secret/key.md", FAKE_R2_MISSING_CODE=код)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertIn("(уже нет)", r.stdout)
                 self.assertIn("чисто в R2", r.stdout)
+                self.assertFalse(self._в_истории("secret/key.md"))
 
-    def test_соседний_файл_в_каталоге_не_считается_остатком(self):
-        # lsf по пути без файла может вернуть содержимое каталога с тем же
-        # именем; считается только точное имя.
+    def test_содержимое_каталога_в_r2_не_считается_остатком(self):
+        # lsf по пути, под которым в бакете лежит «каталог» с тем же именем
+        # или соседние файлы, возвращает их список; считается только точное
+        # имя. Файл ушёл, соседи остались, код ноль.
         self._в_r2("secret/key.md")
         self._в_r2("secret/key.md.bak")
         r = self._прогон("secret/key.md")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("чисто в R2:  secret/key.md", r.stdout)
         self.assertTrue(self._есть_в_r2("secret/key.md.bak"))
+        # Теперь по пути файла в бакете «каталог»: lsf отвечает его
+        # содержимым, точного имени там нет — это «нет», не остаток.
+        self._в_r2("secret/key.md/other")
+        r = self._прогон("secret/key.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("(уже нет)", r.stdout)
+        self.assertIn("чисто в R2:  secret/key.md", r.stdout)
+
+    def test_путь_с_точкой_и_слешем_нормализуется(self):
+        # `./secret/key.md` для git-filter-repo — не `secret/key.md`
+        # (сравнение строк), а R2 ответил бы «нет»: скрипт срезает `./`.
+        self._в_r2("secret/key.md")
+        r = self._прогон("././secret/key.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self._есть_в_r2("secret/key.md"))
+        self.assertFalse(self._в_истории("secret/key.md"))
+        with open(self.log, encoding="utf-8") as f:
+            журнал = f.read()
+        self.assertIn("r2:bucket/secret/key.md", журнал)
+        self.assertNotIn("./", журнал)
+
+    def test_каталог_и_чужие_пути_отвергаются_до_изменений(self):
+        self._в_r2("secret/key.md")
+        for путь in ("secret", "secret/", "/srv/vault/secret/key.md",
+                     "../x", "secret/../a.md", ""):
+            with self.subTest(путь=путь):
+                r = self._прогон(путь)
+                self.assertEqual(r.returncode, 2, путь + r.stdout + r.stderr)
+        self.assertEqual(self._вызовы(), [])
+        self.assertTrue(os.path.exists(os.path.join(self.vault, "secret/key.md")))
+        self.assertTrue(self._в_истории("secret/key.md"))
+        self.assertTrue(self._есть_в_r2("secret/key.md"))
+
+    def test_remote_без_бакета_отвергается(self):
+        r = self._прогон("secret/key.md", REMOTE="r2:")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("нужен бакет", r.stderr)
+        self.assertEqual(self._вызовы(), [])
 
     def test_r2_недоступен_с_начала_ничего_не_трогает(self):
         self._в_r2("secret/key.md")
@@ -181,7 +245,7 @@ class Вычистка(unittest.TestCase):
         self.assertIn("не начата", r.stderr)
         self.assertTrue(os.path.exists(os.path.join(self.vault, "secret/key.md")))
         self.assertTrue(self._в_истории("secret/key.md"))
-        self.assertFalse(os.path.exists(self.env["MIRROR"]))
+        self.assertFalse(os.path.exists(self.mirror))
         self.assertEqual(self._вызовы(), ["lsf"])
 
     def test_r2_отвалился_на_удалении_история_не_переписана(self):
@@ -193,7 +257,7 @@ class Вычистка(unittest.TestCase):
         self.assertIn("остановлена до переписывания истории", r.stderr)
         self.assertTrue(self._в_истории("secret/key.md"))
         self.assertTrue(self._есть_в_r2("secret/key.md"))
-        self.assertFalse(os.path.exists(self.env["MIRROR"]))
+        self.assertFalse(os.path.exists(self.mirror))
         self.assertEqual(self._вызовы(), ["lsf", "lsf"])
         # Повтор при живом R2 доделывает с того же места.
         os.remove(self.log)
@@ -201,6 +265,29 @@ class Вычистка(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(self._в_истории("secret/key.md"))
         self.assertFalse(self._есть_в_r2("secret/key.md"))
+
+    def test_два_файла_отказ_на_втором_повтор_доделывает(self):
+        # Доступ, lsf первого, deletefile первого — удачны; lsf второго
+        # падает. Первый ушёл из R2 и из рабочей копии, второй — только из
+        # рабочей копии, история цела; повтор доделывает оба.
+        self._пишу("b.md", "вторая\n")
+        self._коммит("три")
+        self._в_r2("secret/key.md")
+        self._в_r2("b.md", "вторая\n")
+        r = self._прогон("secret/key.md", "b.md", FAKE_R2_FAIL_AFTER="3")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("остановлена до переписывания истории", r.stderr)
+        self.assertFalse(self._есть_в_r2("secret/key.md"))
+        self.assertTrue(self._есть_в_r2("b.md"))
+        self.assertTrue(self._в_истории("secret/key.md"))
+        self.assertTrue(self._в_истории("b.md"))
+        os.remove(self.log)
+        r = self._прогон("secret/key.md", "b.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self._есть_в_r2("b.md"))
+        self.assertFalse(self._в_истории("secret/key.md"))
+        self.assertFalse(self._в_истории("b.md"))
+        self.assertTrue(self._в_истории("a.md"))
 
     def test_deletefile_не_смог_останавливает(self):
         # R2 отвечает, файл есть, удалить не удалось: отказ, а не «уже нет».
@@ -231,13 +318,17 @@ class Вычистка(unittest.TestCase):
         self.assertIn("ОСТАЛОСЬ В R2: secret/key.md", r.stderr)
         self.assertIn("чисто в git: secret/key.md", r.stdout)
 
-
-    def test_бандл_собирается_в_удачном_прогоне(self):
-        self._в_r2("secret/key.md")
-        r = self._прогон("secret/key.md")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        бандлы = [f for f in os.listdir(self.бандлы) if f.endswith(".bundle.gpg")]
-        self.assertEqual(len(бандлы), 1, r.stdout + r.stderr)
+    def test_длинная_история_не_прячется_за_sigpipe(self):
+        # filter-repo промахнулся (подделка ничего не переписывает), в
+        # истории файла сорок коммитов. `git log | grep -q .` под pipefail
+        # давал бы 141 и «чисто в git»; проверка должна сказать «ОСТАЛОСЬ».
+        for i in range(40):
+            self._пишу("secret/key.md", "token=%d\n" % i)
+            self._коммит("правка %d" % i)
+        r = self._прогон("secret/key.md", FAKE_FR_NOOP="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ОСТАЛОСЬ В ИСТОРИИ: secret/key.md", r.stderr)
+        self.assertNotIn("чисто в git", r.stdout)
 
     def test_бандл_не_собрался_код_не_ноль(self):
         # Старые бандлы снесены, парольной фразы нет — новый не собрался:
@@ -251,6 +342,17 @@ class Вычистка(unittest.TestCase):
         self.assertFalse(os.path.exists(старый))
         self.assertIn("чисто в R2:  secret/key.md", r.stdout)
         self.assertIn("чисто в git: secret/key.md", r.stdout)
+
+    def test_bundles_синоним_targets(self):
+        # Один список носителей на снос старых и на сборку нового: BUNDLES
+        # без TARGETS доезжает до vault-backup.sh.
+        self._в_r2("secret/key.md")
+        env = dict(self.env, BUNDLES=self.бандлы)
+        env.pop("TARGETS")
+        r = subprocess.run(["bash", СКРИПТ, "secret/key.md"], capture_output=True,
+                           text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self._бандлы()), 1)
 
 
 if __name__ == "__main__":
