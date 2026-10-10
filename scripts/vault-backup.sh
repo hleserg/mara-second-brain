@@ -19,6 +19,12 @@ MIRROR="${MIRROR:-/srv/backup/vault.git}"
 PASS="${PASS:-$HOME/.config/mara/backup-pass}"
 WORK="${WORK:-/var/tmp/mara-backup}"
 KEEP="${KEEP:-8}"                     # 8 недель по ~150 МБ на носитель
+# Ротация ниже — `head -n "-$KEEP"`: с нулём он печатает весь список, и
+# `xargs rm` сносит только что записанный бандл, а скрипт отчитывается
+# успехом; с не-числом head падает посреди цикла. Поэтому только целое ≥ 1.
+case $KEEP in
+  ''|*[!0-9]*|0*) echo "vault-backup: KEEP=«$KEEP» — нужно целое число от 1" >&2; exit 1;;
+esac
 # Два носителя: внешний диск и шара на соседней машине. Второй может быть
 # отключён — это не повод валить прогон.
 TARGETS="${TARGETS:-/mnt/backup/mara /mnt/win-backups/mara}"
