@@ -190,11 +190,14 @@ class Ротация(unittest.TestCase):
         return sorted(f for f in os.listdir(self.target) if f.endswith(".bundle.gpg"))
 
     def test_ноль_и_не_число_отвергаются_до_записи(self):
-        for keep in ("0", "00", "abc", "-1", "1.5"):
+        # Десять знаков — отказ: число больше UINTMAX head не берёт, а
+        # проверять границу числом дороже, чем длиной.
+        for keep in ("0", "00", "08", "abc", "-1", "1.5", "1234567890",
+                     "99999999999999999999"):
             with self.subTest(keep=keep):
                 r = self._прогон(keep)
                 self.assertEqual(r.returncode, 1, keep + r.stdout + r.stderr)
-                self.assertIn("нужно целое число от 1", r.stderr)
+                self.assertIn("нужно целое число от 1 без ведущих нулей", r.stderr)
                 self.assertEqual(self._бандлы(), ["vault-2026-01-05.bundle.gpg"])
 
     def test_единица_оставляет_только_новый(self):
@@ -203,6 +206,11 @@ class Ротация(unittest.TestCase):
         бандлы = self._бандлы()
         self.assertEqual(len(бандлы), 1, бандлы)
         self.assertNotEqual(бандлы, ["vault-2026-01-05.bundle.gpg"])
+
+    def test_девять_знаков_законны(self):
+        r = self._прогон("999999999")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self._бандлы()), 2)
 
     def test_восемь_оставляет_старый(self):
         r = self._прогон("8")
