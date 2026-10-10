@@ -175,7 +175,11 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
             db.execSQL("alter table jobs add column path text")
         }
         // ключ квитанции (Т2.9); у работ, уехавших до обновления, его нет —
-        // ключ выдаст первый же шаг `HASHED`, а `DONE` и `FAILED` он не нужен
+        // ключ выдаст первый же прогон на `HASHED`, а `DONE` и `FAILED` он не
+        // нужен. Цена отката ниже 5 и возврата: откаченный код колонку не
+        // знает и на дописанном файле обнулит sha256, не тронув ключ, — после
+        // апгрейда такая работа уйдёт под старым ключом один раз (409 → NEW
+        // сожжёт его); это принято, а не починено
         if (old < 5 && !естьКолонка(db, "jobs", "idem_key")) {
             db.execSQL("alter table jobs add column idem_key text")
         }
@@ -233,6 +237,10 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
                 прежние.put("seen_at", nowMs)
                 прежние.put("state", JobState.NEW.name)   // изменился — хеш недействителен
                 прежние.putNull("sha256")
+                // и ключ квитанции с ним: под старым ключом сервер отдал бы
+                // квитанцию про прежние байты, и доросший файл либо уехал бы
+                // лишний раз (409), либо лёг бы в DONE без события (ревью Т2.9)
+                прежние.putNull("idem_key")
             }
             db.update("jobs", прежние, "id=?", arrayOf(rec.id))
         }

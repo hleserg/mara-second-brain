@@ -64,8 +64,14 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     /** true — сервер попросил подождать: прогон оборван, работу надо повторить. */
     private fun прогон(ctx: Context, q: Queue, api: Api, журнал: List<CallLogEntry>,
                        now: Long, s: Settings): Boolean {
-        for (job in q.pending()) {
-            if (!готов(q, job, now)) continue
+        for (было in q.pending()) {
+            if (!готов(q, было, now)) continue
+            // Ключ квитанции — в очередь до запроса и до `try`: снимок, который
+            // `послеСбоя` сохранит при броске ниже, обязан уже нести ключ,
+            // иначе бросок после ушедшего POST стёр бы его, и повтор уехал бы
+            // с новым (Т2.9, ревью)
+            val job = if (было.state == JobState.HASHED) JobFlow.сКлючом(было) else было
+            if (job !== было) q.save(job, now)
             // Одна работа не имеет права уронить весь прогон: из-за одной
             // записи не уезжала ни остальная очередь, ни сообщения. Приговор
             // здесь не выносится — это дело `JobFlow.послеСбоя`, и он же
@@ -108,16 +114,14 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             JobState.HASHED -> {
                 // подсказка — uri, путь медиатеки и имя: у ACR номер в каталоге (Т4.3)
                 val м = CallLogMatcher.match(журнал, job.modifiedMs, job.recording().подсказка())
-                // ключ квитанции — в очередь до запроса, не после: повтор
-                // после потерянного ответа обязан уйти с тем же (Т2.9)
-                val с = JobFlow.сКлючом(job)
-                if (с.idemKey != job.idemKey) q.save(с, now)
-                val body = EventJson.build(с.recording(), м?.entry, с.sha256!!,
-                    Device.ext(с.recording()), с.producer, ZoneId.systemDefault(), м?.by,
-                    с.idemKey)
+                // ключ квитанции уже в очереди — его выдал `прогон` до `try`;
+                // повтор после потерянного ответа уходит с тем же (Т2.9)
+                val body = EventJson.build(job.recording(), м?.entry, job.sha256!!,
+                    Device.ext(job.recording()), job.producer, ZoneId.systemDefault(), м?.by,
+                    job.idemKey)
                 val r = api.postEvent(body)
-                q.save(с.copy(state = JobFlow.next(с.state, r), eventId = r.eventId,
-                    attempts = с.attempts + 1, error = ошибка(r)), now)
+                q.save(job.copy(state = JobFlow.next(job.state, r), eventId = r.eventId,
+                    attempts = job.attempts + 1, error = ошибка(r)), now)
                 return r
             }
             JobState.POSTED -> {
