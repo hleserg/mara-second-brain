@@ -372,6 +372,15 @@ class СнимокРеестра(unittest.TestCase):
         self.снимок(0.5, "contextd-2000-01-01T0000.db")
         self.assertEqual(rc.снимок_реестра_устарел(self.root), [])
 
+    def test_два_пропуска_звенят_один_нет(self):
+        # Фаза крона: снимок в :25, сверка в :07 — после одного пропуска
+        # снимку 1,7 ч, после двух 2,7. Порог обязан лежать между (Codex, P2).
+        self.снимок(1.7)
+        self.assertEqual(rc.снимок_реестра_устарел(self.root), [])
+        self.снимок(2.7)
+        self.assertEqual([x["check"] for x in rc.снимок_реестра_устарел(self.root)],
+                         ["снимок-реестра-устарел"])
+
     def test_порог_доезжает(self):
         self.снимок(1.5)
         self.assertEqual(rc.снимок_реестра_устарел(self.root), [])

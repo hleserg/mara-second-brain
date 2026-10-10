@@ -35,7 +35,7 @@ denylisted из Git, R2 и бэкапов. Восстановление ядра
 то есть и на чистой машине посреди восстановления (§17.3 п.4).
 """
 import os, sys, json, glob, time, shutil, hashlib, sqlite3, tarfile
-import argparse, tempfile, subprocess, io, contextlib, socket
+import argparse, tempfile, subprocess, io, contextlib, socket, fcntl
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
@@ -942,9 +942,28 @@ def снимок_реестра(root, куда=None, keep=СНИМКОВ_ХРА�
     if not os.path.exists(db):
         raise RuntimeError("нет базы %s" % db)
     os.makedirs(куда, mode=0o700, exist_ok=True)
+    # Один прогон на каталог. Замок — на самом каталоге (flock держится на
+    # дескрипторе каталога, лишнего файла рядом со снимками не появляется):
+    # второй прогон поверх затянувшегося снял бы ниже его живой `.tmp`, а тот,
+    # дописав в снятый inode, пересоздал бы по имени пустую базу и опубликовал
+    # её с `quick_check` «ok» (Codex, PR #127, P1). Занято — значит снимок уже
+    # идёт, и второй не нужен: выходим с ошибкой, не ждём.
+    замок = os.open(куда, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(замок, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise RuntimeError("снимок в %s уже идёт — второй прогон не нужен" % куда)
+        return _снимок_под_замком(db, куда, keep)
+    finally:
+        os.close(замок)
+
+
+def _снимок_под_замком(db, куда, keep):
     # Огрызки прошлых падений — как `.core-*.tmp` у ротации: ротация по
     # `contextd-*.db` точечных имён не видит, и при часовом кроне на забитом
     # диске они копились бы по размеру базы в час — ровно когда места нет.
+    # Под замком они заведомо чужие и мёртвые: живой прогон его бы держал.
     for огрызок in glob.glob(os.path.join(куда, ".contextd-*.tmp*")):
         try:
             os.unlink(огрызок)
@@ -1698,6 +1717,22 @@ def самопроверка():
         finally:
             globals()["снимок"] = целый
         assert not [f for f in os.listdir(сн) if f.startswith(".")], os.listdir(сн)
+        # занятый каталог: второй прогон не трогает чужой `.tmp` и не пишет
+        open(os.path.join(сн, ".contextd-1999-01-01T0000.db.tmp"), "w").close()
+        держу = os.open(сн, os.O_RDONLY)
+        fcntl.flock(держу, fcntl.LOCK_EX)
+        try:
+            try:
+                снимок_реестра(root, сн, keep=2)
+            except RuntimeError as e:
+                assert "уже идёт" in str(e), e
+            else:
+                raise AssertionError("второй прогон прошёл поверх первого")
+            assert os.path.exists(os.path.join(сн, ".contextd-1999-01-01T0000.db.tmp")), \
+                "чужой огрызок снят без замка"
+        finally:
+            os.close(держу)
+        os.unlink(os.path.join(сн, ".contextd-1999-01-01T0000.db.tmp"))
 
         # Сторожа внутри `проверка` — утечка секретов, целостность базы,
         # счётчики, хеши файлов — до сих пор не срабатывали ни разу: порченый

@@ -418,6 +418,28 @@ class Флаги(unittest.TestCase):
         self.assertFalse(os.path.exists(self.цель), "снимок полез на носитель")
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "state")), "снимок оставил отметку носителей")
 
+    def test_snapshot_не_идёт_поверх_другого(self):
+        """Второй прогон поверх затянувшегося не снимает его живой `.tmp` и
+        не пишет сам (Codex, P1): замок — flock на каталоге снимков."""
+        import fcntl
+        куда = os.path.join(self.tmp, "snap")
+        os.makedirs(куда)
+        чужой = os.path.join(куда, ".contextd-2000-01-01T0000.db.tmp")
+        open(чужой, "w").close()
+        держу = os.open(куда, os.O_RDONLY)
+        fcntl.flock(держу, fcntl.LOCK_EX)
+        try:
+            r = subprocess.run(
+                [sys.executable, СКРИПТ, "--root", self.root, "--snapshot", куда],
+                capture_output=True, text=True,
+                env={**os.environ, "MARA_STATE": os.path.join(self.tmp, "state")})
+        finally:
+            os.close(держу)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("уже идёт", r.stderr)
+        self.assertEqual(sorted(os.listdir(куда)), [os.path.basename(чужой)],
+                         "второй прогон тронул каталог")
+
     def test_snapshot_без_каталога_пишет_под_корень(self):
         """Без аргумента — `snapshots/` под корнем блобов (`mi.снимки`): это
         дорога крона, и дефолт должен быть тем же, что читает сверка."""
