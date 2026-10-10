@@ -379,6 +379,18 @@ class Версия(unittest.TestCase):
         self.assertEqual(self.версия(), mi.ВЕРСИЯ)
         self.assertGreaterEqual(mi.ВЕРСИЯ, 1)
 
+    def test_прагмы_соединения_по_adr_0005(self):
+        """§5.1 и ADR-0005: WAL, `synchronous=FULL` явной строкой (не
+        умолчанием сборки), внешние ключи, `busy_timeout` 30 с."""
+        con = mi.connect(self.dir)
+        try:
+            self.assertEqual(con.execute("pragma journal_mode").fetchone()[0], "wal")
+            self.assertEqual(con.execute("pragma synchronous").fetchone()[0], 2, "FULL")
+            self.assertEqual(con.execute("pragma foreign_keys").fetchone()[0], 1)
+            self.assertEqual(con.execute("pragma busy_timeout").fetchone()[0], 30_000)
+        finally:
+            con.close()
+
     def test_старая_база_отказ_с_командой(self):
         СхемаЛеджера.старая_база(self)
         with self.assertRaises(RuntimeError) as e:

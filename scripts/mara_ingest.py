@@ -595,6 +595,11 @@ def _открыть(root):
                           isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("pragma journal_mode=wal")
+    # Явной строкой, а не умолчанием сборки (ADR-0005, решение 1 по
+    # измерениям): реестр — единственная власть, и последние транзакции
+    # после потери питания дороже сотых долей миллисекунды, которые даёт
+    # NORMAL; в явной транзакции FULL стоит один fsync на коммит.
+    con.execute("pragma synchronous=full")
     # Вне транзакции, иначе молча не включится — потому здесь, а не в
     # миграции. По умолчанию SQLite ссылки не проверяет вовсе (ADR-0005).
     con.execute("pragma foreign_keys=on")

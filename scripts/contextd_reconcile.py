@@ -1053,6 +1053,35 @@ def доложить(находки):
         return "failed: %s" % err
 
 
+def открыть_реестр(root):
+    """→ (соединение или None, находки). Состояние миграции — находка, а не
+    падение крона: `mi.connect` отказывает базе не той версии, и до этого
+    сверка умирала с трассой в журнале крона, не доложив владельцу ничего
+    (Т2.1б, «мониторинг состояния миграции»). Схема отстала от кода — выкат
+    без `--migrate`, лечится командой; схема новее кода — код откатили без
+    базы (RUNBOOK-deploy.md §6а), это `error` в обе стороны: пока не
+    сойдутся, приём не пишет."""
+    try:
+        return mi.connect(root), []
+    except RuntimeError as e:
+        текст = str(e)
+        if "схема версии" not in текст:
+            raise
+        con = mi._открыть(root)
+        try:
+            v = mi._версия(con)
+        finally:
+            con.close()
+        if v > mi.ВЕРСИЯ:
+            return None, [находка("схема-новее-кода", "error",
+                                  "contextd.db: схема %d, код знает до %d — код "
+                                  "откачен без отката базы (RUNBOOK §6а)"
+                                  % (v, mi.ВЕРСИЯ), db=v, code=mi.ВЕРСИЯ)]
+        return None, [находка("схема-не-мигрирована", "error",
+                              "contextd.db: схема %d, код ждёт %d — сначала `%s`"
+                              % (v, mi.ВЕРСИЯ, mi.КОМАНДА), db=v, code=mi.ВЕРСИЯ)]
+
+
 def main():
     ap = argparse.ArgumentParser(description="сверка состояния приёма")
     ap.add_argument("--root", default=mi.ROOT)
@@ -1066,7 +1095,9 @@ def main():
     if a.self_check:
         return self_check()
     mi.ROOT = a.root
-    находки = run(mi.connect(a.root), a.root, a.vault, a.bm_db)
+    con, находки = открыть_реестр(a.root)
+    if con is not None:
+        находки = run(con, a.root, a.vault, a.bm_db)
     if a.as_json:
         print(json.dumps(находки, ensure_ascii=False, indent=2))
     elif not находки:

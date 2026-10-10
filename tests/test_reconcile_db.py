@@ -5,7 +5,7 @@ WAL и свободного места (Т2.1б). До этой проверки
 безоговорочно: битая страница давала не находку, а исключение где-то в
 третьей проверке, которое застава называла «проверка не запустилась».
 """
-import os, sys, shutil, tempfile, unittest, unittest.mock
+import contextlib, io, os, sqlite3, sys, shutil, tempfile, unittest, unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -72,6 +72,45 @@ class БазаЦела(unittest.TestCase):
             f = rc.база_цела(self.con, self.root)
         self.assertEqual(self.виды(f), ["места-мало"], f)
         self.assertLess(f[0]["gib"], rc.МЕСТО_ГИБ)
+
+    def test_схема_отстала_это_находка_а_не_падение(self):
+        # выкат без --migrate: раньше крон сверки умирал на connect с трассой
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        mi.migrate(root, mi.ВЕРСИЯ - 1).close()
+        con, f = rc.открыть_реестр(root)
+        self.assertIsNone(con)
+        self.assertEqual([(x["check"], x["level"]) for x in f],
+                         [("схема-не-мигрирована", "error")])
+        self.assertIn(mi.КОМАНДА, f[0]["detail"])
+        self.assertEqual((f[0]["db"], f[0]["code"]), (mi.ВЕРСИЯ - 1, mi.ВЕРСИЯ))
+
+    def test_схема_новее_кода_это_находка(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        mi.connect(root).close()
+        c = sqlite3.connect(os.path.join(root, "contextd.db"))
+        c.execute("pragma user_version=%d" % (mi.ВЕРСИЯ + 1)); c.close()
+        con, f = rc.открыть_реестр(root)
+        self.assertIsNone(con)
+        self.assertEqual([x["check"] for x in f], ["схема-новее-кода"])
+        self.assertEqual(f[0]["level"], "error")
+
+    def test_здоровая_база_открывается_без_находок(self):
+        con, f = rc.открыть_реестр(self.root)
+        self.addCleanup(con.close)
+        self.assertEqual(f, [])
+
+    def test_main_докладывает_о_схеме_и_не_падает(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        mi.migrate(root, mi.ВЕРСИЯ - 1).close()
+        поток = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", ["rc", "--root", root, "--json"]), \
+                contextlib.redirect_stdout(поток):
+            код = rc.main()
+        self.assertNotEqual(код, 0)
+        self.assertIn("схема-не-мигрирована", поток.getvalue())
 
     def test_проверка_стоит_в_общем_прогоне_под_заставой(self):
         self.assertEqual([f for f in rc.run(self.con, self.root, vault=None,
