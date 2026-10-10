@@ -15,6 +15,28 @@ FR="${FR:-$HOME/.local/bin/git-filter-repo}"
 
 [ $# -ge 1 ] || { echo "usage: $0 <путь-в-волте> [...]" >&2; exit 2; }
 
+# R2 — единственная копия, до которой скрипт дотягивается по сети, и отказ
+# сети здесь нельзя читать как «файла нет»: при недоступном R2 файл в бакете
+# остаётся, а скрипт отчитался бы нулём. Поэтому ответ R2 разбирается явно,
+# по кодам rclone: 3 — каталога нет, 4 — файла нет; всё остальное — отказ.
+ERR=$(mktemp); trap 'rm -f "$ERR"' EXIT
+в_r2() {                 # 0 — файл в R2 есть, 1 — нет, 2 — R2 не ответил
+  local out rc=0
+  out=$("$RCLONE" lsf --files-only "$REMOTE/$1" 2>"$ERR") || rc=$?
+  case $rc in
+    0) printf '%s\n' "$out" | grep -qxF -- "$(basename "$1")" ;;
+    3|4) return 1 ;;
+    *) echo "  R2 не ответил ($1, код $rc): $(tr '\n' ' ' <"$ERR")" >&2; return 2 ;;
+  esac
+}
+
+echo "== проверяю доступ к R2"
+if ! "$RCLONE" lsf --max-depth 1 "$REMOTE" >/dev/null 2>"$ERR"; then
+  echo "R2 недоступен ($REMOTE): $(tr '\n' ' ' <"$ERR")" >&2
+  echo "вычистка не начата, повторите при живом доступе" >&2
+  exit 1
+fi
+
 exec 9>"$VAULT/.git/vault-git.lock"
 flock -w 300 9 || { echo "волт занят" >&2; exit 1; }
 
@@ -25,7 +47,17 @@ git diff --cached --quiet || git commit -q -m "auto: перед вычистко
 echo "== удаляю из рабочей копии и из R2"
 for f in "$@"; do
   [ -e "$f" ] && rm -f -- "$f" && echo "  локально: $f"
-  "$RCLONE" deletefile "$REMOTE/$f" 2>/dev/null && echo "  R2:       $f" || echo "  R2:       $f (уже нет)"
+  # Останавливаемся до переписывания истории: повторный прогон при живом R2
+  # доделает всё с этого же места, а история, переписанная при файле в
+  # бакете, создала бы ложное «чисто».
+  if в_r2 "$f"; then
+    "$RCLONE" deletefile "$REMOTE/$f" 2>"$ERR" && echo "  R2:       $f" || {
+      echo "  R2: не удалось удалить $f: $(tr '\n' ' ' <"$ERR")" >&2
+      echo "вычистка остановлена до переписывания истории" >&2; exit 1; }
+  else
+    [ $? -eq 1 ] && echo "  R2:       $f (уже нет)" || {
+      echo "вычистка остановлена до переписывания истории" >&2; exit 1; }
+  fi
 done
 git add -A
 git diff --cached --quiet || git commit -q -m "удалены файлы, подлежащие вычистке"
@@ -53,20 +85,26 @@ for t in ${BUNDLES:-/mnt/backup/mara /mnt/win-backups/mara}; do
   [ -d "$t" ] || continue
   rm -f "$t"/vault-*.bundle.gpg && echo "  $t"
 done
-"$HERE/vault-backup.sh" || echo "  новый бандл не собрался, соберите руками" >&2
+# Старые бандлы уже снесены: без нового копии волта вне doctor нет, и
+# молчать об этом нулевым кодом нельзя — отказ сборки идёт в итоговый код.
+fail=0
+"$HERE/vault-backup.sh" || {
+  echo "  НОВЫЙ БАНДЛ НЕ СОБРАЛСЯ: старые снесены, соберите vault-backup.sh руками" >&2
+  fail=1; }
 
 echo "== проверка"
-fail=0
 for f in "$@"; do
   if git log --all --full-history --oneline -- "$f" | grep -q .; then
     echo "  ОСТАЛОСЬ В ИСТОРИИ: $f" >&2; fail=1
   else
     echo "  чисто в git: $f"
   fi
-  if "$RCLONE" lsf "$REMOTE/$f" 2>/dev/null | grep -q .; then
+  if в_r2 "$f"; then
     echo "  ОСТАЛОСЬ В R2: $f" >&2; fail=1
-  else
+  elif [ $? -eq 1 ]; then
     echo "  чисто в R2:  $f"
+  else
+    echo "  R2 НЕ ОТВЕТИЛ: $f — проверьте в R2 руками" >&2; fail=1
   fi
 done
 exit $fail
