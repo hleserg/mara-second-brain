@@ -588,29 +588,61 @@ def _сдвинуть(con, цель=ВЕРСИЯ):
             raise
 
 
-def _открыть(root):
+def _открыть(root, создавать=True):
     root = root or ROOT
-    os.makedirs(root, mode=0o700, exist_ok=True)
-    con = sqlite3.connect(os.path.join(root, "contextd.db"), timeout=30,
-                          isolation_level=None)
+    путь = os.path.join(root, "contextd.db")
+    if создавать:
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        con = sqlite3.connect(путь, timeout=30, isolation_level=None)
+    else:
+        # только существующую: сверка не имеет права завести пустой реестр
+        # на опечатке в --root или под отвалившимся томом, и проверка
+        # «файл есть» до открытия этого не гарантирует — том может отвалиться
+        # между ними (Codex по #141, круг 3). `mode=rw` без create: нет файла
+        # — `OperationalError: unable to open database file`
+        import pathlib
+        con = sqlite3.connect(pathlib.Path(os.path.abspath(путь)).as_uri() + "?mode=rw",
+                              uri=True, timeout=30, isolation_level=None)
+        # до первой pragma: `journal_mode=wal` уже пишет заголовок, и
+        # пустой файл перестал бы быть пустым. Спрашиваем SQLite, а не
+        # файловую систему: `getsize` после открытия — ещё одна гонка с
+        # отвалившимся томом (Codex по #141, круг 4); `page_count` только
+        # читает заголовок, и у пустого файла он 0
+        if con.execute("pragma page_count").fetchone()[0] == 0:
+            con.close()
+            raise RuntimeError("contextd.db: пустой файл, схема не заведена — "
+                               "сверке заводить нечего")
     con.row_factory = sqlite3.Row
     con.execute("pragma journal_mode=wal")
+    # Явной строкой, а не умолчанием сборки (ADR-0005, решение 1 по
+    # измерениям): реестр — единственная власть, и последние транзакции
+    # после потери питания дороже сотых долей миллисекунды, которые даёт
+    # NORMAL; в явной транзакции FULL стоит один fsync на коммит.
+    con.execute("pragma synchronous=full")
     # Вне транзакции, иначе молча не включится — потому здесь, а не в
     # миграции. По умолчанию SQLite ссылки не проверяет вовсе (ADR-0005).
     con.execute("pragma foreign_keys=on")
     return con
 
 
-def connect(root=None):
+def connect(root=None, создавать=True):
     """Открыть базу. Каталог 0700: в нём лежат личные разговоры.
 
     Схему не трогает: миграция — отдельной командой (`migrate`), иначе выкат
     кода и есть миграция, и проводит её первый же крон. Исключение — пустой
     файл: беречь в нём нечего, и он сразу заводится последней версией.
+    `создавать=False` — ни файла, ни каталога, ни схемы в пустом файле:
+    так открывает сверка.
     """
-    con = _открыть(root)
+    con = _открыть(root, создавать)
     v = _версия(con)
     if v == 0 and con.execute("select 1 from sqlite_master").fetchone() is None:
+        if not создавать:
+            # заголовок без схемы (`vacuum` по пустой базе): `page_count` 1,
+            # а заводить всё равно нечего (Codex по #141, круг 5)
+            con.close()
+            raise RuntimeError("contextd.db: схема не заведена — сверке "
+                               "заводить нечего")
         # ponytail: при двух и более миграциях сосед, открывший новую базу
         # между шагами, увидит промежуточный номер и откажет — один раз, на
         # первом запуске; его крон пройдёт в следующий заход.

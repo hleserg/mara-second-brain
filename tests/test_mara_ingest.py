@@ -1,5 +1,5 @@
 """Приём: дедуп, аренда работ, расписание ретраев (ТЗ §17, §20)."""
-import os, sys, sqlite3, tempfile, unittest, subprocess
+import os, sys, sqlite3, tempfile, unittest, unittest.mock, subprocess
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, СКРИПТЫ)
@@ -378,6 +378,58 @@ class Версия(unittest.TestCase):
         mi.connect(self.dir).close()
         self.assertEqual(self.версия(), mi.ВЕРСИЯ)
         self.assertGreaterEqual(mi.ВЕРСИЯ, 1)
+
+    def test_без_создания_не_заводит_ни_файла_ни_каталога_ни_схемы(self):
+        """`connect(…, создавать=False)` — для сверки: опечатка в --root или
+        отвалившийся том не должны родить пустой реестр (Codex по #141)."""
+        нет = os.path.join(self.dir, "opechatka")
+        with self.assertRaises(sqlite3.OperationalError):
+            mi.connect(нет, создавать=False)
+        self.assertFalse(os.path.exists(нет))
+        open(self.путь, "wb").close()
+        with self.assertRaisesRegex(RuntimeError, "пустой файл"):
+            mi.connect(self.dir, создавать=False)
+        self.assertEqual(os.path.getsize(self.путь), 0, "завёл схему в пустом файле")
+        # заголовок без схемы (`vacuum` по пустой базе): page_count 1 — тоже отказ
+        c = sqlite3.connect(self.путь); c.execute("vacuum"); c.close()
+        было = os.path.getsize(self.путь)
+        self.assertGreater(было, 0)
+        with self.assertRaisesRegex(RuntimeError, "схема не заведена"):
+            mi.connect(self.dir, создавать=False)
+        self.assertEqual(os.path.getsize(self.путь), было, "завёл схему в файле без неё")
+        mi.connect(self.dir).close()                       # обычный путь заводит
+        mi.connect(self.dir, создавать=False).close()      # и теперь открывается
+
+    def test_прагмы_соединения_по_adr_0005(self):
+        """§5.1 и ADR-0005: WAL, `synchronous=FULL` явной строкой, внешние
+        ключи, `busy_timeout` 30 с.
+
+        Значение `pragma synchronous` само по себе строку не доказывает:
+        умолчание сборки SQLite — тот же FULL, и мутант без строки давал бы
+        те же 2 (ревью #141). Поэтому ещё и журнал исполненных команд:
+        соединение подменяется подклассом, который их копит."""
+        журнал = []
+
+        class Журнал(sqlite3.Connection):
+            def execute(self, sql, *a, **k):
+                журнал.append(" ".join(sql.split()).lower())
+                return super().execute(sql, *a, **k)
+
+        исходный = sqlite3.connect
+        with unittest.mock.patch.object(
+                mi.sqlite3, "connect",
+                lambda *a, **k: исходный(*a, factory=Журнал, **k)):
+            con = mi._открыть(self.dir)
+        try:
+            self.assertIn("pragma synchronous=full", журнал)
+            self.assertIn("pragma journal_mode=wal", журнал)
+            self.assertIn("pragma foreign_keys=on", журнал)
+            self.assertEqual(con.execute("pragma journal_mode").fetchone()[0], "wal")
+            self.assertEqual(con.execute("pragma synchronous").fetchone()[0], 2, "FULL")
+            self.assertEqual(con.execute("pragma foreign_keys").fetchone()[0], 1)
+            self.assertEqual(con.execute("pragma busy_timeout").fetchone()[0], 30_000)
+        finally:
+            con.close()
 
     def test_старая_база_отказ_с_командой(self):
         СхемаЛеджера.старая_база(self)
