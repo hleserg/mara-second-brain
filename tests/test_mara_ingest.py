@@ -390,6 +390,13 @@ class Версия(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "пустой файл"):
             mi.connect(self.dir, создавать=False)
         self.assertEqual(os.path.getsize(self.путь), 0, "завёл схему в пустом файле")
+        # заголовок без схемы (`vacuum` по пустой базе): page_count 1 — тоже отказ
+        c = sqlite3.connect(self.путь); c.execute("vacuum"); c.close()
+        было = os.path.getsize(self.путь)
+        self.assertGreater(было, 0)
+        with self.assertRaisesRegex(RuntimeError, "схема не заведена"):
+            mi.connect(self.dir, создавать=False)
+        self.assertEqual(os.path.getsize(self.путь), было, "завёл схему в файле без неё")
         mi.connect(self.dir).close()                       # обычный путь заводит
         mi.connect(self.dir, создавать=False).close()      # и теперь открывается
 

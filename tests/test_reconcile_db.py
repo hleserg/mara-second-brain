@@ -160,6 +160,13 @@ class БазаЦела(unittest.TestCase):
         con, f = rc.открыть_реестр(root)
         self.assertIsNone(con)
         self.assertEqual([x["check"] for x in f], ["база-нет"])
+        # и заголовок без схемы (Codex, круг 5): page_count 1, sqlite_master пуст
+        c = sqlite3.connect(os.path.join(root, "contextd.db")); c.execute("vacuum"); c.close()
+        было = os.path.getsize(os.path.join(root, "contextd.db"))
+        con, f = rc.открыть_реестр(root)
+        self.assertIsNone(con)
+        self.assertEqual([x["check"] for x in f], ["база-нет"])
+        self.assertEqual(os.path.getsize(os.path.join(root, "contextd.db")), было, "завёл схему")
 
     def test_здоровая_база_открывается_без_находок(self):
         con, f = rc.открыть_реестр(self.root)
