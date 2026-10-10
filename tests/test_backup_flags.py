@@ -390,11 +390,16 @@ class Флаги(unittest.TestCase):
         Копия сверяется с живой базой счётом событий изнутри: заглушка,
         создающая пустой файл с правильным именем, прошла бы по `exists`."""
         куда = os.path.join(self.tmp, "snap")
-        os.makedirs(куда)
+        os.makedirs(куда, mode=0o755)          # чужой каталог с широкими правами
         for n in (1, 2):
             open(os.path.join(куда, "contextd-2000-01-0%dT0000.db" % n), "w").close()
         r, _ = self.запуск("--snapshot", куда, "--snapshot-keep", "2")
         self.assertTrue(os.path.exists(r["снимок"]), r)
+        # Незашифрованная база с разговорами: 0600 на файле, 0700 на каталоге,
+        # каким бы каталог ни был до прогона (Codex, круг 2, P1). SQLite
+        # заводит файл по umask — без явного chmod это 0644.
+        self.assertEqual(oct(os.stat(r["снимок"]).st_mode & 0o777), oct(0o600))
+        self.assertEqual(oct(os.stat(куда).st_mode & 0o777), oct(0o700))
         self.assertEqual(os.path.dirname(r["снимок"]), куда, r)
         self.assertEqual(r["осталось"], 2, r)
         остались = sorted(os.listdir(куда))
