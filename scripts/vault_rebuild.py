@@ -204,8 +204,12 @@ def _из_звонка(con, root, event_id, canon, пути):
     epath = mi.extraction_path(root, event_id)
     if not os.path.exists(epath):
         raise НеПересобрать("извлечения %s нет" % os.path.relpath(epath, root))
-    with open(epath, encoding="utf-8") as fh:
-        extraction = json.load(fh)
+    try:
+        with open(epath, encoding="utf-8") as fh:
+            extraction = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise НеПересобрать("извлечение %s не читается: %s"
+                            % (os.path.relpath(epath, root), type(e).__name__))
     extraction = cp._сверить_с_реестром(con, event_id, extraction)
     # ссылки — из реестра, где они есть: пересобранная карточка показывает
     # принятое реестром, а не список модели

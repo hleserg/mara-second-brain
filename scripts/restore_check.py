@@ -5,11 +5,16 @@
 
 Запускается на восстановленном корне блобов (`--root`) и волте из git
 (`--vault`), до возврата сервиса (шаг 9 ранбука `docs/backup-core.md`).
-Ничего не пишет. Проверки, каждая — строкой отчёта с ключом:
+Корень может быть и чистым каталогом учения: пути в `blobs.path`
+абсолютные, с живого корня, и файл ищется под `--root` по хвосту
+`calls/…` — иначе проверка на чистом каталоге смотрела бы в живой
+(ревью). Ничего не пишет. Проверки, каждая — строкой отчёта с ключом:
 
 - «целостность» — `integrity_check` (полный, не `quick_check`: раз в
   восстановление можно) и `foreign_key_check`; версия схемы против кода:
   старее — сначала `mara_ingest.py --migrate` (шаг 4), новее — код откачен.
+  Схема не той версии — дальше не идём: остальным разделам нужны таблицы
+  этой версии, и вместо подсказки они падали бы (ревью).
 - «блобы» — строки `blobs` без `purged_at` против диска: файла нет, размер
   не тот, хеш не тот (хеш — у выборки `--sample`, или у всех с `--full`:
   аудио на годы — часы чтения); файлы в `calls/` без строки — осиротевшие,
@@ -56,6 +61,19 @@ def _sha(path):
     return h.hexdigest()
 
 
+def _на_корне(path, root):
+    """Путь блоба на этом корне: строка несёт абсолютный путь живого корня,
+    у копии на чистом каталоге файл лежит под `root` по тому же хвосту
+    `calls/ГГГГ/ММ/имя` (`mi.blob_path`)."""
+    if not path:
+        return path
+    корень = os.path.realpath(root)
+    if os.path.realpath(path).startswith(корень + os.sep):
+        return path
+    голова, разд, хвост = path.replace(os.sep, "/").rpartition("/calls/")
+    return os.path.join(root, "calls", *хвост.split("/")) if разд else path
+
+
 def целостность(con):
     out = []
     try:
@@ -64,6 +82,7 @@ def целостность(con):
         итог = ["%s: %s" % (type(e).__name__, e)]
     if итог != ["ok"]:
         out.append(("целостность", "integrity_check: %s" % "; ".join(итог[:3])))
+        return out                    # битая база: дальше спрашивать нечего
     fk = con.execute("pragma foreign_key_check").fetchall()
     if fk:
         out.append(("целостность", "foreign_key_check: %d нарушений, первое в %s"
@@ -86,7 +105,7 @@ def блобы(con, root, выборка, полностью, rnd):
     итог["строк"] = len(строки)
     на_месте = []
     for r in строки:
-        p = r["path"]
+        p = r["path"] = _на_корне(r["path"], root)
         if not p or not os.path.isfile(p):
             итог["без файла"] += 1
             out.append(("блобы", "%s: файла нет — %s" % (r["sha256"][:12], p)))
@@ -104,7 +123,7 @@ def блобы(con, root, выборка, полностью, rnd):
             out.append(("блобы", "%s: хеш файла не тот — %s" % (r["sha256"][:12], r["path"])))
     итог["хеш сверен"] = len(проверить)
     известные = {os.path.realpath(r["path"]) for r in строки if r["path"]}
-    известные |= {os.path.realpath(r[0]) for r in con.execute(
+    известные |= {os.path.realpath(_на_корне(r[0], root)) for r in con.execute(
         "select path from blobs where purged_at is not null and path is not null")}
     for p in glob.glob(os.path.join(root, "calls", "**", "*"), recursive=True):
         if os.path.isfile(p) and os.path.realpath(p) not in известные:
@@ -142,7 +161,7 @@ def стабильные_id(con, vault):
     return итог, out
 
 
-def образец_evidence(con, выборка, rnd):
+def образец_evidence(con, root, выборка, rnd):
     """Выборка обязательств со ссылками производителя `model`: ссылка
     разрешается в сегмент, расшифровку и файл аудио события."""
     итог, out = Counter(), []
@@ -174,10 +193,11 @@ def образец_evidence(con, выборка, rnd):
                 out.append(("evidence", "%s: у расшифровки нет события или аудио" % oid[-8:]))
             elif e["purged_at"]:
                 итог["аудио стёрто по ретеншену"] += 1
-            elif not (e["path"] and os.path.isfile(e["path"])):
+            elif not (e["path"] and os.path.isfile(_на_корне(e["path"], root))):
                 итог["не открывается"] += 1
                 out.append(("evidence", "%s: аудио %s не на диске — %s"
-                            % (oid[-8:], (e["blob_sha256"] or "")[:12], e["path"])))
+                            % (oid[-8:], (e["blob_sha256"] or "")[:12],
+                               _на_корне(e["path"], root))))
             else:
                 итог["открывается"] += 1
     return итог, out
@@ -186,8 +206,14 @@ def образец_evidence(con, выборка, rnd):
 def проверить(con, root, vault, выборка=ВЫБОРКА, полностью=False, seed=None):
     """→ (сводка по разделам, замечания `(раздел, текст)`)."""
     rnd = random.Random(seed)
-    сводка, замечания = {}, []
-    замечания += целостность(con)
+    сводка = {"блобы": Counter(), "проекции": Counter(), "id": Counter(),
+              "evidence": Counter(), "прервано": False}
+    замечания = целостность(con)
+    if замечания:
+        # битая база или схема не той версии: таблиц этой версии может не
+        # быть, и разделы ниже падали бы вместо подсказки
+        сводка["прервано"] = True
+        return сводка, замечания
     сводка["блобы"], з = блобы(con, root, выборка, полностью, rnd)
     замечания += з
     итог, карточки = vr.пересобрать(con, root, vault)
@@ -197,7 +223,7 @@ def проверить(con, root, vault, выборка=ВЫБОРКА, полн
             замечания.append(("проекции", "%s: %s" % (состояние, rel)))
     сводка["id"], з = стабильные_id(con, vault)
     замечания += з
-    сводка["evidence"], з = образец_evidence(con, выборка, rnd)
+    сводка["evidence"], з = образец_evidence(con, root, выборка, rnd)
     замечания += з
     return сводка, замечания
 
@@ -208,6 +234,8 @@ def расхождение(сводка, замечания):
 
 
 def строки_сводки(сводка):
+    if сводка["прервано"]:
+        return ["проверка прервана на целостности: сначала починить базу или схему"]
     б, п, и, e = сводка["блобы"], сводка["проекции"], сводка["id"], сводка["evidence"]
     return [
         "блобы: строк %d, без файла %d, размер не тот %d, хеш сверен %d, хеш не тот %d, "
@@ -244,9 +272,10 @@ def self_check():
             fh.write(b"x")
         сводка, з = проверить(con, root, vault)
         assert сводка["блобы"]["размер не тот"] == 1 and расхождение(сводка, з), сводка
-        con.execute("pragma user_version=1")
-        сводка, з = проверить(con, root, vault)
-        assert any("схема версии" in т for _, т in з), з
+        con.close()
+        mi.migrate(root, mi.ВЕРСИЯ - 1).close()       # настоящая старая копия
+        сводка, з = проверить(vd.только_чтение(root), root, vault)
+        assert сводка["прервано"] and any("схема версии" in т for _, т in з), з
     print("restore_check self-check: ок")
     return 0
 
@@ -265,7 +294,8 @@ def main():
     try:
         con = vd.только_чтение(a.root)
         сводка, замечания = проверить(con, a.root, a.vault, a.sample, a.full)
-    except (vd.ВолтНеПрочитан, sqlite3.OperationalError) as e:
+    except (vd.ВолтНеПрочитан, sqlite3.DatabaseError, RuntimeError, OSError,
+            ValueError) as e:
         print("restore_check: %s" % e, file=sys.stderr)
         return 2
     for s in строки_сводки(сводка):

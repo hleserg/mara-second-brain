@@ -10,6 +10,7 @@ import ledger_import as li
 import call_project as cp
 import call_asr
 import restore_check as rc
+import vault_drift as vd
 import contextd_reconcile as reconcile
 
 EVENT = {"occurred": "2026-09-02T14:05:00+03:00", "ended": "2026-09-02T14:23:11+03:00",
@@ -110,10 +111,60 @@ class Проверка(unittest.TestCase):
         self.assertFalse(rc.расхождение(сводка, з))
 
     def test_старая_схема_требует_миграции(self):
-        self.con.execute("pragma user_version=%d" % (mi.ВЕРСИЯ - 1))
-        сводка, з = self.проверка()
+        """Настоящая копия прежней версии (откат схемы), не подменённый номер:
+        таблиц новой версии в ней нет, и проверка обязана остановиться на
+        подсказке, а не упасть на них (ревью)."""
+        # откат 5 → 4 проходит только при пустых колонках происхождения
+        self.con.execute("update transcripts set config_json=null, pipeline_version=null")
+        self.con.close()
+        mi.migrate(self.root, mi.ВЕРСИЯ - 1).close()
+        con = vd.только_чтение(self.root)
+        сводка, з = rc.проверить(con, self.root, self.vault, seed=1)
         self.assertTrue(any("схема версии" in т and "--migrate" in т for _, т in з), з)
-        self.assertTrue(rc.расхождение(сводка, з))
+        self.assertTrue(сводка["прервано"] and rc.расхождение(сводка, з))
+        self.assertIn("прервана", rc.строки_сводки(сводка)[0])
+
+    def test_битая_база_и_битое_извлечение(self):
+        self.con.close()
+        env = dict(os.environ, MARA_BLOBS=self.root, MARA_VAULT=self.vault)
+        with open(mi.extraction_path(self.root, self.eid), "w", encoding="utf-8") as fh:
+            fh.write("{broken")
+        r = subprocess.run([sys.executable, СКРИПТ, "--root", self.root, "--vault", self.vault],
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("без источника 2", r.stdout,
+                      "битое извлечение — карточки без источника, не падение")
+        # WAL после прошлого чтения хранит страницы — иначе мусор в файле
+        # базы читался бы из него как целая база
+        for хвост in ("-wal", "-shm"):
+            try:
+                os.remove(os.path.join(self.root, "contextd.db" + хвост))
+            except FileNotFoundError:
+                pass
+        with open(os.path.join(self.root, "contextd.db"), "wb") as fh:
+            fh.write(b"not a database at all, just bytes" * 100)
+        r = subprocess.run([sys.executable, СКРИПТ, "--root", self.root, "--vault", self.vault],
+                           env=env, capture_output=True, text=True)
+        # битая база — расхождение шага 5, названное строкой, не трейсбек
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("integrity_check: DatabaseError", r.stdout)
+        self.assertIn("прервана", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_копия_на_чистом_каталоге(self):
+        """Пути в `blobs.path` — с живого корня; на другом `--root` файл
+        ищется под ним по хвосту `calls/…` (ревью): учение Т3б.1 идёт на
+        чистом каталоге."""
+        import shutil
+        self.con.close()
+        другой = self.root + "-restored"
+        shutil.copytree(self.root, другой)
+        shutil.rmtree(os.path.join(self.root, "calls"))     # живого аудио больше нет
+        con = vd.только_чтение(другой)
+        сводка, з = rc.проверить(con, другой, self.vault, seed=1)
+        self.assertEqual(з, [], з)
+        self.assertEqual((сводка["блобы"]["хеш сверен"], сводка["блобы"]["без строки"],
+                          сводка["evidence"]["открывается"]), (1, 0, 1))
 
     def test_командная_строка(self):
         self.con.close()
