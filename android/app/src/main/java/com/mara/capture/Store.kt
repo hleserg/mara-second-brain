@@ -100,6 +100,12 @@ class Settings(ctx: Context) {
         get() = prefs.getLong("alert_recovered", 0)
         set(v) = prefs.edit().putLong("alert_recovered", v).apply()
 
+    /** Начало наблюдения за здоровьем: первый прогон `HealthWorker`. Звонки
+     *  до него — до установки приложения, за них тревоги нет. */
+    var healthSinceMs: Long
+        get() = prefs.getLong("health_since", 0)
+        set(v) = prefs.edit().putLong("health_since", v).apply()
+
     val paired: Boolean get() = baseUrl.isNotEmpty() && token.isNotEmpty()
 }
 

@@ -211,6 +211,8 @@ object Device {
     }
 
     /** Кандидаты в производители записи. Список перебираем, показываем найденное. */
+    /** Тот же список объявлен в `AndroidManifest.xml` `<queries>`: без этого
+     *  Android 11+ пакет не покажет, и он сойдёт за неустановленный. */
     private val КАНДИДАТЫ = listOf(
         "com.huawei.soundrecorder", "com.android.soundrecorder", "com.huawei.contacts",
         "com.android.dialer", "com.google.android.dialer",

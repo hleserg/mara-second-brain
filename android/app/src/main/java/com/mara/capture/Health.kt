@@ -63,10 +63,13 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
         /** Всё, что видно телефону, без единого решения. Что не прочиталось
          *  — честный `null` или пустой список, а не «всё хорошо». `скан` —
-         *  записи, если зовущий их уже собрал: обход SAF дважды не нужен. */
+         *  записи, если зовущий их уже собрал: обход SAF дважды не нужен.
+         *  Единственная запись — начало наблюдения при первом прогоне: за
+         *  звонки до установки приложения отвечать нечем (Codex по #137). */
         fun собрать(ctx: Context, s: Settings, скан: List<Recording>? = null): Приметы {
             val сейчас = System.currentTimeMillis()
             val неделя = сейчас - НЕДЕЛЯ_МС
+            if (s.healthSinceMs == 0L) s.healthSinceMs = сейчас
             return Приметы(
                 сейчас = сейчас,
                 загрузка = сейчас - SystemClock.elapsedRealtime(),
@@ -80,7 +83,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 // без разрешения журнал бросает — это уже учтено строкой выше
                 звонки = runCatching { Device.callLog(ctx, неделя) }.getOrDefault(emptyList()),
                 записи = (скан ?: runCatching { Device.scan(ctx, s, неделя) }.getOrDefault(emptyList()))
-                    .map { it.modifiedMs }.filter { it >= неделя },
+                    .filter { it.modifiedMs >= неделя },
                 расписаниеЖиво = runCatching {
                     WorkManager.getInstance(ctx).getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
                         .any { !it.state.isFinished }
@@ -88,6 +91,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 свободноБайт = runCatching { StatFs(ctx.filesDir.path).availableBytes }.getOrNull(),
                 уведомленияРазрешены = Build.VERSION.SDK_INT < 33 ||
                     Device.granted(ctx, Manifest.permission.POST_NOTIFICATIONS),
+                наблюдениеС = s.healthSinceMs,
             )
         }
 
@@ -100,7 +104,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         @Synchronized
         fun проверить(ctx: Context, s: Settings, п: Приметы = собрать(ctx, s)): Оценка {
             val о = Здоровье.оценить(п)
-            when (Здоровье.событие(о, s.alertCallMs, п.записи)) {
+            when (Здоровье.событие(о, s.alertCallMs, п)) {
                 Здоровье.Событие.ТРЕВОГА -> {
                     s.alertCallMs = о.тревога ?: 0L
                     s.alertCount = s.alertCount + 1
@@ -109,6 +113,12 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 Здоровье.Событие.ВОССТАНОВЛЕНО -> {
                     s.alertCallMs = 0L
                     s.alertRecoveredMs = п.сейчас
+                    снять(ctx, ТРЕВОГА)
+                }
+                // звонок ушёл из недельного журнала: записи так и нет, но
+                // проверять больше нечего — закрыть, не называя восстановлением
+                Здоровье.Событие.ИСТЕКЛА -> {
+                    s.alertCallMs = 0L
                     снять(ctx, ТРЕВОГА)
                 }
                 null -> {}
