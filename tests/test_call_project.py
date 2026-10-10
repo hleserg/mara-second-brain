@@ -237,6 +237,21 @@ class Правка(unittest.TestCase):
         out = self.правка(v2, item=показ[:-1] + "...", status="done")
         self.assertTrue(out["found"], out)
 
+    def test_буквальное_многоточие_в_заголовке_не_маркер_обрезки(self):
+        """«Позвонить» и «Позвонить…» — две карточки; правка «Позвонить…»
+        обязана лечь во вторую, а не в первую по точному совпадению после
+        снятия «…» (Codex, круг 4)."""
+        v = self.волт()
+        p1 = self.карточка(v, "a.md", "Позвонить")
+        p2 = self.карточка(v, "b.md", "Позвонить…")
+        out = self.правка(v, item="Позвонить…", status="done")
+        self.assertTrue(out["found"], out)
+        self.assertIn("status: done", open(p2, encoding="utf-8").read())
+        self.assertIn("status: proposed", open(p1, encoding="utf-8").read())
+        out = self.правка(v, item="Позвонить", status="cancelled")
+        self.assertTrue(out["found"], out)
+        self.assertIn("status: cancelled", open(p1, encoding="utf-8").read())
+
     def test_пустой_после_очистки_запрос_ничего_не_находит(self):
         """«#» после `данные` — пустая строка, а пустая строка — подстрока любого
         заголовка: единственная открытая карточка закрывалась бы по ней
