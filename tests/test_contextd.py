@@ -1566,6 +1566,20 @@ class ТестЧастотаПравок(unittest.TestCase):
         self.con.commit()
         self.assertGreater(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
 
+    def test_метки_из_будущего_не_занимают_окно(self):
+        # Часы перевели на два часа назад: три записанные правки теперь «из
+        # будущего». С возрастом ноль они держали бы окно ещё три часа, каждый
+        # раз обещая час (Codex, круг 5).
+        сейчас = datetime.now(mi.TZ)
+        вперёд = (сейчас + timedelta(hours=2)).isoformat(timespec="seconds")
+        for ид in ("correction_1", "correction_2", "correction_3"):
+            self.con.execute(
+                "insert into events(id,kind,source,source_id,dedupe_key,device_id,"
+                "received) values(?,?,?,?,?,?,?)",
+                (ид, "correction", "mara", ид, "k-" + ид, self.dev, вперёд))
+        self.con.commit()
+        self.assertEqual(contextd.ждать_с_правкой(self.con, self.dev, сейчас), 0)
+
     def test_кривая_строка_не_занимает_окно(self):
         # «zzzz» лексически старше любой даты: раньше попадала в выборку
         # `limit`, вытесняла живую строку и запирала окно двумя правками.
