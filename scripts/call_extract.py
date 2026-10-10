@@ -432,7 +432,9 @@ def run(event_id, root=None):
     data["occurred_at"] = occurred
     data["pipeline_version"] = mi.PIPELINE_VERSION
     data["transcript_id"] = tid
-    data["extractor"] = MODEL          # ADR-0004 п.4: чем и по какой версии
+    # ADR-0004 п.4: чем и по какой версии. Пустая ревизия несостоявшегося
+    # звонка сделана правилом, а не моделью — и ревизия об этом говорит
+    data["extractor"] = MODEL if mi.звонок_состоялся(ev["payload"]) else "rule:outcome"
     data["prompt_version"] = PROMPT_VERSION
     # Т5.0, ТЗ §9: правила — версией, конфигурация прогона и хеш входа —
     # того текста, который ушёл модели (у legacy-расшифровки без строк

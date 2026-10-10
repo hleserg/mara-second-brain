@@ -230,8 +230,12 @@ def строка_исхода(event):
     if код in (None, "answered"):
         return None
     направление = {"incoming": "входящий", "outgoing": "исходящий",
-                   "missed": "пропущенный"}.get(p.get("direction"), "направление неизвестно")
-    return "Исход: %s (%s, %s с)" % (mi.ИСХОДЫ[код], направление, p.get("duration_s", 0))
+                   "missed": "пропущенный"}[p["direction"]]
+    try:
+        сек = max(0, int(p.get("duration_s")))
+    except (TypeError, ValueError):
+        сек = 0
+    return "Исход: %s (%s, %d с)" % (mi.ИСХОДЫ[код], направление, сек)
 
 
 def is_owner(name, canon):
@@ -388,8 +392,6 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
         [("title", yaml_str("%s · %s · %s" % (заголовок(event), who, human))),
          ("id", oid),
          ("type", "conversation"),
-         ("outcome", None if mi.звонок_состоялся(event.get("payload"))
-          else mi.исход_звонка(event.get("payload"))),
          ("source", "phone"),
          ("source_id", native),
          ("created", created),
@@ -407,7 +409,9 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
          ("pipeline_version", str(mi.PIPELINE_VERSION)),
          # Т5.0: из какой ревизии извлечения карточка (как у обязательства)
          ("extraction_id", extraction.get("extraction_id")),
-         ("valid_from", event.get("ended") or event.get("occurred"))],
+         ("valid_from", event.get("ended") or event.get("occurred")),
+         ("outcome", None if mi.звонок_состоялся(event.get("payload"))
+          else mi.исход_звонка(event.get("payload")))],
         lists=[("audience", ["mara"])])
     return path, fm + "\n" + body
 

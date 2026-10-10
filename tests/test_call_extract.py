@@ -223,8 +223,9 @@ class Шаг(unittest.TestCase):
         self.assertEqual((extr["requests"], extr["commitments"]), ([], []))
         self.assertEqual(self.con.execute("select state from events where id=?",
                                           (self.eid,)).fetchone()[0], "extracted")
+        self.assertEqual(extr["extractor"], "rule:outcome", "ревизия сделана правилом, не моделью")
         self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid)["outcome"],
-                         "no-answer", "исход доезжает до проектора из реестра")
+                         "no-answer", "в ревизии записано, почему списки пустые")
 
     def test_отказ_по_evidence_ложится_в_аудит(self):
         extr = self.прогон({"requests": [

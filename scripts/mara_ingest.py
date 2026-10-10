@@ -117,14 +117,18 @@ def исход_звонка(payload):
     и карточка остаётся прежней."""
     p = payload or {}
     if p.get("direction") == "missed":
-        return "missed"
+        return "missed"             # и голосовая почта: длительность там > 0
     try:
         сек = int(p.get("duration_s"))
     except (TypeError, ValueError):
         return None
-    if сек <= 0:
-        return "no-answer" if p.get("direction") == "outgoing" else "missed"
-    return "answered"
+    if сек > 0:
+        return "answered"
+    # ноль секунд без направления не толковать: недозвон от пропущенного
+    # отличает только направление, а телефон шлёт поля парой
+    if p.get("direction") == "outgoing":
+        return "no-answer"
+    return "missed" if p.get("direction") == "incoming" else None
 
 
 def звонок_состоялся(payload):

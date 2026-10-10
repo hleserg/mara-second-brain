@@ -95,6 +95,11 @@ class Исход(unittest.TestCase):
         self.assertEqual(mi.исход_звонка({"direction": "incoming", "duration_s": 0}), "missed")
         self.assertEqual(mi.исход_звонка({"direction": "outgoing", "duration_s": 0}), "no-answer")
         self.assertEqual(mi.исход_звонка({"direction": "outgoing", "duration_s": "0"}), "no-answer")
+        # голосовая почта и отклонённый: журнал даёт missed при длительности > 0
+        self.assertEqual(mi.исход_звонка({"direction": "missed", "duration_s": 45}), "missed")
+        # ноль секунд без направления — недозвон от пропущенного не отличить
+        self.assertIsNone(mi.исход_звонка({"duration_s": 0}))
+        self.assertIsNone(mi.исход_звонка({"direction": "unknown", "duration_s": 0}))
         self.assertTrue(mi.звонок_состоялся({}))
         self.assertFalse(mi.звонок_состоялся({"direction": "outgoing", "duration_s": 0}))
 
@@ -119,6 +124,13 @@ class Исход(unittest.TestCase):
         self.assertIn("\noutcome: no-answer\n", text)
         self.assertIn("Исход: не дозвонился (исходящий, 0 с)", cp.body_of(text))
         self.assertNotIn("поговорили", text)
+        # outcome — хвостом шапки, как и прочие новые ключи
+        шапка = text.split("---", 2)[1].strip().splitlines()
+        self.assertEqual(шапка[-3], "outcome: no-answer", шапка[-4:])
+        # длительность печатается разобранной, а не сырой
+        _, text = cp.conversation_card(self.событие(direction="outgoing", duration_s="0"),
+                                       dict(EXTR, requests=[], commitments=[]), {})
+        self.assertIn("Исход: не дозвонился (исходящий, 0 с)", text)
 
     def test_пропущенный_назван_пропущенным(self):
         _, text = cp.conversation_card(self.событие(direction="missed", duration_s=0), EXTR, {})
