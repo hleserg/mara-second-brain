@@ -210,7 +210,8 @@ class MainActivity : AppCompatActivity() {
     /**
      * Диагностика по ТЗ §6: что именно видно на этой прошивке. Отчёт владелец
      * копирует кнопкой и присылает текстом — это и есть материал для пункта
-     * §24 про ограничения конкретной Huawei.
+     * §24 про ограничения конкретной Huawei. Номера и имена в нём затёрты
+     * до того, как он покинул телефон (`Затирание`, Т3.5, М5 п.7).
      */
     private fun мастер() = фоном {
         val медиатека = Device.mediaStore(this)
@@ -218,14 +219,16 @@ class MainActivity : AppCompatActivity() {
         val последняя = (медиатека + папка).maxByOrNull { it.modifiedMs }
         val журнал = Device.callLog(this, System.currentTimeMillis() - 7 * 24 * 3600_000L)
         val совпало = последняя?.let { CallLogMatcher.nearest(журнал, it.modifiedMs) }
-        listOf(
+        Затирание.текст(listOf(
             "модель: ${Build.MODEL} (${Build.MANUFACTURER})",
             "сборка: ${Build.DISPLAY}, Android ${Build.VERSION.RELEASE}",
             "рекордеры: " + Device.producers(this).joinToString("; ").ifEmpty { "ни одного из известных" },
             "в медиатеке записей: ${медиатека.size}",
             "в выбранной папке: " + if (s.folderUri.isEmpty()) "папка не выбрана" else "${папка.size}",
-            "последний файл: " + (последняя?.let { "${it.name}, ${it.sizeBytes} Б, ${когда(it.modifiedMs)}" }
-                ?: "нет"),
+            // имя файла — от рекордера, в нём бывает имя контакта: наружу форма
+            "последний файл: " + (последняя?.let {
+                "${Затирание.файл(it.name)}, ${it.sizeBytes} Б, ${когда(it.modifiedMs)}"
+            } ?: "нет"),
             // `Device.open` ловит только «файла нет»; отозванное разрешение
             // и отвалившийся SAF-грант бросают `SecurityException` — и здесь
             // это законный ответ «нет», а не повод потерять весь отчёт.
@@ -238,21 +241,23 @@ class MainActivity : AppCompatActivity() {
             } ?: "-"),
             "звук: " + (последняя?.let { Device.audioInfo(this, it) } ?: "-"),
             "звонков в журнале за неделю: ${журнал.size}",
-            "сопоставился с: " + (совпало?.let {
-                "${it.name ?: it.number} · ${it.direction} · ${it.durationS} с"
-            } ?: "ни с чем"),
+            "сопоставился с: " + Затирание.контакт(совпало),
             "SMS в провайдере за неделю: " + (Device.sms(this, 0, System.currentTimeMillis() - 7 * 24 * 3600_000L)
                 ?.size?.toString() ?: "провайдер не отдал (нет разрешения или прошивка)"),
             "слушатель уведомлений: " + if (слушаем()) "включён" else "выключен",
-            // сойдётся ли с именем файла экспорта — вопрос к полю, не к коду
-            "последняя беседа WhatsApp по уведомлению: " + s.lastChatTitle.ifEmpty { "ещё не было" },
-        ).joinToString("\n")
+            // сойдётся ли с именем файла экспорта — вопрос к полю, не к коду;
+            // сам заголовок — имя собеседника, наружу идёт только длина
+            "последняя беседа WhatsApp по уведомлению: " + Затирание.беседа(s.lastChatTitle),
+        ).joinToString("\n"))
     }
 
     /** Скан медиатеки, обход SAF и разбор кодека — не на главном потоке. */
     private fun фоном(сбор: () -> String) {
         Thread {
-            val t = runCatching(сбор).getOrElse { "не собралось: ${it.javaClass.simpleName}: ${it.message}" }
+            // Только класс исключения: сообщение SAF/MediaStore несёт URI или
+            // путь, а в дереве ACR это каталог контакта — затиралкой по цифрам
+            // имя не снять, а отчёт обещан безопасным (Codex по #134).
+            val t = runCatching(сбор).getOrElse { "не собралось: ${it.javaClass.simpleName}" }
             runOnUiThread { покажи(t) }
         }.start()
     }
