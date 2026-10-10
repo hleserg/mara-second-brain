@@ -433,20 +433,23 @@ def run(event_id, root=None):
         сек = 0
     правило_исхода = {"direction": ev["payload"].get("direction"),
                       "duration_s": ev["payload"].get("duration_s"), "words": слов,
-                      "journal": исход}
+                      "journal": исход, "match": ev["payload"].get("match")}
     правило = исход in ("missed", "no-answer") and сек <= 0 and слов == 0
     if правило:
         raw = {}
         print("call_extract: %s — звонок %s (%s), речи нет, модель не звалась"
               % (event_id, mi.ИСХОДЫ[исход], исход), file=sys.stderr)
     else:
-        if исход in ("missed", "no-answer") and сек <= 0:
+        if исход in ("missed", "no-answer") and сек <= 0 and ev["payload"].get("match") != "number":
             # речь при нулевой длительности: сопоставление по времени не даёт
             # права называть разговор недозвоном — исход неизвестен, карточка
             # как до Т4.3; журнальный исход остаётся в `outcome_rule.journal`
-            # (Codex по #135, круг 5)
-            print("call_extract: %s — по журналу %s, но %d слов речи: исход неизвестен, "
-                  "модель зовётся" % (event_id, mi.ИСХОДЫ[исход], слов), file=sys.stderr)
+            # (Codex по #135, круг 5). Сопоставление по номеру (`match:
+            # number`, телефон нашёл номер звонка в пути записи) — даёт:
+            # запись точно этого звонка, речь — гудки или автоответчик
+            print("call_extract: %s — по журналу %s, но %d слов речи и сопоставление по "
+                  "времени: исход неизвестен, модель зовётся"
+                  % (event_id, mi.ИСХОДЫ[исход], слов), file=sys.stderr)
             исход = None
         elif исход in ("missed", "no-answer"):
             print("call_extract: %s — по журналу %s, %d с (голосовая почта): модель зовётся"

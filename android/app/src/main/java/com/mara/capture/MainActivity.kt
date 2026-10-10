@@ -218,7 +218,7 @@ class MainActivity : AppCompatActivity() {
         val папка = Device.folder(this, s.folderUri)
         val последняя = (медиатека + папка).maxByOrNull { it.modifiedMs }
         val журнал = Device.callLog(this, System.currentTimeMillis() - 7 * 24 * 3600_000L)
-        val совпало = последняя?.let { CallLogMatcher.nearest(журнал, it.modifiedMs) }
+        val совпало = последняя?.let { CallLogMatcher.match(журнал, it.modifiedMs, it.id + " " + it.name) }
         Затирание.текст(listOf(
             "модель: ${Build.MODEL} (${Build.MANUFACTURER})",
             "сборка: ${Build.DISPLAY}, Android ${Build.VERSION.RELEASE}",
@@ -241,7 +241,7 @@ class MainActivity : AppCompatActivity() {
             } ?: "-"),
             "звук: " + (последняя?.let { Device.audioInfo(this, it) } ?: "-"),
             "звонков в журнале за неделю: ${журнал.size}",
-            "сопоставился с: " + Затирание.контакт(совпало),
+            "сопоставился с: " + Затирание.контакт(совпало?.entry, совпало?.by),
             "SMS в провайдере за неделю: " + (Device.sms(this, 0, System.currentTimeMillis() - 7 * 24 * 3600_000L)
                 ?.size?.toString() ?: "провайдер не отдал (нет разрешения или прошивка)"),
             "слушатель уведомлений: " + if (слушаем()) "включён" else "выключен",

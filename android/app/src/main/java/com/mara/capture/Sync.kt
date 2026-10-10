@@ -106,9 +106,10 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 return null
             }
             JobState.HASHED -> {
-                val звонок = CallLogMatcher.nearest(журнал, job.modifiedMs)
-                val body = EventJson.build(job.recording(), звонок, job.sha256!!,
-                    Device.ext(job.recording()), job.producer, ZoneId.systemDefault())
+                // подсказка — uri и имя файла: у ACR номер в каталоге (Т4.3)
+                val м = CallLogMatcher.match(журнал, job.modifiedMs, job.id + " " + job.name)
+                val body = EventJson.build(job.recording(), м?.entry, job.sha256!!,
+                    Device.ext(job.recording()), job.producer, ZoneId.systemDefault(), м?.by)
                 val r = api.postEvent(body)
                 q.save(job.copy(state = JobFlow.next(job.state, r), eventId = r.eventId,
                     attempts = job.attempts + 1, error = ошибка(r)), now)

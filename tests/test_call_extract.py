@@ -233,7 +233,7 @@ class Шаг(unittest.TestCase):
         self.assertEqual(extr["config"]["rule"], "outcome")
         self.assertEqual(extr["config"]["outcome_rule"],
                          {"direction": "outgoing", "duration_s": 0, "words": 0,
-                          "journal": "no-answer"})
+                          "journal": "no-answer", "match": None})
         self.assertNotIn("model", extr["config"], "настроек модели у ревизии правила нет")
         self.assertEqual(extr["rules_version"], 2, "правило исхода — новая версия правил")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(json.dumps(
@@ -270,7 +270,23 @@ class Шаг(unittest.TestCase):
         self.assertEqual((extr["extractor"], extr["prompt_version"]), (ce.MODEL, ce.PROMPT_VERSION))
         self.assertEqual(extr["config"]["outcome_rule"],
                          {"direction": "outgoing", "duration_s": 0, "words": 8,
-                          "journal": "no-answer"})
+                          "journal": "no-answer", "match": None})
+
+    def test_сопоставление_по_номеру_даёт_право_на_недозвон_и_при_речи(self):
+        """Телефон нашёл номер звонка в пути записи (`match: number`) — запись
+        точно этого звонка; речь при нуле секунд — гудки или автоответчик,
+        модель зовётся, исход остаётся по журналу."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "outgoing", "duration_s": 0,
+                                      "match": "number"}), self.eid))
+        self.con.commit()
+        self.asr.записать_сегменты(self.con, self.eid, None, [
+            {"segment_id": "s0001", "start_ms": 0, "end_ms": 9000, "speaker": "unknown-A",
+             "text": "абонент временно недоступен перезвоните позже"}])
+        extr = self.прогон({"requests": []})
+        self.assertEqual(extr["outcome"], "no-answer")
+        self.assertEqual(extr["extractor"], ce.MODEL, "модель всё равно зовётся: речь есть")
+        self.assertEqual(extr["config"]["outcome_rule"]["match"], "number")
         self.assertEqual(extr["config"]["model"], ce.MODEL, "настройки модели на месте")
 
     def test_голосовая_почта_извлекается(self):
@@ -347,7 +363,7 @@ class Шаг(unittest.TestCase):
                                           # Т4.3: входы правила исхода — в каждой ревизии
                                           "outcome_rule": {"direction": None,
                                                            "duration_s": None, "words": 2,
-                                                           "journal": None}})
+                                                           "journal": None, "match": None}})
         self.assertEqual(len(extr["config"]["schema_sha256"]), 64,
                          "схема ответа тоже под происхождением")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(
