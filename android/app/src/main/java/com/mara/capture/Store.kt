@@ -182,11 +182,13 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
                 db.execSQL("alter table jobs add column idem_key text")
             }
             // Колонка уже была — базу открывал откаченный APK схемы 4. Он её
-            // не знает: на доросшем файле обнулил sha256, не тронув ключ, и
-            // под старым ключом сервер отдал бы квитанцию про прежние байты
-            // (`need_blob=false` → DONE без заливки). NEW ⇒ ни хеша, ни ключа
-            // — восстанавливаем инвариант за него (Codex по #139, круг 2)
-            db.execSQL("update jobs set idem_key=null where state='NEW'")
+            // не знает: на доросшем файле обнулил sha256, не тронув ключ, а
+            // мог и пересчитать хеш — строка в HASHED с ключом прежнего тела.
+            // Под старым ключом сервер отдал бы квитанцию про прежние байты
+            // (`need_blob=false` → DONE без заливки). Ключи до POST сжигаем
+            // все: свежий ключ стоит одного лишнего дедупа на сервере, старый
+            // — потерянной записи (Codex по #139, круги 2 и 4)
+            db.execSQL("update jobs set idem_key=null where state in ('NEW','HASHED')")
         }
     }
 
@@ -272,12 +274,13 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         writableDatabase.update("jobs", ContentValues().apply {
             put("state", job.state.name); put("attempts", job.attempts)
             put("sha256", job.sha256); put("event_id", job.eventId)
-            // Ключ квитанции из снимка не переписывается: снимок бывает старее
-            // строки (второй воркер успел выдать ключ или сжечь его в `seen`),
-            // и безусловный `put` вернул бы ключ под новое тело или стёр бы
-            // выданный. Выдаёт ключ только `выдатьКлюч`; сжигает — переход
-            // в NEW, здесь (409) и в `seen`/`retryFailed` (Codex по #139, круг 3)
-            if (job.state == JobState.NEW) putNull("idem_key")
+            // Ключ квитанции `save` не трогает вовсе: снимок бывает старее
+            // строки (второй воркер успел выдать ключ, сжечь его в `seen` или
+            // уйти дальше), и любая запись по снимку — хоть ключа, хоть null
+            // по `job.state == NEW` — вернула бы ключ под новое тело или стёрла
+            // бы выданный под принятый запрос. Выдаёт ключ только
+            // `выдатьКлюч`, сжигают — `сжечьКлюч` с проверкой состояния строки,
+            // `seen`, `retryFailed`, миграция 5 (Codex по #139, круги 3–4)
             put("error", job.error); put("updated", nowMs)
         }, "id=?", arrayOf(job.id))
     }
@@ -296,6 +299,17 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         }.executeUpdateDelete()
         return db.rawQuery("select idem_key from jobs where id=?", arrayOf(id))
             .use { if (it.moveToFirst()) it.getString(0) else null }
+    }
+
+    /**
+     * Сжечь ключ при возврате в NEW после 409: тело с новым хешем — другое.
+     * Условие по состоянию **строки**, не снимка: запоздалый снимок другого
+     * воркера сюда не попадёт, а строку, которую уже увели из `из`, не
+     * тронем (Codex по #139, круг 4).
+     */
+    fun сжечьКлюч(id: String, из: JobState) {
+        writableDatabase.compileStatement("update jobs set idem_key=null where id=? and state=?")
+            .apply { bindString(1, id); bindString(2, из.name) }.executeUpdateDelete()
     }
 
     fun count(state: JobState): Int =

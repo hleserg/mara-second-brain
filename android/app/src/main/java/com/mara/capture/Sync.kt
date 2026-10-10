@@ -135,8 +135,9 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 val дальше = JobFlow.next(job.state, r)
                 // 409 значит, что файл дописали, пока мы его читали: считаем
                 // заново, иначе на сервер уедет половина разговора
-                // ключ квитанции в NEW сжигает сама очередь (`save`): он
-                // принадлежит телу, а тело с новым хешем — другое
+                // ключ квитанции принадлежит телу, а тело с новым хешем —
+                // другое: сжечь, но только если строка всё ещё наша (POSTED)
+                if (дальше == JobState.NEW) q.сжечьКлюч(job.id, JobState.POSTED)
                 q.save(job.copy(state = дальше, attempts = job.attempts + 1,
                     sha256 = if (дальше == JobState.NEW) null else job.sha256,
                     error = ошибка(r)), now)
