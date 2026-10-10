@@ -34,7 +34,12 @@ object Device {
      * Путь не зашит: берём всё аудио и оставляем то, в чьём пути есть примета
      * (ТЗ §22 — не hardcode'ить recording path Huawei).
      */
-    fun mediaStore(ctx: Context, sinceMs: Long = 0): List<Recording> {
+    fun mediaStore(ctx: Context, sinceMs: Long = 0): List<Recording> =
+        mediaStoreOrNull(ctx, sinceMs) ?: emptyList()
+
+    /** null — провайдер не отдал курсор: это не «записей нет», здоровье
+     *  (Т4.2) различает; сверке и мастеру хватает пустого списка. */
+    fun mediaStoreOrNull(ctx: Context, sinceMs: Long = 0): List<Recording>? {
         val out = mutableListOf<Recording>()
         val cols = arrayOf(
             MediaStore.Audio.Media._ID, MediaStore.Audio.Media.DISPLAY_NAME,
@@ -44,7 +49,7 @@ object Device {
         val c: Cursor = ctx.contentResolver.query(
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cols, null, null,
             MediaStore.Audio.Media.DATE_MODIFIED + " desc"
-        ) ?: return out
+        ) ?: return null
         c.use {
             while (it.moveToNext()) {
                 val путь = (it.getString(4) ?: "") + (it.getString(1) ?: "")
@@ -87,6 +92,10 @@ object Device {
      *  SAF даёт разные uri, но одинаковый sha256 — сервер отсеет дубль сам. */
     fun scan(ctx: Context, s: Settings, sinceMs: Long = 0): List<Recording> =
         (mediaStore(ctx, sinceMs) + folder(ctx, s.folderUri)).distinctBy { it.id }
+
+    /** То же, но `null`, если медиатека не отдала курсор — для здоровья (Т4.2). */
+    fun scanOrNull(ctx: Context, s: Settings, sinceMs: Long = 0): List<Recording>? =
+        mediaStoreOrNull(ctx, sinceMs)?.let { (it + folder(ctx, s.folderUri)).distinctBy { r -> r.id } }
 
     /** null — файла больше нет. `openInputStream` на исчезнувшей строке
      *  MediaStore не возвращает null, а бросает: без этого перехвата

@@ -34,11 +34,14 @@ import java.util.concurrent.TimeUnit
 class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
     override fun doWork(): Result {
-        val о = проверить(applicationContext, Settings(applicationContext))
-        // §8.4 п.3: после звонка запись ждём с повтором и отступом, а не до
-        // следующего часа; `ПОВТОРОВ` — чтобы не ждать вечно
-        return if (о.состояние == Состояние.recovering && runAttemptCount < ПОВТОРОВ) Result.retry()
-               else Result.success()
+        val s = Settings(applicationContext)
+        val о = проверить(applicationContext, s)
+        // §8.4 п.3: пока запись за звонком не появилась — в окне или уже с
+        // открытой тревогой — повтор с отступом, а не до следующего часа:
+        // файл, дописанный чуть позже окна, закрывает тревогу за минуты.
+        // `ПОВТОРОВ` — чтобы не ждать вечно (Codex по #137, круг 5)
+        val ждём = о.состояние == Состояние.recovering || s.alertCallMs != 0L
+        return if (ждём && runAttemptCount < ПОВТОРОВ) Result.retry() else Result.success()
     }
 
     companion object {
@@ -79,7 +82,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             // разрешения или с молчащим провайдером журнал — null, упавший
             // скан — null (Codex, круги 3–4)
             val журнал = runCatching { Device.callLogOrNull(ctx, неделя) }.getOrNull()
-            val скан = runCatching { Device.scan(ctx, s, неделя) }.getOrNull()
+            val скан = runCatching { Device.scanOrNull(ctx, s, неделя) }.getOrNull()
             return Приметы(
                 сейчас = сейчас,
                 загрузка = сейчас - SystemClock.elapsedRealtime(),
@@ -92,9 +95,13 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 рекордерЕсть = Device.producers(ctx).isNotEmpty(),
                 звонки = журнал ?: emptyList(),
                 записи = скан ?: emptyList(),
+                // обе периодические: сверка и сама проверка здоровья — потеря
+                // любой из них значит, что следующего часа не будет
                 расписаниеЖиво = runCatching {
-                    WorkManager.getInstance(ctx).getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
-                        .any { !it.state.isFinished }
+                    val wm = WorkManager.getInstance(ctx)
+                    listOf(SyncWorker.ПЕРИОД, ПЕРИОД).all { имя ->
+                        wm.getWorkInfosForUniqueWork(имя).get().any { !it.state.isFinished }
+                    }
                 }.getOrNull(),
                 свободноБайт = runCatching { StatFs(ctx.filesDir.path).availableBytes }.getOrNull(),
                 уведомленияРазрешены = Build.VERSION.SDK_INT < 33 ||
