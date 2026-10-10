@@ -202,6 +202,66 @@ class Правка(unittest.TestCase):
                                                  encoding="utf-8").read(),
                          "пакет пересобран сразу: сделанное из списка ушло")
 
+    def test_правка_словами_находит_карточку_как_её_видит_мара(self):
+        """Карточка без `id`: Мара видит заголовок после `context_pack.данные`
+        (`foo bar baz`), и правка её словами обязана найти карточку с сырым
+        `foo_bar_baz <x>` — поиск нормализует так же, как показ (Codex по #129)."""
+        v = self.волт()
+        p = self.карточка(v, "foo.md", "foo_bar_baz <x> #deadbeef")
+        out = self.правка(v, item="foo bar baz deadbeef", status="done")
+        self.assertTrue(out["found"], out)
+        self.assertIn("\nstatus: done\n", open(p, encoding="utf-8").read())
+
+    def test_правка_словами_по_обрезанному_заголовку(self):
+        """Заголовок длиннее `MAX_TITLE` Мара видит обрезанным с «…»; правка
+        этим текстом обязана найти карточку без `id` (Codex по #129, круг 2)."""
+        import context_pack
+        # хвост из многих разных слов: доля общих слов ниже порога, и найти
+        # карточку можно только по показанному виду, не по словам (Codex,
+        # круг 3: ярус слов маскировал несработавшее снятие «…»)
+        title = ("согласовать с подрядчиком смету на ремонт кухни и прихожей до пятницы "
+                 + " ".join("слово%d" % i for i in range(40)))
+        self.assertGreater(len(title), context_pack.MAX_TITLE)
+        v = self.волт()
+        p = self.карточка(v, "long.md", title)
+        показ = context_pack.данные(title, context_pack.MAX_TITLE)
+        self.assertTrue(показ.endswith("…"), показ)
+        qw, tw = cp._слова(показ.lower()), cp._слова(title.lower())
+        self.assertLess(len(qw & tw) / len(tw), 0.5, "иначе тест держится на ярусе слов")
+        out = self.правка(v, item=показ, status="done")
+        self.assertTrue(out["found"], out)
+        self.assertIn("\nstatus: done\n", open(p, encoding="utf-8").read())
+        # то же с «...» вместо «…» — так модель может переписать многоточие
+        v2 = self.волт()
+        p2 = self.карточка(v2, "long.md", title)
+        out = self.правка(v2, item=показ[:-1] + "...", status="done")
+        self.assertTrue(out["found"], out)
+
+    def test_буквальное_многоточие_в_заголовке_не_маркер_обрезки(self):
+        """«Позвонить» и «Позвонить…» — две карточки; правка «Позвонить…»
+        обязана лечь во вторую, а не в первую по точному совпадению после
+        снятия «…» (Codex, круг 4)."""
+        v = self.волт()
+        p1 = self.карточка(v, "a.md", "Позвонить")
+        p2 = self.карточка(v, "b.md", "Позвонить…")
+        out = self.правка(v, item="Позвонить…", status="done")
+        self.assertTrue(out["found"], out)
+        self.assertIn("status: done", open(p2, encoding="utf-8").read())
+        self.assertIn("status: proposed", open(p1, encoding="utf-8").read())
+        out = self.правка(v, item="Позвонить", status="cancelled")
+        self.assertTrue(out["found"], out)
+        self.assertIn("status: cancelled", open(p1, encoding="utf-8").read())
+
+    def test_пустой_после_очистки_запрос_ничего_не_находит(self):
+        """«#» после `данные` — пустая строка, а пустая строка — подстрока любого
+        заголовка: единственная открытая карточка закрывалась бы по ней
+        (Codex, круг 3)."""
+        v = self.волт()
+        p = self.карточка(v, "smeta.md", "прислать смету")
+        out = self.правка(v, item="#", status="done")
+        self.assertFalse(out["found"], out)
+        self.assertIn("status: proposed", open(p, encoding="utf-8").read())
+
     def test_срок_меняется_а_история_остаётся(self):
         v = self.волт()
         p = self.карточка(v, "smeta.md", "прислать смету")
@@ -234,7 +294,7 @@ class Правка(unittest.TestCase):
                      "due: 2026-09-05", "due_explicit: true", "sensitive: true",
                      "cloud_allowed: false"):
             self.assertIn(line, text)
-        self.assertIn("покрасить забор — до 2026-09-05",
+        self.assertIn("«покрасить забор» — до 2026-09-05",
                       open(os.path.join(v, "_system/context/now.md"), encoding="utf-8").read())
 
     def test_два_похожих_не_угадываем(self):
