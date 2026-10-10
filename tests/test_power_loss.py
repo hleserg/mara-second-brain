@@ -10,7 +10,13 @@
 дело до конца и ничего не плодит.
 
 Ребёнок — отдельный интерпретатор с тем же кодом; он доходит до нужной
-точки, ставит метку-файл и засыпает, родитель по метке убивает его.
+точки, пишет в метку-файл то, что видит своим соединением, и засыпает;
+родитель по метке убивает его. `SIGKILL` — смерть процесса, не обрыв
+питания: страничный кэш ОС доезжает до диска, и долговечность коммита при
+настоящем обрыве держится на `synchronous` (FULL по умолчанию, ADR-0005),
+а не на этом стенде. Что стенд проверяет: полукоммита нет, замок мертвеца
+отпущен, повтор доводит, коммит без checkpoint и без закрытия соединения
+читается.
 """
 import io, os, sys, time, glob, signal, shutil, hashlib, sqlite3, tempfile, subprocess, unittest
 
@@ -30,7 +36,14 @@ import mara_ingest as mi
 root, eid, метка, сценарий = %(root)r, %(eid)r, %(метка)r, %(сценарий)r
 con = mi.connect(root)
 def стоп():
-    open(метка, "w").close()
+    # что ребёнок видит сам перед смертью — родитель сверит с тем, что
+    # пережило смерть (мутант «метка до записей» иначе проходил бы)
+    вижу = "%%s %%d" %% (con.execute("select state from events where id=?", (eid,)).fetchone()[0],
+                      con.execute("select count(*) from jobs where event_id=?",
+                                  (eid,)).fetchone()[0])
+    with open(метка + ".tmp", "w") as fh:
+        fh.write(вижу)
+    os.replace(метка + ".tmp", метка)
     time.sleep(60)
 if сценарий == "посреди-транзакции":
     with mi.транзакция(con):
@@ -79,8 +92,8 @@ class УбитыйПроцесс(unittest.TestCase):
                 p.wait()
             p.stderr.close()
 
-    def убить_на(self, сценарий):
-        """Запустить ребёнка, дождаться метки, SIGKILL. Возвращает код выхода."""
+    def запустить(self, сценарий):
+        """Ребёнок до метки. Возвращает (процесс, что он видел своим соединением)."""
         метка = os.path.join(self.root, "метка-" + сценарий)
         код = РЕБЁНОК % {"scripts": SCRIPTS, "root": self.root, "eid": self.eid,
                         "метка": метка, "сценарий": сценарий, "sha": self.sha}
@@ -95,9 +108,33 @@ class УбитыйПроцесс(unittest.TestCase):
             time.sleep(0.05)
         else:
             self.fail("ребёнок не дошёл до метки")
+        with open(метка, encoding="utf-8") as fh:
+            return p, fh.read()
+
+    def убить(self, p):
+        """SIGKILL и подтверждение, что умер именно от него, а не вышел сам."""
         p.send_signal(signal.SIGKILL)
         p.wait()
-        return p.returncode
+        self.assertEqual(p.returncode, -signal.SIGKILL, "ребёнок вышел сам — стенд ничего не проверил")
+
+    def убить_на(self, сценарий):
+        """Запустить ребёнка, дождаться метки, SIGKILL. Возвращает что он видел."""
+        p, вижу = self.запустить(сценарий)
+        self.убить(p)
+        return вижу
+
+    def замок_занят(self):
+        """Чужой `begin immediate` держит базу: короткий таймаут упирается."""
+        быстрое = sqlite3.connect(os.path.join(self.root, "contextd.db"), timeout=0.2,
+                                  isolation_level=None)
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                быстрое.execute("begin immediate")
+        finally:
+            быстрое.close()
+
+    def wal(self):
+        return os.path.getsize(os.path.join(self.root, "contextd.db-wal"))
 
     def состояние(self):
         return self.con.execute("select state from events where id=?",
@@ -111,7 +148,10 @@ class УбитыйПроцесс(unittest.TestCase):
         return self.con.execute("pragma quick_check").fetchone()[0]
 
     def test_смерть_посреди_транзакции_не_оставляет_полусостояния(self):
-        self.assertEqual(self.убить_на("посреди-транзакции"), -signal.SIGKILL)
+        p, вижу = self.запустить("посреди-транзакции")
+        self.assertEqual(вижу, "stored 1", "ребёнок внутри транзакции видел свои записи")
+        self.замок_занят()                       # транзакция и правда открыта
+        self.убить(p)
         self.assertEqual((self.состояние(), self.работ()), ("new", 0),
                          "незакоммиченное не пережило смерть")
         self.assertEqual(self.цела(), "ok")
@@ -144,7 +184,11 @@ class УбитыйПроцесс(unittest.TestCase):
     def test_коммит_переживает_смерть_до_закрытия_соединения(self):
         """WAL без checkpoint и без clean shutdown — коммит на месте
         (§5.1: восстановление не зависит от чистого завершения)."""
-        self.убить_на("после-коммита")
+        до = self.wal()
+        p, вижу = self.запустить("после-коммита")
+        self.assertEqual(вижу, "stored 1")
+        self.assertGreater(self.wal(), до, "коммит ребёнка лежит в WAL, checkpoint не было")
+        self.убить(p)
         self.assertEqual((self.состояние(), self.работ()), ("stored", 1))
         self.assertEqual(self.цела(), "ok")
         # с чистого соединения — то же, и после checkpoint тоже
@@ -161,24 +205,9 @@ class УбитыйПроцесс(unittest.TestCase):
         """`begin immediate` в убитом процессе: пока он жив — `database is
         locked`, умер — запись проходит, ждать `busy_timeout` до конца не
         приходится."""
-        метка = os.path.join(self.root, "метка-с-замком")
-        код = РЕБЁНОК % {"scripts": SCRIPTS, "root": self.root, "eid": self.eid,
-                        "метка": метка, "сценарий": "с-замком", "sha": self.sha}
-        p = subprocess.Popen([sys.executable, "-c", код], stderr=subprocess.PIPE)
-        self.дети.append(p)
-        for _ in range(600):
-            if os.path.exists(метка):
-                break
-            time.sleep(0.05)
-        else:
-            self.fail("ребёнок не взял замок")
-        быстрое = sqlite3.connect(os.path.join(self.root, "contextd.db"), timeout=0.2,
-                                  isolation_level=None)
-        self.addCleanup(быстрое.close)
-        with self.assertRaises(sqlite3.OperationalError):
-            быстрое.execute("begin immediate")
-        p.send_signal(signal.SIGKILL)
-        p.wait()
+        p, _ = self.запустить("с-замком")
+        self.замок_занят()
+        self.убить(p)
         t = time.monotonic()
         with mi.транзакция(self.con):
             self.con.execute("insert into compute_nodes(id,name) values('n','x')")
