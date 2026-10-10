@@ -176,6 +176,32 @@ class Пересборка(unittest.TestCase):
         self.assertEqual(карточки[self.card][0], "совпало")
         self.assertIn("extraction_id: %s" % xid, карточки[self.card][1])
 
+    def test_разговор_без_обязательств_тоже_знает_свою_ревизию(self):
+        """Звонок без обязательств: ссылка на ревизию только у разговора
+        (`conversations.extraction_id`); без неё пересборка брала бы
+        последнюю ревизию и показывала «разошлось» на верном волте
+        (Codex, круг 2)."""
+        import call_extract as ce
+        eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "d2",
+            "occurred_at": "2026-09-03T10:00:00+03:00", "ended_at": "2026-09-03T10:05:00+03:00",
+            "payload": EVENT["payload"]})
+        пусто = dict(self.extr, requests=[], commitments=[], event_id=eid,
+                     people_mentioned=[])
+        первая = mi.uuid7()
+        ce.записать_ревизию(self.con, первая, dict(пусто, extraction_id=первая))
+        self.con.commit()
+        written = cp.run(eid, self.vault, self.root)
+        conv = [w for w in written if w.startswith("kb/conversations/")][0]
+        self.assertFalse([w for w in written if w.startswith("kb/commitments/")])
+        вторая = mi.uuid7()
+        ce.записать_ревизию(self.con, вторая, dict(пусто, extraction_id=вторая,
+                                                  open_questions=["а что со сметой?"]))
+        self.con.commit()
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[conv][0], "совпало", карточки[conv][2])
+        self.assertIn("extraction_id: %s" % первая, карточки[conv][1])
+
     def test_пересборка_по_ревизии_карточки_а_не_по_последней(self):
         """Переизвлечение прошло, перепроекция ещё нет: карточки ссылаются
         на первую ревизию — пересборка рисует по ней (тело и `extraction_id`),

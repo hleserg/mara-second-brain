@@ -597,8 +597,10 @@ class Сущности(unittest.TestCase):
         таблицы = lambda: {r[0] for r in con.execute(
             "select name from sqlite_master where type='table'")}
         колонки = lambda: {r[1] for r in con.execute("pragma table_info(commitments)")}
+        разговоры = lambda: {r[1] for r in con.execute("pragma table_info(conversations)")}
         self.assertIn("extractions", таблицы())
         self.assertIn("extraction_id", колонки())
+        self.assertIn("extraction_id", разговоры())
         con.execute("insert into events(id,kind,source,source_id,occurred,received,"
                     "dedupe_key,state) values('e1','call','phone','d','t','t','k','new')")
         con.execute("insert into extractions(id,event_id,data_json,created) "
@@ -621,6 +623,7 @@ class Сущности(unittest.TestCase):
         con = mi.migrate(self.dir, 5)
         self.assertNotIn("extractions", таблицы())
         self.assertNotIn("extraction_id", колонки())
+        self.assertNotIn("extraction_id", разговоры())
         self.assertEqual(self.версия(), 5)
         con.close()
         con = mi.migrate(self.dir)

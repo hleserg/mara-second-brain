@@ -378,6 +378,8 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
          ("content_sha256", hashlib.sha256(body.encode("utf-8")).hexdigest()),
          ("source_revision", "1"),
          ("pipeline_version", str(mi.PIPELINE_VERSION)),
+         # Т5.0: из какой ревизии извлечения карточка (как у обязательства)
+         ("extraction_id", extraction.get("extraction_id")),
          ("valid_from", event.get("ended") or event.get("occurred"))],
         lists=[("audience", ["mara"])])
     return path, fm + "\n" + body

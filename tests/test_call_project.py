@@ -306,6 +306,14 @@ class Идентичность(unittest.TestCase):
         self.assertIn("\nextraction_id: %s\n" % xid, text)
         self.assertEqual(con.execute("select extraction_id from commitments where id=?",
                                      (_id(text),)).fetchone()[0], xid)
+        # и у разговора: звонок без обязательств иначе не скажет, по какой
+        # ревизии нарисован (Codex, круг 2)
+        conv = [w for w in written if w.startswith("kb/conversations/")][0]
+        with open(os.path.join(vault, conv), encoding="utf-8") as fh:
+            ctext = fh.read()
+        self.assertIn("\nextraction_id: %s\n" % xid, ctext)
+        self.assertEqual(con.execute("select extraction_id from conversations where id=?",
+                                     (_id(ctext),)).fetchone()[0], xid)
         # новая ревизия → проекция обновляет ссылку, версия объекта растёт
         xid2 = mi.uuid7()
         ce.записать_ревизию(con, xid2, dict(EXTR, event_id=eid, extraction_id=xid2))
