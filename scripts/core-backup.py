@@ -882,7 +882,14 @@ def поколения(даты, keep, weekly=0, monthly=0):
     по счёту. Поколения считаются по датам в именах, не по mtime: копия
     на другой носитель mtime не бережёт."""
     даты = sorted(set(даты), reverse=True)
-    остаются = set(даты[:keep] if keep > 0 else [])
+    if keep <= 0 and weekly <= 0 and monthly <= 0:
+        # Три нуля — «не ротировать», как `--keep 0` до поколений, а не
+        # «снести всё»: пустое множество оставшихся стёрло бы и архив этой
+        # ночи, только что прошедший учение (ревью PR #127, P2).
+        return set(даты)
+    # Свежайший остаётся всегда: ротация идёт после удачной записи и не
+    # вправе стереть то, что сама же только что проверила.
+    остаются = set(даты[:max(keep, 1)])
     for окно, ключ in ((weekly, lambda d: d.isocalendar()[:2]),
                        (monthly, lambda d: (d.year, d.month))):
         видели = []
@@ -935,21 +942,42 @@ def снимок_реестра(root, куда=None, keep=СНИМКОВ_ХРА�
     if not os.path.exists(db):
         raise RuntimeError("нет базы %s" % db)
     os.makedirs(куда, mode=0o700, exist_ok=True)
+    # Огрызки прошлых падений — как `.core-*.tmp` у ротации: ротация по
+    # `contextd-*.db` точечных имён не видит, и при часовом кроне на забитом
+    # диске они копились бы по размеру базы в час — ровно когда места нет.
+    for огрызок in glob.glob(os.path.join(куда, ".contextd-*.tmp*")):
+        try:
+            os.unlink(огрызок)
+        except OSError:
+            pass
     имя = "contextd-%s.db" % datetime.now(mi.TZ).strftime("%Y-%m-%dT%H%M")
     tmp = os.path.join(куда, "." + имя + ".tmp")
-    снимок(db, tmp)
-    con = sqlite3.connect(tmp)
+
+    def убрать_tmp():
+        for хвост in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.unlink(tmp + хвост)
+            except OSError:
+                pass
     try:
-        # Копия наследует режим WAL из заголовка живой базы, и тогда любой
-        # читатель — хоть эта же проверка на `mode=ro` — заводит рядом
-        # `-wal`/`-shm`, которые ротация по `contextd-*.db` не видит. Снимок
-        # обязан быть одним файлом: его копируют и открывают руками.
-        con.execute("pragma journal_mode=delete")
-        ок = con.execute("pragma quick_check").fetchone()[0]
-    finally:
-        con.close()
+        снимок(db, tmp)
+        con = sqlite3.connect(tmp)
+        try:
+            # Копия наследует режим WAL из заголовка живой базы, и тогда любой
+            # читатель — хоть эта же проверка на `mode=ro` — заводит рядом
+            # `-wal`/`-shm`, которые ротация по `contextd-*.db` не видит. Снимок
+            # обязан быть одним файлом: его копируют и открывают руками.
+            con.execute("pragma journal_mode=delete")
+            ок = con.execute("pragma quick_check").fetchone()[0]
+        finally:
+            con.close()
+    except Exception:
+        # ENOSPC внутри backup API, DatabaseError из quick_check — хвост не
+        # должен пережить падение (ревью PR #127, P2)
+        убрать_tmp()
+        raise
     if ок != "ok":
-        os.unlink(tmp)
+        убрать_tmp()
         raise RuntimeError("снимок: quick_check копии — %s" % ок)
     fd = os.open(tmp, os.O_RDONLY)
     try:
@@ -1635,6 +1663,8 @@ def самопроверка():
         assert date(2020, 3, 15) not in поколения(дни, 3, weekly=3, monthly=2)
         assert поколения(дни, 3) == set(дни[:3]), "без недель и месяцев — как было"
         assert поколения([], 3, weekly=2, monthly=2) == set(), "пустой носитель — пусто"
+        assert поколения(дни, 0) == set(дни), "`--keep 0` — не ротировать, не «снести всё»"
+        assert дни[0] in поколения(дни, 0, weekly=1), "свежайший остаётся при любом счёте"
         # снимок реестра: копия, quick_check, ротация по счёту
         сн = os.path.join(tmp, "snap")
         первый = снимок_реестра(root, сн, keep=2)
@@ -1645,6 +1675,29 @@ def самопроверка():
         остались = sorted(os.listdir(сн))
         assert len(остались) == 2 and остались[-1] == os.path.basename(итог_сн["снимок"]), остались
         assert not [f for f in остались if f.startswith(".")], "хвостов снимка нет"
+        с = sqlite3.connect("file:%s?mode=ro" % итог_сн["снимок"], uri=True)
+        try:
+            # не WAL: иначе ro-читатель заводил бы рядом -wal/-shm
+            assert с.execute("pragma journal_mode").fetchone()[0] == "delete"
+        finally:
+            с.close()
+        # падение посреди копии не оставляет огрызка
+        open(os.path.join(сн, ".contextd-1999-01-01T0000.db.tmp"), "w").close()
+        целый = globals()["снимок"]
+        def битый(db, dst):
+            целый(db, dst)                   # копия легла — и тут кончился диск
+            raise OSError(28, "диск полон")
+        globals()["снимок"] = битый
+        try:
+            try:
+                снимок_реестра(root, сн, keep=2)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("падение копии проглочено")
+        finally:
+            globals()["снимок"] = целый
+        assert not [f for f in os.listdir(сн) if f.startswith(".")], os.listdir(сн)
 
         # Сторожа внутри `проверка` — утечка секретов, целостность базы,
         # счётчики, хеши файлов — до сих пор не срабатывали ни разу: порченый

@@ -103,7 +103,11 @@ class Флаги(unittest.TestCase):
              "--work", os.path.join(self.tmp, "work")]
             + list(флаги),
             capture_output=True, text=True,
-            env={**os.environ,
+            env={**{k: v for k, v in os.environ.items()
+                    if k != "MARA_CORE_SNAPSHOTS"},
+                 # без переменной каталога снимков: иначе на машине, где она
+                 # выставлена, `--snapshot` писал бы в боевой каталог и
+                 # оставался зелёным — ожидание берётся из того же `mi.снимки`
                  "MARA_BACKUP_ALLOW_SAME_DEV": "1",
                  "MARA_STATE": os.path.join(self.tmp, "state")})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -330,6 +334,18 @@ class Флаги(unittest.TestCase):
         return sorted(os.path.basename(f) for f in
                       glob.glob(os.path.join(self.цель, "core-*.tar.gz.gpg")))
 
+    def test_keep_0_не_ротирует(self):
+        """Три нуля — «не ротировать», как `--keep 0` до поколений. Пустое
+        множество оставшихся стёрло бы с носителя всё, включая архив этой
+        ночи (ревью, P2)."""
+        os.makedirs(self.цель)
+        for дата in ("2000-01-01", "2000-01-02"):
+            open(os.path.join(self.цель,
+                              "core-%s.tar.gz.gpg" % дата), "w").close()
+        self.запуск("--no-audio", "--no-drill", "--keep", "0",
+                    "--keep-weekly", "0", "--keep-monthly", "0")
+        self.assertEqual(len(self.архивы()), 3, self.архивы())
+
     def test_keep_weekly_доезжает_до_ротации(self):
         """`--keep-weekly` оставляет свежайший архив каждой из N недель ISO
         поверх суточного счёта (Т3б.5). Недели здесь: 1999-W52 (1 и 2 января
@@ -392,6 +408,10 @@ class Флаги(unittest.TestCase):
                 self.assertEqual(копия.execute("select count(*) from %s" % т).fetchone()[0],
                                  живая.execute("select count(*) from %s" % т).fetchone()[0], т)
             self.assertEqual(копия.execute("pragma quick_check").fetchone()[0], "ok")
+            # Не WAL. Мутант без `journal_mode=delete` хвостов после close()
+            # не оставляет — SQLite убирает их за последним соединением, — а
+            # заводит при следующем ro-открытии (ревью, P3).
+            self.assertEqual(копия.execute("pragma journal_mode").fetchone()[0], "delete")
         finally:
             живая.close(); копия.close()
         # до носителей дело не дошло: ни каталога цели, ни отметки
