@@ -570,6 +570,11 @@ rm /var/tmp/vault.bundle
 
 # 4. Миграция, если копия старее кода: `--migrate` и есть integrity_check
 MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate
+# 3а. Насколько база отстала от волта — по манифесту проекций: «манифест
+#     устарел» и «файлов не как в манифесте» здесь ожидаемы (база из копии
+#     старее волта), «манифест повреждён» — нет. Перенос (4а) перепишет
+#     манифест и контрольную точку; после него `--check` — без замечаний.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_manifest.py --check --vault /srv/vault
 # 4а. Копия базы старее волта (бандл волта свежее архива ядра): карточки,
 #     которых реестр не видел, и их evidence — из волта в реестр
 #     (`ledger_import`: строка объекта, проекция, история, ссылки `evidence`
@@ -589,9 +594,8 @@ MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --check --diff --vau
 # реестра: `vault_manifest.py --check --vault /var/tmp/vault-rebuilt` назовёт
 # карточки, которых пересборка не нарисовала («файлов нет» — брать из git).
 MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --into /var/tmp/vault-rebuilt --vault /srv/vault
-# Манифест живого волта против восстановленного реестра: «манифест устарел» и
-# «файлов не как в манифесте» здесь ожидаемы — база из копии старее волта;
-# «манифест повреждён» — нет. Перенос (шаг 4) перепишет манифест и точку.
+# Манифест живого волта после переноса (4а) обязан сходиться: «устарел» здесь —
+# перенос не дошёл до конца, повторить его.
 MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_manifest.py --check --vault /srv/vault
 # Сверка приёма: манифесты ↔ блобы, расшифровки, извлечения, индекс, пакет.
 MARA_BLOBS=/srv/mara-blobs python3 scripts/contextd_reconcile.py

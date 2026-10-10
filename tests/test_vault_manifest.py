@@ -83,6 +83,11 @@ class Манифест(unittest.TestCase):
         h2 = vm.записать(self.con, self.vault, когда="2030-01-01T00:00:00+00:00")
         self.assertEqual(h1, h2)
         self.assertEqual(self.манифест()["generated"], "2030-01-01T00:00:00+00:00")
+        # холостой перенос обновляет `written` у каждой строки — хеш не трогает
+        li.run(self.con, self.vault)
+        li.run(self.con, self.vault)
+        self.assertEqual(self.манифест()["hash"], h1, "`written` в манифест не входит")
+        self.assertNotIn("written", next(iter(self.манифест()["projections"].values())))
 
     def test_правка_рукой_видна_только_строго(self):
         with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:
@@ -146,6 +151,20 @@ class Манифест(unittest.TestCase):
         self.assertFalse(vm.расхождение(итог))
         self.assertTrue(vm.расхождение(итог, strict=True))
 
+    def test_сверка_через_run_не_дублирует_дрейф(self):
+        def находки():
+            return [f for f in rc.run(self.con, self.root, vault=self.vault, bm_db=None, targets=[])
+                    if f["check"] in ("манифест-проекций", "проекция-разошлась")]
+        self.assertEqual(находки(), [])
+        os.remove(os.path.join(self.vault, self.card))
+        self.assertEqual([f["check"] for f in находки()], ["проекция-разошлась"],
+                         "пропавший файл называет дрейф, манифест второй раз не кричит")
+        self.con.execute("update projections set content_sha256='x'")
+        self.con.commit()
+        f, = [f for f in находки() if f["check"] == "манифест-проекций"]
+        self.assertEqual(f["level"], "warn")
+        self.assertIn("vault_manifest.py --check", f["detail"])
+
     def test_без_манифеста_не_находка(self):
         os.remove(os.path.join(self.vault, vm.ПУТЬ))
         итог, _ = self.проверка()
@@ -181,6 +200,14 @@ class Манифест(unittest.TestCase):
         self.assertEqual(запуск("--check").returncode, 0)
         r = запуск("--check", "--root", os.path.join(self.root, "нет"))
         self.assertEqual(r.returncode, 2)
+        # опечатка в --vault — отказ, а не «манифеста нет»; в --root при --write —
+        # отказ, а не новая пустая база и пустой манифест поверх живого
+        self.assertEqual(запуск("--check", "--vault", os.path.join(self.vault, "нет")).returncode, 2)
+        h = self.манифест()["hash"]
+        r = запуск("--write", "--root", os.path.join(self.root, "нет"))
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "нет", "contextd.db")))
+        self.assertEqual(self.манифест()["hash"], h)
 
 
 if __name__ == "__main__":

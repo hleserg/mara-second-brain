@@ -46,13 +46,14 @@ Evidence (ADR-0004 п.5, обратный путь). Проектор пишет
 только у обязательств без единой строки от модели: реестр со строками —
 авторитет, шапка его не переписывает.
 """
-import os, re, sys, glob, json, uuid, hashlib, argparse, importlib.util, sqlite3, tempfile
+import os, re, sys, glob, json, uuid, hashlib, argparse, importlib.util, sqlite3, tempfile, contextlib
 from collections import Counter
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
+import vault_manifest
 from vault_common import locked
 
 VAULT = os.environ.get("MARA_VAULT", os.environ.get("VAULT", "/srv/vault"))
@@ -205,10 +206,18 @@ def run(con, vault=None, dry_run=False):
             итог["evidence"] += ссылок
     if not dry_run:
         # перенос меняет `projections` (хеши, версии) — манифест и контрольная
-        # точка за ним (§4.8/§5.2, Т2.6); проба ничего не пишет
-        import vault_manifest
-        vault_manifest.записать(con, vault)
+        # точка за ним (§4.8/§5.2, Т2.6), под флоком волта; проба ничего не пишет
+        with _флок(vault):
+            vault_manifest.записать(con, vault)
     return итог
+
+
+def _флок(vault):
+    """Флок волта там, где он есть: без `.git` нет ни автокоммита, ни bisync,
+    с которыми он делится (§13.8), — так выглядят тестовые волты и каталог
+    пересборки. `вписать_id` берёт `locked` безусловно: он пишет сами карточки."""
+    return (locked(vault) if os.path.isdir(os.path.join(vault, ".git"))
+            else contextlib.nullcontext())
 
 
 # Кто пишет строку «статус без следа» и ревизию переноса: не человек и не
@@ -615,6 +624,11 @@ def вписать_id(con, vault, dry_run=False):
                 con.execute("update projections set content_sha256=?, path=? "
                             "where object_id=? and object_kind=?",
                             (sha, rel, row["id"], вид))
+        if not dry_run and вписано:
+            # хеши и пути проекций сменились — манифест и точка следом, тем же
+            # флоком (§4.8/§5.2); иначе до следующей проекции сверка видела бы
+            # «прерванный прогон» там, где его не было (ревью)
+            vault_manifest.записать(con, vault)
     return вписано, без_строки
 
 

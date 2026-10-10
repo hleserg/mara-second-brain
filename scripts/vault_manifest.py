@@ -12,7 +12,15 @@ checkpoint только после успешной записи проекци�
 
 Хеш манифеста считается от его содержимого (`projections`), а не от
 времени записи: пока проекции те же, хеш тот же, и повторная запись
-ничего не меняет.
+ничего не меняет. Поэтому `projections.written` в манифест не входит —
+перенос обновляет его каждым прогоном, и холостой перенос менял бы хеш,
+точку и коммит волта без единой изменённой карточки (ревью).
+
+Пишется под флоком волта (`vault_common.locked`) — тем же, что держат
+проектор и правка словами: два писателя без флока могли бы положить
+старый манифест поверх нового и поставить точку не туда. Флок берёт
+зовущий, не `записать`: правка словами уже держит его, а второй
+дескриптор того же процесса ждал бы первого.
 
 Зачем он нужен, когда есть реестр: волт переносим и читается без Мары
 (§4.8), и по манифесту его можно сверить без базы — после восстановления,
@@ -28,12 +36,17 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mara_ingest as mi
+from vault_common import locked
 
 ПУТЬ = "_system/projections.json"
 # расхождение всегда / только с --strict (правка рукой и волт до первой проекции)
 РАСХОЖДЕНИЯ = ("манифест повреждён", "манифест устарел", "строк без контрольной точки",
                "файлов нет")
 СТРОГО = ("манифеста нет", "манифест не читается", "файлов не как в манифесте")
+# что в находку сверки: только то, что умеет один манифест. Пропавший файл
+# сверка уже называет через `vault_drift` («проекций без файла»), и второй
+# раз об одном файле — не находка (ревью)
+СВЕРКА = ("манифест повреждён", "манифест устарел", "строк без контрольной точки")
 
 
 def собрать(con):
@@ -42,10 +55,10 @@ def собрать(con):
     out = {}
     for r in con.execute(
             "select path, object_kind, object_id, content_sha256, ledger_version, "
-            "projector_version, written from projections order by path"):
+            "projector_version from projections order by path"):
         out[r["path"]] = {"sha256": r["content_sha256"], "object_kind": r["object_kind"],
                           "object_id": r["object_id"], "ledger_version": r["ledger_version"],
-                          "projector_version": r["projector_version"], "written": r["written"]}
+                          "projector_version": r["projector_version"]}
     return out
 
 
@@ -62,11 +75,21 @@ def документ(проекции, когда=None):
 
 
 def сохранить(vault, проекции, когда=None):
-    """Только файл, атомарно (temp + rename, fsync — в `write_json`).
-    Для пересборки в пустой каталог: реестр она не трогает."""
+    """Только файл, атомарно: temp, fsync, rename. Не `mi.write_json` —
+    тот заводит каталог 0700 и файл 0600 для блобов, а волт читают синк и
+    Obsidian, и `_system` в пересобранном каталоге должен быть как остальные
+    (ревью). Для пересборки в пустой каталог: реестр она не трогает."""
     путь = os.path.join(vault, ПУТЬ)
     os.makedirs(os.path.dirname(путь), exist_ok=True)
-    mi.write_json(путь, документ(проекции, когда))
+    tmp = путь + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(документ(проекции, когда), fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+        # fsync до rename (§5.2): контрольная точка ставится после манифеста,
+        # и после сбоя питания файл обязан нести байты, а не только имя
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, путь)
     return путь
 
 
@@ -126,8 +149,8 @@ def проверить(con, vault):
                  % ПУТЬ)
         return итог, замечания
     if док["hash"] != h:
-        заметить("манифест устарел", "%s: реестр ушёл вперёд — проекций в реестре %d, "
-                 "в манифесте %d; перепишет следующая проекция или `--write`"
+        заметить("манифест устарел", "%s: реестр и манифест разошлись — проекций в реестре "
+                 "%d, в манифесте %d; после проекции, правки или переноса сойдутся"
                  % (ПУТЬ, len(проекции), len(в_файле)))
     строк = con.execute("select count(*) from projections where manifest_hash is not ?",
                         (h,)).fetchone()[0]
@@ -228,12 +251,22 @@ def main():
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    if not a.check and not a.write:
+        ap.error("нужен --check или --write")
+    # опечатка в --vault или --root — отказ, а не «манифеста нет» и не новая
+    # пустая база с пустым манифестом поверх живого (ревью)
+    if not os.path.isdir(a.vault):
+        print("vault_manifest: волт не прочитан: %s — нет каталога" % a.vault, file=sys.stderr)
+        return 2
+    if not os.path.exists(os.path.join(a.root, "contextd.db")):
+        print("vault_manifest: базы нет: %s" % os.path.join(a.root, "contextd.db"),
+              file=sys.stderr)
+        return 2
     if a.write:
-        h = записать(mi.connect(a.root), a.vault)
+        with locked(a.vault):
+            h = записать(mi.connect(a.root), a.vault)
         print("манифест записан: %s %s" % (os.path.join(a.vault, ПУТЬ), h[:12]))
         return 0
-    if not a.check:
-        ap.error("нужен --check или --write")
     try:
         итог, замечания = проверить(только_чтение(a.root), a.vault)
     except sqlite3.OperationalError as e:
