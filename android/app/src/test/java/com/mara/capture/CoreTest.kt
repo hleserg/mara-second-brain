@@ -688,9 +688,14 @@ class CoreTest {
         val н = Затирание.файл("Call_+7 (999) 000-00-00.wav")
         assertFalse(н.contains("999"))
         assertTrue(н.startsWith("<файл>.wav"))
-        // без расширения или с подозрительно длинным хвостом — знак вопроса
+        // расширение — только из белого списка звука: хвост после точки
+        // у файла из медиатеки бывает чем угодно, включая фамилию
         assertTrue(Затирание.файл("запись").startsWith("<файл>.?"))
         assertTrue(Затирание.файл("a.verylongext").startsWith("<файл>.?"))
+        val х = Затирание.файл("Call Анна.Иван")
+        assertTrue(х.startsWith("<файл>.?"))
+        assertFalse(х.contains("Иван"))
+        assertTrue(Затирание.файл("ЗАПИСЬ.M4A").startsWith("<файл>.m4a"))
     }
 
     @Test
