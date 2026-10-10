@@ -37,6 +37,14 @@ Obsidian, и это не повод завести второе обязател
 `--write-ids` — разовый шаг на doctor с паузой писателей
 (`docs/migration-plan.md` §4 шаг 4): вписывает `id:` из реестра в карточки,
 у которых его нет; откат — git волта.
+
+Evidence (ADR-0004 п.5, обратный путь). Проектор пишет строки `evidence_refs`
+из извлечения, а в шапку карточки — их копию списком `evidence`. Реестр,
+восстановленный из копии старее волта, этих строк не имеет; полный перенос
+восстанавливает их из шапки — только те, чей сегмент есть в расшифровке
+события-источника и интервал в его границах (`_evidence_из_шапки`), и
+только у обязательств без единой строки от модели: реестр со строками —
+авторитет, шапка его не переписывает.
 """
 import os, re, sys, glob, json, uuid, hashlib, argparse, importlib.util, sqlite3, tempfile
 from collections import Counter
@@ -156,7 +164,7 @@ def run(con, vault=None, dry_run=False):
     """Перенести всё, что есть. Возвращает счётчики."""
     vault = vault or VAULT
     итог = {"обязательств": 0, "разговоров": 0, "обновлено": 0, "спорных": 0,
-            "правок": 0}
+            "правок": 0, "evidence": 0}
     for подкаталог, вид, таблица, поля in ВИДЫ:
         счётчик = "обязательств" if вид == "commitment" else "разговоров"
         # карта своя на каждый вид: `source_native_id` уникален внутри таблицы,
@@ -184,16 +192,17 @@ def run(con, vault=None, dry_run=False):
                       file=sys.stderr)
                 continue
             исход = _перенести(con, rel, fm, sha, текст, вид, таблица, поля,
-                               dry_run)
+                               dry_run, evidence_из_шапки=True)
             if исход is None:
                 итог["спорных"] += 1
                 continue
             # Ниже заставы, а не выше: карточка, ушедшая в спор, не перенесена
             # ни во что, и сообщение «перенесён первый» о ней было бы ложью.
             видели[native] = rel
-            новый, правок = исход
+            новый, правок, ссылок = исход
             итог[счётчик if новый else "обновлено"] += 1
             итог["правок"] += правок
+            итог["evidence"] += ссылок
     return итог
 
 
@@ -278,12 +287,17 @@ def _спор(con, rel, native, вид, таблица):
 
 
 def _перенести(con, rel, fm, sha, текст, вид, таблица, поля, dry_run=False,
-               актор=ПЕРЕНОС_АКТОР):
+               актор=ПЕРЕНОС_АКТОР, evidence_из_шапки=False):
     """Одна карточка → строка объекта, проекция, история.
 
-    Возвращает `(новый ли объект, записано строк истории)`, либо None, если
-    карточка спорная и не перенесена. Правила спора — ниже по тексту, они
-    писались кровью трёх кругов ревью и исключений не имеют.
+    Возвращает `(новый ли объект, записано строк истории, восстановлено
+    ссылок evidence)`, либо None, если карточка спорная и не перенесена.
+    Правила спора — ниже по тексту, они писались кровью трёх кругов ревью и
+    исключений не имеют.
+
+    `evidence_из_шапки` — обратный путь ссылок (`_evidence_из_шапки`), его
+    включает только полный перенос `run`: проектор кладёт строки
+    `evidence_refs` сам, из извлечения, сразу за `перенести_карточку`.
 
     `актор` — `(actor_type, actor_id, reason)` для ревизии: кто принёс
     изменение. Перенос — сам перенос, проектор — `call_project`, правка
@@ -316,7 +330,12 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
                   % (rel, в_шапке, занят, native), file=sys.stderr)
             return None
     if dry_run:
-        return новый, 0
+        # проба показывает и ссылки: сколько восстановила бы, сколько отвергла
+        # (ранбук восстановления, шаг 4а: «сначала проба»); только чтение
+        ссылок = (_evidence_из_шапки(con, rel, прежний or в_шапке, fm,
+                                     событие(_строка(fm.get("origin"))), dry_run=True)
+                  if evidence_из_шапки and вид == "commitment" and con is not None else 0)
+        return новый, 0, ссылок
     oid = прежний or в_шапке or mi.uuid7()
     значения = {k: (_строка(fm.get(k)) or None) for k in поля}
     if "confidence" in значения:
@@ -342,7 +361,82 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
     with mi.транзакция(con):
         _записать_объект(con, таблица, вид, oid, значения, новый, актор)
         правок = _проекция_и_история(con, rel, вид, oid, sha, fm, текст)
-    return новый, правок
+        ссылок = (_evidence_из_шапки(con, rel, oid, fm, значения.get("origin_event"))
+                  if evidence_из_шапки and вид == "commitment" else 0)
+    return новый, правок, ссылок
+
+
+# Строка списка `evidence` во фронтматтере, как её рисует проектор
+# (`call_project._evidence_список`): `<segment_id> <start_ms>-<end_ms>`.
+ССЫЛКА = re.compile(r"^(\S+) (\d+)-(\d+)$")
+
+
+def _evidence_из_шапки(con, rel, oid, fm, событие, dry_run=False):
+    """Обратный путь evidence (ADR-0004 п.5, хвост Т2.4/Т2.6): реестр
+    восстановлен из копии старее волта, и у обязательства нет ни одной
+    строки `evidence_refs` от модели, а в шапке карточки лежит список
+    `evidence`, который проектор нарисовал из тех же строк. Тогда строки
+    восстанавливаются из шапки — с той же сверкой, что у проектора
+    (`call_project._сверить_с_реестром`): сегмент принадлежит расшифровке
+    события-источника карточки (`origin`), интервал в его границах; иначе
+    ссылка без референта — не evidence (п.1) и не восстанавливается, о ней
+    говорится в stderr. Реестр со строками — авторитет: шапка его не
+    переписывает, расхождение называет `vault_drift`. След — `audit_events`
+    `evidence_restored` (сколько восстановлено, сколько отвергнуто), только
+    когда что-то восстановлено: иначе карточка с навсегда потерянными
+    сегментами писала бы аудит каждым прогоном. Возвращает число строк.
+
+    Ссылки, которые реестр **отозвал** (`call_project._отозвать_evidence`:
+    пункт при повторной проекции ушёл в ревью, строки удалены с аудитом
+    `evidence_withdrawn`, карточка в волте осталась со старым списком), не
+    восстанавливаются: отсутствие строк здесь — решение реестра, а не потеря
+    (ревью PR #131, P2). `dry_run` — только счёт, без записи и аудита; `oid`
+    None (объекта в реестре нет) — строк и отзыва у него быть не может."""
+    список = fm.get("evidence")
+    if isinstance(список, str):
+        список = список.split(",")
+    if not isinstance(список, list):
+        return 0
+    список = [str(x).strip() for x in список if str(x).strip()]
+    if not список:
+        return 0
+    if oid is not None:
+        if con.execute("select 1 from evidence_refs where object_kind='commitment' and "
+                       "object_id=? and producer='model' limit 1", (oid,)).fetchone():
+            return 0
+        if con.execute("select 1 from audit_events where object_kind='commitment' and "
+                       "object_id=? and action='evidence_withdrawn' limit 1",
+                       (oid,)).fetchone():
+            print("ledger_import: %s — ссылки evidence отозваны реестром, из шапки не "
+                  "восстанавливаются" % rel, file=sys.stderr)
+            return 0
+    когда, принято, отвергнуто = mi.now_iso(), 0, []
+    for ссылка in список:
+        m = ССЫЛКА.match(ссылка)
+        seg = None
+        if m and событие:
+            seg = con.execute(
+                "select s.start_ms, s.end_ms from transcript_segments s join transcripts t "
+                "on t.id=s.transcript_id where s.id=? and t.event_id=?",
+                (m.group(1), событие)).fetchone()
+        if seg is None or not (seg["start_ms"] <= int(m.group(2)) <= int(m.group(3))
+                               <= seg["end_ms"]):
+            отвергнуто.append(ссылка)
+            continue
+        if not dry_run:
+            con.execute("insert into evidence_refs(id,object_kind,object_id,kind,segment_id,"
+                        "start_ms,end_ms,producer,created) values(?,?,?,?,?,?,?,?,?)",
+                        (mi.uuid7(), "commitment", oid, "audio", m.group(1),
+                         int(m.group(2)), int(m.group(3)), "model", когда))
+        принято += 1
+    if отвергнуто:
+        print("ledger_import: %s — ссылок evidence без сегмента в реестре: %d "
+              "(не восстановлены)" % (rel, len(отвергнуто)), file=sys.stderr)
+    if принято and not dry_run:
+        mi.audit(con, "evidence_restored", ("import", ПЕРЕНОС), "commitment", oid,
+                 {"restored": принято, "rejected": len(отвергнуто), "from": "frontmatter"},
+                 когда)
+    return принято
 
 
 def _проекция_и_история(con, rel, вид, oid, sha, fm, текст):
@@ -900,10 +994,10 @@ def main():
         con = mi.connect(a.root)
     итог = run(con, a.vault, dry_run=a.dry_run)
     print("ledger_import%s: обязательств %d, разговоров %d, обновлено %d, "
-          "спорных %d, правок %d"
+          "спорных %d, правок %d, evidence восстановлено %d"
           % (" (проба)" if a.dry_run else "", итог["обязательств"],
              итог["разговоров"], итог["обновлено"], итог["спорных"],
-             итог["правок"]))
+             итог["правок"], итог["evidence"]))
     if a.dry_run:
         история_, замечания = история(a.vault)
         for z in замечания:

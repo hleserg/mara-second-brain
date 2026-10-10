@@ -263,7 +263,7 @@ class Перенос(_СтендПереноса):
     def test_пустой_волт_не_падает(self):
         self.assertEqual(self.перенести(),
                          {"обязательств": 0, "разговоров": 0, "обновлено": 0,
-                          "спорных": 0, "правок": 0})
+                          "спорных": 0, "правок": 0, "evidence": 0})
 
 
     def test_обязательство_из_поправки_помнит_событие(self):
@@ -1182,6 +1182,186 @@ class Аудит(_СтендПереноса):
             mi.audit = было
         self.assertEqual(self.строки("commitments"), [], "объект без следа не записан")
         self.assertEqual(self.строки("revisions"), [])
+
+
+class EvidenceИзШапки(_СтендПереноса):
+    """ADR-0004 п.5, обратный путь (хвост Т2.4/Т2.6): реестр восстановлен из
+    копии старее волта — строки `evidence_refs` обязательства
+    восстанавливаются из списка `evidence` в шапке карточки, с той же
+    сверкой по сегментам, что у проектора."""
+
+    def setUp(self):
+        super().setUp()
+        import call_asr
+        self.eid, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "ev1",
+            "occurred_at": "2026-09-02T14:05:00+03:00",
+            "ended_at": "2026-09-02T14:23:11+03:00",
+            "payload": {"contact_name": "Анна", "direction": "incoming"}})
+        call_asr.записать_сегменты(self.con, self.eid, None, [
+            {"segment_id": "s0011", "start_ms": 250000, "end_ms": 275000,
+             "speaker": "unknown-A", "text": "смета"},
+            {"segment_id": "s0029", "start_ms": 700000, "end_ms": 725000,
+             "speaker": "unknown-A", "text": "перезвоню"}])
+        self.сег = {r["seq"]: r["id"] for r in self.con.execute(
+            "select seq, id from transcript_segments")}
+        self.rel = "kb/commitments/2026-09-03-smeta.md"
+
+    def карточка_со_ссылками(self, *ссылки, **fm):
+        """Карточка проектора: `origin: call/<событие>` и список `evidence`
+        с отступом, как рисует `call_project._evidence_список`."""
+        fm.setdefault("origin", "call/" + self.eid)
+        p = карточка(self.vault, self.rel, **fm)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        хвост = "".join("\n  - %s" % x for x in ссылки)
+        текст = текст.replace("\n---\n\n", "\nevidence:%s\n---\n\n" % хвост, 1)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст)
+        return p
+
+    def ссылки(self):
+        return [dict(r) for r in self.con.execute(
+            "select * from evidence_refs order by start_ms")]
+
+    def аудит(self):
+        return [dict(r) for r in self.con.execute(
+            "select * from audit_events where action='evidence_restored'")]
+
+    def test_строки_восстанавливаются_из_шапки_и_второй_прогон_не_дублирует(self):
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11],
+                                  "%s 700000-725000" % self.сег[29])
+        итог = self.перенести()
+        self.assertEqual(итог["evidence"], 2)
+        строки = self.ссылки()
+        oid, = [r["id"] for r in self.con.execute("select id from commitments")]
+        self.assertEqual([(r["object_kind"], r["object_id"], r["kind"], r["segment_id"],
+                           r["start_ms"], r["end_ms"], r["producer"]) for r in строки],
+                         [("commitment", oid, "audio", self.сег[11], 252000, 260000, "model"),
+                          ("commitment", oid, "audio", self.сег[29], 700000, 725000, "model")])
+        а, = self.аудит()
+        self.assertEqual((а["actor_type"], а["actor_id"], а["object_id"]),
+                         ("import", "ledger_import", oid))
+        self.assertEqual(json.loads(а["detail_json"]),
+                         {"restored": 2, "rejected": 0, "from": "frontmatter"})
+        self.assertEqual(self.перенести()["evidence"], 0, "второй прогон — реестр уже знает")
+        self.assertEqual(len(self.ссылки()), 2)
+        self.assertEqual(len(self.аудит()), 1)
+
+    def test_после_восстановления_детектор_не_видит_расхождения_evidence(self):
+        import vault_drift
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11])
+        self.перенести()
+        итог, замечания = vault_drift.проверить(self.con, self.vault)
+        self.assertEqual(итог["evidence разошлось"], 0, замечания)
+
+    def test_реестр_со_строками_авторитет_шапка_его_не_переписывает(self):
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11])
+        self.перенести()
+        # реестр ушёл вперёд: другой интервал — шапка отстала, а не наоборот
+        self.con.execute("update evidence_refs set start_ms=253000")
+        self.con.commit()
+        with open(os.path.join(self.vault, self.rel), "a", encoding="utf-8") as fh:
+            fh.write("\n")                       # файл изменился — перенос перечитает
+        self.assertEqual(self.перенести()["evidence"], 0)
+        self.assertEqual([r["start_ms"] for r in self.ссылки()], [253000])
+        self.assertEqual(len(self.аудит()), 1)
+
+    def test_ссылка_без_референта_не_восстанавливается(self):
+        """Нет сегмента, интервал за границами, сегмент чужого события,
+        строка не по формату — ни одна не становится строкой реестра, и
+        аудита без восстановленных нет (иначе — каждым прогоном)."""
+        import call_asr
+        чужое, _ = mi.put_event(self.con, {
+            "kind": "call", "source": "phone", "source_id": "ev2",
+            "occurred_at": "2026-09-05T10:00:00+03:00",
+            "payload": {"contact_name": "Борис", "direction": "outgoing"}})
+        call_asr.записать_сегменты(self.con, чужое, None, [
+            {"segment_id": "s0001", "start_ms": 0, "end_ms": 5000,
+             "speaker": "unknown-A", "text": "алло"}])
+        чужой = self.con.execute("select id from transcript_segments where seq=1").fetchone()[0]
+        self.карточка_со_ссылками("нет-такого 1-2",
+                                  "%s 240000-260000" % self.сег[11],
+                                  "%s 0-5000" % чужой,
+                                  "%s 252000" % self.сег[11])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            итог = self.перенести()
+        self.assertEqual(итог["evidence"], 0)
+        self.assertEqual(self.ссылки(), [])
+        self.assertEqual(self.аудит(), [])
+        self.assertIn("ссылок evidence без сегмента в реестре: 4", err.getvalue())
+
+    def test_карточка_без_origin_строк_не_даёт(self):
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11], origin=None)
+        self.assertEqual(self.перенести()["evidence"], 0)
+        self.assertEqual(self.ссылки(), [])
+
+    def test_проба_считает_но_не_пишет(self):
+        """Ранбук, шаг 4а: «сначала проба» — она показывает, сколько ссылок
+        восстановит и сколько отвергнет, и не трогает базу (ревью, P3)."""
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11], "нет-такого 1-2")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            итог = self.перенести(dry_run=True)
+        self.assertEqual(итог["evidence"], 1)
+        self.assertIn("без сегмента в реестре: 1", err.getvalue())
+        self.assertEqual(self.ссылки(), [])
+        self.assertEqual(self.аудит(), [])
+        self.assertEqual(self.строки("commitments"), [])
+        # и у уже перенесённого объекта проба честна: строки есть — ноль
+        self.перенести()
+        self.assertEqual(self.перенести(dry_run=True)["evidence"], 0)
+
+    def test_отозванные_реестром_ссылки_не_воскресают(self):
+        """`call_project._отозвать_evidence` удаляет строки с аудитом
+        `evidence_withdrawn`, карточка в волте остаётся со старым списком —
+        отсутствие строк здесь решение реестра, а не потеря (ревью, P2)."""
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11])
+        self.перенести()
+        oid, = [r["id"] for r in self.con.execute("select id from commitments")]
+        with mi.транзакция(self.con):
+            self.con.execute("delete from evidence_refs where object_id=?", (oid,))
+            mi.audit(self.con, "evidence_withdrawn", ("rule", "call_project"),
+                     "commitment", oid, {"withdrawn": 1})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            итог = self.перенести()
+        self.assertEqual(итог["evidence"], 0)
+        self.assertEqual(self.ссылки(), [])
+        self.assertEqual(len(self.аудит()), 1, "второго evidence_restored нет")
+        self.assertIn("отозваны реестром", err.getvalue())
+
+    def test_пустой_список_и_карточка_разговора_молчат(self):
+        """`evidence:` без элементов — не «одна отвергнутая» (ревью, P3);
+        список в шапке разговора строк обязательства не даёт (мутант
+        «убрать вид == commitment»)."""
+        self.карточка_со_ссылками()                 # evidence: без элементов
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.перенести()["evidence"], 0)
+        self.assertEqual(err.getvalue(), "")
+        p = карточка(self.vault, "kb/conversations/2026-09-02-anna.md", type="conversation",
+                     source_id="call/call_1", origin=None, due=None, promised_to=None)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("\n---\n\n", "\norigin: call/%s\nevidence:\n  - %s 252000-260000\n---\n\n"
+                                   % (self.eid, self.сег[11]), 1))
+        итог = self.перенести()
+        self.assertEqual(итог["разговоров"], 1)
+        self.assertEqual(итог["evidence"], 0)
+        self.assertEqual(self.ссылки(), [])
+
+    def test_проектор_свои_строки_кладёт_сам_перенос_одной_карточки_шапку_не_читает(self):
+        """`перенести_карточку` — путь проектора и правки словами: строки
+        `evidence_refs` там пишет `call_project._evidence_в_реестр` из
+        извлечения, и обратный путь не должен успеть раньше него."""
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11])
+        oid = li.перенести_карточку(self.con, self.vault, self.rel)
+        self.assertIsNotNone(oid)
+        self.assertEqual(self.ссылки(), [])
+        self.assertEqual(self.аудит(), [])
 
 
 if __name__ == "__main__":
