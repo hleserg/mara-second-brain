@@ -114,6 +114,19 @@ class Проверка(unittest.TestCase):
         self.assertEqual(сводка["id"]["source_id не тот"], 1, з)
         self.assertTrue(rc.расхождение(сводка, з))
 
+    def test_висящая_проекция_без_объекта(self):
+        """Codex по #126: у `projections.object_id` нет внешнего ключа —
+        проекция на удалённый объект должна быть расхождением, а не
+        «перенесённой из волта» с совпавшим `id:`."""
+        self.con.execute("pragma foreign_keys=off")
+        self.con.execute("delete from evidence_refs")
+        self.con.execute("delete from revisions")
+        self.con.execute("delete from commitments")
+        сводка, з = self.проверка()
+        self.assertEqual(сводка["id"]["объекта нет"], 1, з)
+        self.assertEqual(сводка["проекции"]["без источника реестра"], 1, з)
+        self.assertTrue(rc.расхождение(сводка, з))
+
     def test_чужой_id_в_шапке(self):
         text = open(os.path.join(self.vault, self.card), encoding="utf-8").read()
         oid = [l for l in text.splitlines() if l.startswith("id: ")][0][4:]

@@ -443,11 +443,13 @@ mkdir -p -m 700 ~/.config/mara      # без него install скажет «can
 install -m 600 /dev/stdin ~/.config/mara/backup-pass   # вставить фразу, Ctrl-D
 
 # 1. Остановить писателей. Сначала кроны (сверка в :07, ретеншен, бэкап —
-#    пишут в базу и перепишут архив тем, что восстанавливаем), потом демоны.
-#    В crontab живут и чужие строки (см. install/mara.cron) — копия
-#    обязательна, на шаге 9 возвращается она целиком.
+#    пишут в базу и перепишут архив тем, что восстанавливаем), потом демоны:
+#    приём, слушатель Telegram и Basic Memory — его клиенты правят карточки
+#    волта через MCP (ADR-0009), и живой писатель волта во время клона
+#    испортил бы восстановленное. В crontab живут и чужие строки (см.
+#    install/mara.cron) — копия обязательна, на шаге 9 возвращается целиком.
 crontab -l > /var/tmp/crontab.before && crontab -r
-sudo systemctl stop contextd tdlib-ingest
+sudo systemctl stop contextd tdlib-ingest basic-memory-mcp
 
 # 2. Проверить манифест и хеши копии, прежде чем что-то трогать
 scripts/core-backup.py --drill-only --targets /mnt/backup/mara
@@ -471,7 +473,11 @@ rm /srv/mara-blobs/manifest.json /var/tmp/core.tar.gz
 ( cd /mnt/backup/mara && gpg --batch --pinentry-mode loopback \
     --passphrase-file ~/.config/mara/backup-pass \
     -o /var/tmp/vault.bundle -d "$(ls -1 vault-*.bundle.gpg | tail -1)" )
-git bundle verify /var/tmp/vault.bundle && git clone -q /var/tmp/vault.bundle /srv/vault
+git bundle verify /var/tmp/vault.bundle
+# Старое дерево — в сторону, не стирать: `git clone` в непустой каталог
+# откажет, а что в старом было правлено после бандла — разбирать потом.
+[ -e /srv/vault ] && sudo mv /srv/vault "/srv/vault.before-restore-$(date +%Y%m%d-%H%M%S)"
+git clone -q /var/tmp/vault.bundle /srv/vault
 rm /var/tmp/vault.bundle
 
 # 4. Миграция, если копия старее кода: `--migrate` и есть integrity_check
@@ -493,7 +499,7 @@ MARA_BLOBS=/srv/mara-blobs python3 scripts/contextd_reconcile.py
 #    состояние не бэкапится, см. выше), поднять демоны, вернуть crontab
 #    целиком (в нём чужие строки) и сверить блок Мары с install/mara.cron —
 #    --apply только при расхождении, прочитав его список
-sudo systemctl start contextd tdlib-ingest
+sudo systemctl start contextd tdlib-ingest basic-memory-mcp
 crontab /var/tmp/crontab.before && bash install/install-cron.sh --check
 ```
 
