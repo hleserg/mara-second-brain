@@ -258,6 +258,11 @@ class КарточкиПропали(unittest.TestCase):
                       f["карточки-пропали"]["detail"])
         for sub in rc.КАРТОЧКИ:
             self.assertIn(sub, f["карточки-пропали"]["detail"])
+        # status и reflog — без условия: незакоммиченное удаление и откат
+        # через reset в `git log` не видны (Codex по #146, круг 1).
+        self.assertIn("`git status`", f["карточки-пропали"]["detail"])
+        self.assertIn("`git reflog`", f["карточки-пропали"]["detail"])
+        self.assertNotIn("пусто", f["карточки-пропали"]["detail"])
         self.assertIn("обходе Basic Memory", f["карточки-пропали"]["detail"])
 
     def test_чужие_записи_базы_не_считаются(self):
