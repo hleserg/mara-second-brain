@@ -123,10 +123,17 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 }
                 null -> {}
             }
-            // сломанное разрешение или папка — своё уведомление, одно на причину
-            if (о.состояние == Состояние.unhealthy && о.тревога == null) {
-                if (о.причина != s.healthReason) уведомить(ctx, СЛОМАНО, "Захват сломан", о.причина)
-            } else снять(ctx, СЛОМАНО)
+            // Открытая тревога выставляется каждым прогоном, не только в момент
+            // подъёма: перезагрузка чистит шторку, а без POST_NOTIFICATIONS
+            // первый notify молча пропал — durable warning обязан вернуться
+            // (Codex по #137, круг 2). Тот же id и setOnlyAlertOnce — без
+            // повторного сигнала; счётчик растёт только на ТРЕВОГА.
+            if (s.alertCallMs != 0L) уведомить(ctx, ТРЕВОГА, "Звонок был, записи нет",
+                if (о.тревога == s.alertCallMs) о.причина else "записи за звонком так и нет")
+            // сломанное разрешение или папка — своё уведомление, пока сломано
+            if (о.состояние == Состояние.unhealthy && о.тревога == null)
+                уведомить(ctx, СЛОМАНО, "Захват сломан", о.причина)
+            else снять(ctx, СЛОМАНО)
             s.healthState = о.состояние.name
             s.healthReason = о.причина
             s.healthAtMs = п.сейчас
@@ -166,6 +173,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 .setContentText(текст)
                 .setContentIntent(открыть)
                 .setOngoing(true)
+                .setOnlyAlertOnce(true)
                 .build()
             runCatching { nm.notify(id, n) }
         }
