@@ -79,15 +79,26 @@ class Манифест(unittest.TestCase):
         self.assertEqual((итог["проекций"], итог["в манифесте"]), (2, 2))
 
     def test_хеш_от_содержимого_а_не_от_времени(self):
-        h1 = self.манифест()["hash"]
+        док = self.манифест()
+        h1, было = док["hash"], док["generated"]
+        mtime = os.stat(os.path.join(self.vault, vm.ПУТЬ)).st_mtime_ns
         h2 = vm.записать(self.con, self.vault, когда="2030-01-01T00:00:00+00:00")
         self.assertEqual(h1, h2)
-        self.assertEqual(self.манифест()["generated"], "2030-01-01T00:00:00+00:00")
+        # тот же хеш — файл не переписывается: ни `generated`, ни mtime (синк и
+        # коммит волта не шевелятся от холостого прогона)
+        self.assertEqual(self.манифест()["generated"], было)
+        self.assertEqual(os.stat(os.path.join(self.vault, vm.ПУТЬ)).st_mtime_ns, mtime)
         # холостой перенос обновляет `written` у каждой строки — хеш не трогает
         li.run(self.con, self.vault)
         li.run(self.con, self.vault)
         self.assertEqual(self.манифест()["hash"], h1, "`written` в манифест не входит")
+        self.assertEqual(os.stat(os.path.join(self.vault, vm.ПУТЬ)).st_mtime_ns, mtime)
         self.assertNotIn("written", next(iter(self.манифест()["projections"].values())))
+        # а повреждённый на диске — переписывается и при том же хеше
+        with open(os.path.join(self.vault, vm.ПУТЬ), "w") as fh:
+            fh.write("{")
+        vm.записать(self.con, self.vault)
+        self.assertEqual(self.манифест()["hash"], h1)
 
     def test_правка_рукой_видна_только_строго(self):
         with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:
@@ -148,8 +159,9 @@ class Манифест(unittest.TestCase):
             fh.write('{"hash": 1}')
         итог, _ = self.проверка()
         self.assertEqual(итог["манифест не читается"], 1)
-        self.assertFalse(vm.расхождение(итог))
-        self.assertTrue(vm.расхождение(итог, strict=True))
+        self.assertTrue(vm.расхождение(итог), "битый файл — порча, не отсутствие")
+        н, = rc.манифест_проекций(self.con, self.vault)
+        self.assertEqual(н["count"], 1)
 
     def test_сверка_через_run_не_дублирует_дрейф(self):
         def находки():

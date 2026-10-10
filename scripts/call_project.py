@@ -548,6 +548,7 @@ def _atomic(path, text):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+    vault_manifest.fsync_каталога(os.path.dirname(path))
 
 
 def run(event_id, vault, root=None):
