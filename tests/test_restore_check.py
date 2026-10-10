@@ -127,6 +127,17 @@ class Проверка(unittest.TestCase):
         self.assertEqual(сводка["проекции"]["без источника реестра"], 1, з)
         self.assertTrue(rc.расхождение(сводка, з))
 
+    def test_аудио_evidence_по_хешу_расшифровки(self):
+        """Codex по #126: цепочка — сегмент → расшифровка → блоб; хеш
+        расшифровки, не равный хешу события, — поломка, не «открылось»."""
+        self.con.execute("update transcripts set blob_sha256='ab'||substr(blob_sha256, 3)")
+        сводка, з = self.проверка()
+        self.assertEqual(сводка["evidence"]["не открывается"], 1, з)
+        self.assertTrue(any("хеш аудио расшифровки" in т for _, т in з), з)
+        self.con.execute("update transcripts set blob_sha256=null")
+        сводка, з = self.проверка()
+        self.assertEqual(сводка["evidence"]["не открывается"], 1, з)
+
     def test_чужой_id_в_шапке(self):
         text = open(os.path.join(self.vault, self.card), encoding="utf-8").read()
         oid = [l for l in text.splitlines() if l.startswith("id: ")][0][4:]

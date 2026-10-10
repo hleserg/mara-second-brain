@@ -34,10 +34,13 @@
   перенесённой из волта (`vault:…` — её ключ и есть путь), у карточки
   звонка или правки без него следующий перенос завёл бы объект заново.
 - «evidence» — выборка обязательств со ссылками `evidence_refs`: сегмент и
-  расшифровка на месте, интервал в границах сегмента, аудио события на
-  диске (или стёрто по ретеншену — тогда ссылка ведёт в сегмент, не в файл,
-  и это не поломка). «Открывается» значит: по ссылке находится файл и
-  миллисекунды в нём, больше проверка ничего не слушает.
+  расшифровка на месте, интервал в границах сегмента, аудио — по хешу
+  **расшифровки** (`transcripts.blob_sha256`: цепочка происхождения —
+  сегмент → расшифровка → блоб; хеш, не равный хешу события, — поломка, а
+  не чужое аудио «открылось»; Codex по #126) на диске, или стёрто по
+  ретеншену — тогда ссылка ведёт в сегмент, не в файл, и это не поломка.
+  «Открывается» значит: по ссылке находится файл и миллисекунды в нём,
+  больше проверка ничего не слушает.
 
 Код выхода: 0 — всё сошлось, 1 — есть расхождения, 2 — проверить нельзя
 (база не открылась, волт не прочитан).
@@ -194,11 +197,12 @@ def образец_evidence(con, root, выборка, rnd):
     for oid in rnd.sample(объекты, min(выборка, len(объекты))):
         for e in con.execute(
                 "select e.id, e.segment_id, e.start_ms, e.end_ms, s.start_ms as a, s.end_ms as b, "
-                "s.text, t.event_id, ev.blob_sha256, b.path, b.purged_at "
+                "s.text, t.event_id, t.blob_sha256, ev.blob_sha256 as у_события, "
+                "b.path, b.purged_at "
                 "from evidence_refs e left join transcript_segments s on s.id=e.segment_id "
                 "left join transcripts t on t.id=s.transcript_id "
                 "left join events ev on ev.id=t.event_id "
-                "left join blobs b on b.sha256=ev.blob_sha256 "
+                "left join blobs b on b.sha256=t.blob_sha256 "
                 "where e.object_kind='commitment' and e.object_id=? and e.producer='model' "
                 "and e.segment_id is not null", (oid,)):
             итог["ссылок"] += 1
@@ -212,7 +216,12 @@ def образец_evidence(con, root, выборка, rnd):
                             % (oid[-8:], e["start_ms"], e["end_ms"], e["a"], e["b"])))
             elif e["event_id"] is None or e["blob_sha256"] is None:
                 итог["не открывается"] += 1
-                out.append(("evidence", "%s: у расшифровки нет события или аудио" % oid[-8:]))
+                out.append(("evidence", "%s: у расшифровки нет события или хеша аудио"
+                            % oid[-8:]))
+            elif e["blob_sha256"] != e["у_события"]:
+                итог["не открывается"] += 1
+                out.append(("evidence", "%s: хеш аудио расшифровки %s не тот, что у события %s"
+                            % (oid[-8:], e["blob_sha256"][:12], (e["у_события"] or "")[:12])))
             elif e["purged_at"]:
                 итог["аудио стёрто по ретеншену"] += 1
             elif not (e["path"] and os.path.isfile(_на_корне(e["path"], root))):

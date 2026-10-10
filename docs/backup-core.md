@@ -477,6 +477,9 @@ git bundle verify /var/tmp/vault.bundle
 # Старое дерево — в сторону, не стирать: `git clone` в непустой каталог
 # откажет, а что в старом было правлено после бандла — разбирать потом.
 [ -e /srv/vault ] && sudo mv /srv/vault "/srv/vault.before-restore-$(date +%Y%m%d-%H%M%S)"
+# /srv — за root, свой только лист: завести его заново с тем же владельцем,
+# что ставит install/stage0-doctor.sh, иначе клон упрётся в permission denied
+sudo install -d -o "$(id -u)" -g "$(id -g)" /srv/vault
 git clone -q /var/tmp/vault.bundle /srv/vault
 rm /var/tmp/vault.bundle
 
