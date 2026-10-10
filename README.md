@@ -78,6 +78,7 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 | Бэкап волта | крон `0 4 * * 1`, `scripts/vault-backup.sh` — зашифрованный бандл на два носителя |
 | Тест восстановления | крон `0 5 1 1,4,7,10 *`, `scripts/vault-restore-test.sh` |
 | Бэкап ядра | крон `10 4 * * *`, `scripts/core-backup.py` — база, метаданные и аудио на два носителя, с проверкой восстановления в том же прогоне ([docs/backup-core.md](docs/backup-core.md)) |
+| Хранение и удаление | что где лежит, сколько живёт и как удаление доходит до каждой копии — или не доходит ([docs/retention-policy.md](docs/retention-policy.md)) |
 
 ### Почему обязательства не в SOUL.md
 
