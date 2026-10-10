@@ -134,7 +134,8 @@ class УбитыйПроцесс(unittest.TestCase):
             быстрое.close()
 
     def wal(self):
-        return os.path.getsize(os.path.join(self.root, "contextd.db-wal"))
+        путь = os.path.join(self.root, "contextd.db-wal")
+        return os.path.getsize(путь) if os.path.exists(путь) else 0
 
     def состояние(self):
         return self.con.execute("select state from events where id=?",
@@ -183,21 +184,29 @@ class УбитыйПроцесс(unittest.TestCase):
 
     def test_коммит_переживает_смерть_до_закрытия_соединения(self):
         """WAL без checkpoint и без clean shutdown — коммит на месте
-        (§5.1: восстановление не зависит от чистого завершения)."""
-        до = self.wal()
+        (§5.1: восстановление не зависит от чистого завершения).
+
+        Ребёнок — единственное соединение с базой: родитель закрывает своё
+        до его запуска (последнее закрытие делает checkpoint и убирает WAL)
+        и открывает новое только после убийства. Иначе выживший `-shm`
+        родителя подсказывал бы новому соединению состояние WAL, и холодный
+        старт — восстановление индекса WAL с нуля, как у демона после
+        смерти, — не проверялся бы (Codex по #133, P2)."""
+        self.con.close()
+        self.assertEqual(self.wal(), 0, "последнее закрытие убрало WAL — чистый старт ребёнка")
         p, вижу = self.запустить("после-коммита")
         self.assertEqual(вижу, "stored 1")
-        self.assertGreater(self.wal(), до, "коммит ребёнка лежит в WAL, checkpoint не было")
+        self.assertGreater(self.wal(), 0, "коммит ребёнка лежит в WAL, checkpoint не было")
         self.убить(p)
+        wal = os.path.join(self.root, "contextd.db-wal")
+        self.assertTrue(os.path.exists(wal), "WAL пережил смерть — восстанавливать есть что")
+        # первое соединение после смерти: индекс WAL строится с нуля
+        self.con = mi.connect(self.root)
+        self.addCleanup(self.con.close)
         self.assertEqual((self.состояние(), self.работ()), ("stored", 1))
         self.assertEqual(self.цела(), "ok")
-        # с чистого соединения — то же, и после checkpoint тоже
-        с = mi.connect(self.root)
-        self.addCleanup(с.close)
-        self.assertEqual(с.execute("select state from events where id=?",
-                                   (self.eid,)).fetchone()[0], "stored")
-        с.execute("pragma wal_checkpoint(truncate)")
-        self.assertEqual(с.execute("pragma quick_check").fetchone()[0], "ok")
+        self.con.execute("pragma wal_checkpoint(truncate)")
+        self.assertEqual(self.цела(), "ok")
         contextd.finish_stored(self.con, self.root, self.eid)
         self.assertEqual(self.работ(), 1, "повтор после пережившего коммита не плодит работ")
 
