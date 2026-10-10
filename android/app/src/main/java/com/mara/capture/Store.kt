@@ -272,6 +272,22 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         }, "id=?", arrayOf(job.id))
     }
 
+    /**
+     * Ключ квитанции работе — один, даже когда работу разом взяли два воркера
+     * (периодический `mara-sync` и разовый `mara-sync-once` друг друга не
+     * исключают): предложенный ключ ложится только в пустую колонку, а
+     * возвращается то, что в строке лежит после этого — своё или чужое.
+     * null — строки нет (Codex по #139).
+     */
+    fun выдатьКлюч(id: String, ключ: String): String? {
+        val db = writableDatabase
+        db.compileStatement("update jobs set idem_key=? where id=? and idem_key is null").apply {
+            bindString(1, ключ); bindString(2, id)
+        }.executeUpdateDelete()
+        return db.rawQuery("select idem_key from jobs where id=?", arrayOf(id))
+            .use { if (it.moveToFirst()) it.getString(0) else null }
+    }
+
     fun count(state: JobState): Int =
         readableDatabase.rawQuery("select count(*) from jobs where state=?", arrayOf(state.name))
             .use { if (it.moveToFirst()) it.getInt(0) else 0 }
