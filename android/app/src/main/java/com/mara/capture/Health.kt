@@ -53,6 +53,11 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         const val СЛОМАНО = 2
         private const val НЕДЕЛЯ_МС = 7 * 24 * 3600_000L
 
+        /** Сбор примет и переход состояния — под одним замком: снимок,
+         *  собранный до чужого перехода, иначе переоткрыл бы закрытую тревогу
+         *  (Codex по #137, круг 3). */
+        private val ЗАМОК = Any()
+
         /** Без этих двух захват не работает; остальные из `MainActivity.НУЖНЫ`
          *  — про контакты и SMS, их отсутствие здоровье захвата не ломает. */
         val ДЛЯ_ЗАХВАТА: List<String> = listOf(
@@ -62,14 +67,16 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         )
 
         /** Всё, что видно телефону, без единого решения. Что не прочиталось
-         *  — честный `null` или пустой список, а не «всё хорошо». `скан` —
-         *  записи, если зовущий их уже собрал: обход SAF дважды не нужен.
+         *  — честный `null`, пустой список или флаг, а не «всё хорошо».
          *  Единственная запись — начало наблюдения при первом прогоне: за
          *  звонки до установки приложения отвечать нечем (Codex по #137). */
-        fun собрать(ctx: Context, s: Settings, скан: List<Recording>? = null): Приметы {
+        fun собрать(ctx: Context, s: Settings): Приметы {
             val сейчас = System.currentTimeMillis()
             val неделя = сейчас - НЕДЕЛЯ_МС
             if (s.healthSinceMs == 0L) s.healthSinceMs = сейчас
+            // без разрешения журнал бросает, провайдер может и молча отказать:
+            // это «не прочитался», а не «звонков не было» (Codex, круг 3)
+            val журнал = runCatching { Device.callLog(ctx, неделя) }.getOrNull()
             return Приметы(
                 сейчас = сейчас,
                 загрузка = сейчас - SystemClock.elapsedRealtime(),
@@ -80,10 +87,8 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                         .getOrDefault(false)
                 },
                 рекордерЕсть = Device.producers(ctx).isNotEmpty(),
-                // без разрешения журнал бросает — это уже учтено строкой выше
-                звонки = runCatching { Device.callLog(ctx, неделя) }.getOrDefault(emptyList()),
-                записи = (скан ?: runCatching { Device.scan(ctx, s, неделя) }.getOrDefault(emptyList()))
-                    .filter { it.modifiedMs >= неделя },
+                звонки = журнал ?: emptyList(),
+                записи = runCatching { Device.scan(ctx, s, неделя) }.getOrDefault(emptyList()),
                 расписаниеЖиво = runCatching {
                     WorkManager.getInstance(ctx).getWorkInfosForUniqueWork(SyncWorker.ПЕРИОД).get()
                         .any { !it.state.isFinished }
@@ -92,24 +97,22 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 уведомленияРазрешены = Build.VERSION.SDK_INT < 33 ||
                     Device.granted(ctx, Manifest.permission.POST_NOTIFICATIONS),
                 наблюдениеС = s.healthSinceMs,
+                журналЧитается = журнал != null,
             )
         }
 
         /**
-         * Один прогон: оценить, запомнить, поднять или снять тревогу. Зовётся
-         * и воркером, и экраном здоровья — состояние на экране и в
-         * уведомлении одно и то же, а не два разных мнения. Под замком: экран
-         * и воркер в одну секунду подняли бы одну тревогу дважды (ревью).
+         * Один прогон: собрать, оценить, запомнить, поднять или снять тревогу.
+         * Зовётся и воркером, и экраном здоровья — состояние на экране и в
+         * уведомлении одно и то же, а не два разных мнения. Сбор и переход
+         * под одним замком: экран и воркер в одну секунду подняли бы одну
+         * тревогу дважды (ревью), а снимок, собранный до чужого перехода,
+         * переоткрыл бы закрытую (Codex, круг 3).
          */
-        @Synchronized
-        fun проверить(ctx: Context, s: Settings, п: Приметы = собрать(ctx, s)): Оценка {
+        fun проверить(ctx: Context, s: Settings): Оценка = synchronized(ЗАМОК) {
+            val п = собрать(ctx, s)
             val о = Здоровье.оценить(п)
-            when (Здоровье.событие(о, s.alertCallMs, п)) {
-                Здоровье.Событие.ТРЕВОГА -> {
-                    s.alertCallMs = о.тревога ?: 0L
-                    s.alertCount = s.alertCount + 1
-                    уведомить(ctx, ТРЕВОГА, "Звонок был, записи нет", о.причина)
-                }
+            for (е in Здоровье.события(о, s.alertCallMs, п)) when (е) {
                 Здоровье.Событие.ВОССТАНОВЛЕНО -> {
                     s.alertCallMs = 0L
                     s.alertRecoveredMs = п.сейчас
@@ -121,7 +124,11 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                     s.alertCallMs = 0L
                     снять(ctx, ТРЕВОГА)
                 }
-                null -> {}
+                Здоровье.Событие.ТРЕВОГА -> {
+                    s.alertCallMs = о.тревога ?: 0L
+                    s.alertCount = s.alertCount + 1
+                    уведомить(ctx, ТРЕВОГА, "Звонок был, записи нет", о.причина)
+                }
             }
             // Открытая тревога выставляется каждым прогоном, не только в момент
             // подъёма: перезагрузка чистит шторку, а без POST_NOTIFICATIONS
@@ -137,7 +144,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             s.healthState = о.состояние.name
             s.healthReason = о.причина
             s.healthAtMs = п.сейчас
-            return о
+            о
         }
 
         /** Проверка раз в час; сети не требует — смотрит только на телефон. */

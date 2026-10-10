@@ -7,7 +7,9 @@ import android.telephony.TelephonyManager
 
 /** После перезагрузки расписание надо ставить заново (ТЗ §5.1F), и тут же
  *  — health workflow (ТЗ §8.6, Т4.2): через две минуты, когда система
- *  доставит разрешения и SAF-гранты, а не в первую секунду после загрузки. */
+ *  доставит разрешения и SAF-гранты, а не в первую секунду после загрузки.
+ *  То же после обновления APK (`MY_PACKAGE_REPLACED`): иначе новая проверка
+ *  здоровья ждала бы перезагрузки или открытого экрана (Codex по #137). */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         SyncWorker.schedule(ctx)

@@ -117,11 +117,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun здоровье() = фоном {
         val q = Queue(this)
-        val скан = Device.scan(this, s)
-        val последняя = скан.maxByOrNull { it.modifiedMs }
-        // тот же прогон, что у воркера, и тот же скан: экран и уведомление
-        // не расходятся, а SAF обходится один раз
-        val оценка = HealthWorker.проверить(this, s, HealthWorker.собрать(this, s, скан))
+        val последняя = Device.scan(this, s).maxByOrNull { it.modifiedMs }
+        // тот же прогон, что у воркера: экран и уведомление не расходятся.
+        // Скан внутри него свой, под замком — чужой снимок переоткрыл бы
+        // закрытую тревогу; второй обход SAF — цена открытого экрана
+        val оценка = HealthWorker.проверить(this, s)
         listOf(
             "состояние: " + Здоровье.словами(оценка),
             "тревог «звонок был, записи нет»: ${s.alertCount}" +
