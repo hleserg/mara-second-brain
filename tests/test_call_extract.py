@@ -201,6 +201,31 @@ class Шаг(unittest.TestCase):
         with open(self.mi.extraction_path(self.dir, self.eid), encoding="utf-8") as fh:
             return json.load(fh)
 
+    def test_несостоявшийся_звонок_без_модели(self):
+        """Т4.3: недозвон — разговора не было; модель не зовётся, ревизия
+        пустая с исходом, событие переходит как обычно."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "outgoing", "duration_s": 0,
+                                      "contact_name": "Анна"}), self.eid))
+        self.con.commit()
+
+        def не_звать(text, base_url=None, model=None):
+            raise AssertionError("модель позвали на недозвоне")
+        было = ce.ask_model
+        ce.ask_model = не_звать
+        try:
+            ce.run(self.eid, self.dir)
+        finally:
+            ce.ask_model = было
+        with open(self.mi.extraction_path(self.dir, self.eid), encoding="utf-8") as fh:
+            extr = json.load(fh)
+        self.assertEqual(extr["outcome"], "no-answer")
+        self.assertEqual((extr["requests"], extr["commitments"]), ([], []))
+        self.assertEqual(self.con.execute("select state from events where id=?",
+                                          (self.eid,)).fetchone()[0], "extracted")
+        self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid)["outcome"],
+                         "no-answer", "исход доезжает до проектора из реестра")
+
     def test_отказ_по_evidence_ложится_в_аудит(self):
         extr = self.прогон({"requests": [
             {"action": "прислать смету", "explicit": True, "confidence": 0.95,

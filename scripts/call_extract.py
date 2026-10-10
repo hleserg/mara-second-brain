@@ -413,8 +413,20 @@ def run(event_id, root=None):
         segs = call_asr.read_jsonl(tpath)
         сегменты = сегменты_из(segs)
     текст = transcript_text(segs)
-    raw = ask_model(текст)
+    # Т4.3: пропущенный или недозвон (журнал звонков в payload) — разговора
+    # не было, извлекать нечего: модель не зовётся, иначе из гудков и
+    # автоответчика она выдумывала бы просьбы и обещания; ревизия при этом
+    # пишется как обычно — пустая, с исходом
+    исход = mi.исход_звонка(ev["payload"])
+    if mi.звонок_состоялся(ev["payload"]):
+        raw = ask_model(текст)
+    else:
+        raw = {}
+        print("call_extract: %s — звонок %s (%s), модель не звалась"
+              % (event_id, mi.ИСХОДЫ[исход], исход), file=sys.stderr)
     data = normalize(raw, occurred, сегменты)
+    if исход is not None:
+        data["outcome"] = исход
     отклонено = data.pop("evidence_rejected")
     data["event_id"] = event_id
     data["occurred_at"] = occurred

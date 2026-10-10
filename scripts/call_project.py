@@ -212,6 +212,28 @@ def contact(event):
     return p.get("contact_name") or p.get("number") or "неизвестный номер"
 
 
+# Заголовок карточки и дайджеста по исходу (Т4.3): у состоявшегося и
+# неизвестного — прежний «Звонок», чтобы карточки, нарисованные до этого,
+# остались байт в байт теми же.
+ЗАГОЛОВОК = {"missed": "Пропущенный звонок", "no-answer": "Недозвон"}
+
+
+def заголовок(event):
+    return ЗАГОЛОВОК.get(mi.исход_звонка(event.get("payload")), "Звонок")
+
+
+def строка_исхода(event):
+    """«Исход: не дозвонился (исходящий, 0 с)» — только у несостоявшихся;
+    у состоявшегося и неизвестного — None, строка не печатается."""
+    p = event.get("payload") or {}
+    код = mi.исход_звонка(p)
+    if код in (None, "answered"):
+        return None
+    направление = {"incoming": "входящий", "outgoing": "исходящий",
+                   "missed": "пропущенный"}.get(p.get("direction"), "направление неизвестно")
+    return "Исход: %s (%s, %s с)" % (mi.ИСХОДЫ[код], направление, p.get("duration_s", 0))
+
+
 def is_owner(name, canon):
     n = (name or "").strip().lower()
     return n == OWNER or (canon or {}).get(n) == OWNER
@@ -354,15 +376,20 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
             mark = "" if it.get("disposition") == "task" else " · на проверку"
             lines.append("- %s%s%s%s" % (scrub(text), due, mark, метка(it)))
         lines.append("")
-    for line in (people_line(extraction, canon), projects_line(extraction, canon)):
+    for line in (строка_исхода(event), people_line(extraction, canon),
+                 projects_line(extraction, canon)):
         if line:
             lines.append(scrub(line))
     body = "\n".join(lines).rstrip() + "\n"
 
+    # `outcome` — только у несостоявшегося звонка: у состоявшегося поля нет,
+    # и карточки, нарисованные до Т4.3, остаются байт в байт теми же
     fm = frontmatter(
-        [("title", yaml_str("Звонок · %s · %s" % (who, human))),
+        [("title", yaml_str("%s · %s · %s" % (заголовок(event), who, human))),
          ("id", oid),
          ("type", "conversation"),
+         ("outcome", None if mi.звонок_состоялся(event.get("payload"))
+          else mi.исход_звонка(event.get("payload"))),
          ("source", "phone"),
          ("source_id", native),
          ("created", created),

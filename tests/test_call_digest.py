@@ -26,6 +26,23 @@ class Рендер(unittest.TestCase):
         text, _ = cd.render(EVENT, ПУСТО, 0)
         self.assertTrue(text.startswith("Звонок · Анна · 14:05–14:23"), text[:60])
 
+    def test_недозвон_и_пропущенный_в_заголовке_и_строкой_исхода(self):
+        """Т4.3: недозвон не выглядит в телеграме как состоявшийся звонок."""
+        ev = dict(EVENT, payload={"contact_name": "Анна", "direction": "outgoing",
+                                  "duration_s": 0})
+        text, _ = cd.render(ev, ПУСТО, 0)
+        self.assertTrue(text.startswith("Недозвон · Анна · 14:05–14:23\nИсход: не дозвонился"),
+                        text)
+        ev = dict(EVENT, payload={"contact_name": "Анна", "direction": "missed", "duration_s": 0})
+        text, _ = cd.render(ev, ПУСТО, 0)
+        self.assertTrue(text.startswith("Пропущенный звонок · Анна"), text)
+        # состоявшийся — как раньше, без строки исхода
+        ev = dict(EVENT, payload={"contact_name": "Анна", "direction": "incoming",
+                                  "duration_s": 1091})
+        text, _ = cd.render(ev, ПУСТО, 0)
+        self.assertTrue(text.startswith("Звонок · Анна · 14:05–14:23"), text)
+        self.assertNotIn("Исход:", text)
+
     def test_пустые_разделы_не_печатаются(self):
         text, _ = cd.render(EVENT, ПУСТО, 0)
         self.assertNotIn("Попросили", text)

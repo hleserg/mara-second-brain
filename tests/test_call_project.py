@@ -80,6 +80,56 @@ class Карточка(unittest.TestCase):
         self.assertEqual(len(line.split(": ")[1]), 64)
 
 
+class Исход(unittest.TestCase):
+    """Т4.3: исход вызова из журнала звонков — недозвон больше не выглядит
+    как «поговорили»; у состоявшегося и неизвестного карточка прежняя."""
+
+    def событие(self, **payload):
+        return dict(EVENT, payload=dict(EVENT["payload"], **payload))
+
+    def test_исход_по_журналу(self):
+        self.assertIsNone(mi.исход_звонка({}), "без журнала исход не выдумывается")
+        self.assertIsNone(mi.исход_звонка({"direction": "incoming", "duration_s": "долго"}))
+        self.assertEqual(mi.исход_звонка({"direction": "incoming", "duration_s": 1091}), "answered")
+        self.assertEqual(mi.исход_звонка({"direction": "missed", "duration_s": 0}), "missed")
+        self.assertEqual(mi.исход_звонка({"direction": "incoming", "duration_s": 0}), "missed")
+        self.assertEqual(mi.исход_звонка({"direction": "outgoing", "duration_s": 0}), "no-answer")
+        self.assertEqual(mi.исход_звонка({"direction": "outgoing", "duration_s": "0"}), "no-answer")
+        self.assertTrue(mi.звонок_состоялся({}))
+        self.assertFalse(mi.звонок_состоялся({"direction": "outgoing", "duration_s": 0}))
+
+    def test_состоявшийся_и_неизвестный_карточку_не_меняют(self):
+        def без_свежего(text):      # id и created у новой карточки свои
+            return "\n".join(l for l in text.splitlines()
+                             if not l.startswith(("id: ", "created: ")))
+        _, было = cp.conversation_card(EVENT, EXTR, {})
+        _, стало = cp.conversation_card(self.событие(direction="incoming", duration_s=1091),
+                                        EXTR, {})
+        self.assertEqual(без_свежего(было), без_свежего(стало),
+                         "карточки до Т4.3 остаются байт в байт теми же")
+        self.assertIn('title: "Звонок · Анна · 14:05"', было)
+        self.assertNotIn("outcome:", было)
+        self.assertNotIn("Исход:", было)
+
+    def test_недозвон_назван_недозвоном(self):
+        ev = self.событие(direction="outgoing", duration_s=0)
+        name, text = cp.conversation_card(ev, dict(EXTR, requests=[], commitments=[]), {})
+        self.assertEqual(name, "kb/conversations/2026-09-02-1405-anna.md", "путь прежний")
+        self.assertIn('title: "Недозвон · Анна · 14:05"', text)
+        self.assertIn("\noutcome: no-answer\n", text)
+        self.assertIn("Исход: не дозвонился (исходящий, 0 с)", cp.body_of(text))
+        self.assertNotIn("поговорили", text)
+
+    def test_пропущенный_назван_пропущенным(self):
+        _, text = cp.conversation_card(self.событие(direction="missed", duration_s=0), EXTR, {})
+        self.assertIn('title: "Пропущенный звонок · Анна · 14:05"', text)
+        self.assertIn("\noutcome: missed\n", text)
+        self.assertIn("Исход: пропущен (пропущенный, 0 с)", text)
+        # входящий с нулевой длительностью — тоже пропущенный
+        _, text = cp.conversation_card(self.событие(direction="incoming", duration_s=0), EXTR, {})
+        self.assertIn("Исход: пропущен (входящий, 0 с)", text)
+
+
 class Обязательства(unittest.TestCase):
     def test_обязательство_из_просьбы_и_обещания(self):
         cards = cp.commitment_cards(EVENT, EXTR, {})
