@@ -276,8 +276,11 @@ class Флаги(unittest.TestCase):
             env={**os.environ, "MARA_BACKUP_ALLOW_SAME_DEV": "1",
                  "MARA_STATE": os.path.join(self.tmp, "state")})
         self.assertNotEqual(r.returncode, 0, r.stdout)
-        self.assertIn("нет в зеркале", r.stderr)
-        self.assertNotIn("и ещё", r.stderr, "пропала ровно одна копия")
+        # последняя строка — само исключение; трейсбек на 3.14 несёт исходное
+        # выражение с литералом «и ещё» (Codex по #130)
+        строка = r.stderr.strip().splitlines()[-1]
+        self.assertIn("нет в зеркале", строка)
+        self.assertNotIn("и ещё", строка, "пропала ровно одна копия")
 
     def test_курсор_перечитки_живёт_в_состоянии(self):
         """Старые перечитываются следующими за курсором по носителю; курсор —
