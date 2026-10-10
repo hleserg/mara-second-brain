@@ -225,8 +225,10 @@ class MainActivity : AppCompatActivity() {
             "рекордеры: " + Device.producers(this).joinToString("; ").ifEmpty { "ни одного из известных" },
             "в медиатеке записей: ${медиатека.size}",
             "в выбранной папке: " + if (s.folderUri.isEmpty()) "папка не выбрана" else "${папка.size}",
-            "последний файл: " + (последняя?.let { "${it.name}, ${it.sizeBytes} Б, ${когда(it.modifiedMs)}" }
-                ?: "нет"),
+            // имя файла — от рекордера, в нём бывает имя контакта: наружу форма
+            "последний файл: " + (последняя?.let {
+                "${Затирание.файл(it.name)}, ${it.sizeBytes} Б, ${когда(it.modifiedMs)}"
+            } ?: "нет"),
             // `Device.open` ловит только «файла нет»; отозванное разрешение
             // и отвалившийся SAF-грант бросают `SecurityException` — и здесь
             // это законный ответ «нет», а не повод потерять весь отчёт.
@@ -252,7 +254,10 @@ class MainActivity : AppCompatActivity() {
     /** Скан медиатеки, обход SAF и разбор кодека — не на главном потоке. */
     private fun фоном(сбор: () -> String) {
         Thread {
-            val t = runCatching(сбор).getOrElse { "не собралось: ${it.javaClass.simpleName}: ${it.message}" }
+            // текст исключения SAF/MediaStore может нести путь с номером — тоже через затиралку
+            val t = runCatching(сбор).getOrElse {
+                Затирание.текст("не собралось: ${it.javaClass.simpleName}: ${it.message}")
+            }
             runOnUiThread { покажи(t) }
         }.start()
     }
