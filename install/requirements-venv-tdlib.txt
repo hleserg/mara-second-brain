@@ -1,6 +1,8 @@
 # Зависимости `venv-tdlib` на doctor (install/install-units.sh, VENV_TDLIB):
 # обёртка python-telegram с вложенной libtdjson (BSL-1.0, ADR-0012 §В) и
 # её зависимости, разрешены pip 2026-10-10 под Python 3.12 x86_64.
+# Хеш python-telegram — от колеса py3-none-manylinux_2_28_x86_64 (glibc ≥ 2.28):
+# на другой платформе `--require-hashes` откажет, и это правильно.
 #
 #   python3.12 -m venv ~/.local/share/mara/venv-tdlib
 #   ~/.local/share/mara/venv-tdlib/bin/pip install --require-hashes \

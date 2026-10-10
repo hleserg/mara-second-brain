@@ -279,8 +279,10 @@ Gmail в той части, где не нужен его браузер. **Ге
      `./gradlew :app:dependencies --configuration releaseRuntimeClasspath
      --write-locks` (в `app/build.gradle.kts` закрепление только этой
      конфигурации — того, что едет на телефон; `lockAllConfigurations`
-     ловил инструментарий AGP и дал 43 находки про netty/protobuf
-     сборочной машины; файл не коммитится — в облаке закрыт
+     ловил инструментарий AGP: первый прогон job `osv` в #140, run
+     38049925056, — «found 152 packages», 43 находки про netty/protobuf
+     сборочной машины, второй, run 38050058751, — 58 пакетов, «No issues
+     found»; файл не коммитится, в `.gitignore` — в облаке закрыт
      dl.google.com), и по `install/requirements-venv.txt` и
      `requirements-venv-tdlib.txt` — зависимостям обоих venv doctor,
      прибитым к версиям с sha256 каждого колеса (cp312/manylinux; 54 и 2
