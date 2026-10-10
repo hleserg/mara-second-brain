@@ -330,7 +330,12 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
                   % (rel, в_шапке, занят, native), file=sys.stderr)
             return None
     if dry_run:
-        return новый, 0, 0
+        # проба показывает и ссылки: сколько восстановила бы, сколько отвергла
+        # (ранбук восстановления, шаг 4а: «сначала проба»); только чтение
+        ссылок = (_evidence_из_шапки(con, rel, прежний or в_шапке, fm,
+                                     событие(_строка(fm.get("origin"))), dry_run=True)
+                  if evidence_из_шапки and вид == "commitment" and con is not None else 0)
+        return новый, 0, ссылок
     oid = прежний or в_шапке or mi.uuid7()
     значения = {k: (_строка(fm.get(k)) or None) for k in поля}
     if "confidence" in значения:
@@ -366,7 +371,7 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
 ССЫЛКА = re.compile(r"^(\S+) (\d+)-(\d+)$")
 
 
-def _evidence_из_шапки(con, rel, oid, fm, событие):
+def _evidence_из_шапки(con, rel, oid, fm, событие, dry_run=False):
     """Обратный путь evidence (ADR-0004 п.5, хвост Т2.4/Т2.6): реестр
     восстановлен из копии старее волта, и у обязательства нет ни одной
     строки `evidence_refs` от модели, а в шапке карточки лежит список
@@ -379,18 +384,34 @@ def _evidence_из_шапки(con, rel, oid, fm, событие):
     переписывает, расхождение называет `vault_drift`. След — `audit_events`
     `evidence_restored` (сколько восстановлено, сколько отвергнуто), только
     когда что-то восстановлено: иначе карточка с навсегда потерянными
-    сегментами писала бы аудит каждым прогоном. Возвращает число строк."""
+    сегментами писала бы аудит каждым прогоном. Возвращает число строк.
+
+    Ссылки, которые реестр **отозвал** (`call_project._отозвать_evidence`:
+    пункт при повторной проекции ушёл в ревью, строки удалены с аудитом
+    `evidence_withdrawn`, карточка в волте осталась со старым списком), не
+    восстанавливаются: отсутствие строк здесь — решение реестра, а не потеря
+    (ревью PR #131, P2). `dry_run` — только счёт, без записи и аудита; `oid`
+    None (объекта в реестре нет) — строк и отзыва у него быть не может."""
     список = fm.get("evidence")
     if isinstance(список, str):
         список = список.split(",")
-    if not isinstance(список, list) or not список:
+    if not isinstance(список, list):
         return 0
-    if con.execute("select 1 from evidence_refs where object_kind='commitment' and "
-                   "object_id=? and producer='model' limit 1", (oid,)).fetchone():
+    список = [str(x).strip() for x in список if str(x).strip()]
+    if not список:
         return 0
+    if oid is not None:
+        if con.execute("select 1 from evidence_refs where object_kind='commitment' and "
+                       "object_id=? and producer='model' limit 1", (oid,)).fetchone():
+            return 0
+        if con.execute("select 1 from audit_events where object_kind='commitment' and "
+                       "object_id=? and action='evidence_withdrawn' limit 1",
+                       (oid,)).fetchone():
+            print("ledger_import: %s — ссылки evidence отозваны реестром, из шапки не "
+                  "восстанавливаются" % rel, file=sys.stderr)
+            return 0
     когда, принято, отвергнуто = mi.now_iso(), 0, []
     for ссылка in список:
-        ссылка = str(ссылка).strip()
         m = ССЫЛКА.match(ссылка)
         seg = None
         if m and событие:
@@ -402,15 +423,16 @@ def _evidence_из_шапки(con, rel, oid, fm, событие):
                                <= seg["end_ms"]):
             отвергнуто.append(ссылка)
             continue
-        con.execute("insert into evidence_refs(id,object_kind,object_id,kind,segment_id,"
-                    "start_ms,end_ms,producer,created) values(?,?,?,?,?,?,?,?,?)",
-                    (mi.uuid7(), "commitment", oid, "audio", m.group(1),
-                     int(m.group(2)), int(m.group(3)), "model", когда))
+        if not dry_run:
+            con.execute("insert into evidence_refs(id,object_kind,object_id,kind,segment_id,"
+                        "start_ms,end_ms,producer,created) values(?,?,?,?,?,?,?,?,?)",
+                        (mi.uuid7(), "commitment", oid, "audio", m.group(1),
+                         int(m.group(2)), int(m.group(3)), "model", когда))
         принято += 1
     if отвергнуто:
         print("ledger_import: %s — ссылок evidence без сегмента в реестре: %d "
               "(не восстановлены)" % (rel, len(отвергнуто)), file=sys.stderr)
-    if принято:
+    if принято and not dry_run:
         mi.audit(con, "evidence_restored", ("import", ПЕРЕНОС), "commitment", oid,
                  {"restored": принято, "rejected": len(отвергнуто), "from": "frontmatter"},
                  когда)

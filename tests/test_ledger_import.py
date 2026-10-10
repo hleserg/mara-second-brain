@@ -1184,10 +1184,6 @@ class Аудит(_СтендПереноса):
         self.assertEqual(self.строки("revisions"), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class EvidenceИзШапки(_СтендПереноса):
     """ADR-0004 п.5, обратный путь (хвост Т2.4/Т2.6): реестр восстановлен из
     копии старее волта — строки `evidence_refs` обязательства
@@ -1296,13 +1292,65 @@ class EvidenceИзШапки(_СтендПереноса):
         self.assertEqual(self.аудит(), [])
         self.assertIn("ссылок evidence без сегмента в реестре: 4", err.getvalue())
 
-    def test_карточка_без_origin_и_проба_строк_не_дают(self):
+    def test_карточка_без_origin_строк_не_даёт(self):
         self.карточка_со_ссылками("%s 252000-260000" % self.сег[11], origin=None)
         self.assertEqual(self.перенести()["evidence"], 0)
         self.assertEqual(self.ссылки(), [])
-        os.remove(os.path.join(self.vault, self.rel))
-        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11])
+
+    def test_проба_считает_но_не_пишет(self):
+        """Ранбук, шаг 4а: «сначала проба» — она показывает, сколько ссылок
+        восстановит и сколько отвергнет, и не трогает базу (ревью, P3)."""
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11], "нет-такого 1-2")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            итог = self.перенести(dry_run=True)
+        self.assertEqual(итог["evidence"], 1)
+        self.assertIn("без сегмента в реестре: 1", err.getvalue())
+        self.assertEqual(self.ссылки(), [])
+        self.assertEqual(self.аудит(), [])
+        self.assertEqual(self.строки("commitments"), [])
+        # и у уже перенесённого объекта проба честна: строки есть — ноль
+        self.перенести()
         self.assertEqual(self.перенести(dry_run=True)["evidence"], 0)
+
+    def test_отозванные_реестром_ссылки_не_воскресают(self):
+        """`call_project._отозвать_evidence` удаляет строки с аудитом
+        `evidence_withdrawn`, карточка в волте остаётся со старым списком —
+        отсутствие строк здесь решение реестра, а не потеря (ревью, P2)."""
+        self.карточка_со_ссылками("%s 252000-260000" % self.сег[11])
+        self.перенести()
+        oid, = [r["id"] for r in self.con.execute("select id from commitments")]
+        with mi.транзакция(self.con):
+            self.con.execute("delete from evidence_refs where object_id=?", (oid,))
+            mi.audit(self.con, "evidence_withdrawn", ("rule", "call_project"),
+                     "commitment", oid, {"withdrawn": 1})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            итог = self.перенести()
+        self.assertEqual(итог["evidence"], 0)
+        self.assertEqual(self.ссылки(), [])
+        self.assertEqual(len(self.аудит()), 1, "второго evidence_restored нет")
+        self.assertIn("отозваны реестром", err.getvalue())
+
+    def test_пустой_список_и_карточка_разговора_молчат(self):
+        """`evidence:` без элементов — не «одна отвергнутая» (ревью, P3);
+        список в шапке разговора строк обязательства не даёт (мутант
+        «убрать вид == commitment»)."""
+        self.карточка_со_ссылками()                 # evidence: без элементов
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.перенести()["evidence"], 0)
+        self.assertEqual(err.getvalue(), "")
+        p = карточка(self.vault, "kb/conversations/2026-09-02-anna.md", type="conversation",
+                     source_id="call/call_1", origin=None, due=None, promised_to=None)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("\n---\n\n", "\norigin: call/%s\nevidence:\n  - %s 252000-260000\n---\n\n"
+                                   % (self.eid, self.сег[11]), 1))
+        итог = self.перенести()
+        self.assertEqual(итог["разговоров"], 1)
+        self.assertEqual(итог["evidence"], 0)
         self.assertEqual(self.ссылки(), [])
 
     def test_проектор_свои_строки_кладёт_сам_перенос_одной_карточки_шапку_не_читает(self):
@@ -1314,3 +1362,7 @@ class EvidenceИзШапки(_СтендПереноса):
         self.assertIsNotNone(oid)
         self.assertEqual(self.ссылки(), [])
         self.assertEqual(self.аудит(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
