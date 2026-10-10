@@ -5,6 +5,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.UUID
 
 /**
  * Решения приложения — здесь, и только чистыми функциями. Всё, что трогает
@@ -282,6 +283,11 @@ object EventJson {
      * `source_id` — это sha256 содержимого, а не имя файла: переименование не
      * должно порождать второй звонок (ТЗ §7). `device_id` не шлём, сервер
      * берёт его из токена.
+     *
+     * `idempotencyKey` — ключ квитанции (ТЗ §4.4, Т2.9): с ним повтор после
+     * потерянного ответа получает ту же квитанцию, что ушла в первый раз, а
+     * не новый расчёт. В фиксе контракта его нет: фикс описывает событие, а
+     * ключ — свойство запроса, и сервер его из тела вынимает до разбора.
      */
     fun build(
         rec: Recording,
@@ -291,6 +297,7 @@ object EventJson {
         producer: String?,
         zone: ZoneId,
         matchedBy: String? = null,
+        idempotencyKey: String? = null,
     ): JSONObject {
         val payload = JSONObject()
         if (call != null) {
@@ -318,6 +325,7 @@ object EventJson {
             .put("source_id", sha256)
             .put("occurred_at", Iso.at(call?.startMs ?: rec.modifiedMs, zone))
         if (call != null) ev.put("ended_at", Iso.at(call.endMs, zone))
+        idempotencyKey?.let { ev.put("idempotency_key", it) }
         return ev.put("payload", payload).put("blob", blob)
     }
 }
@@ -328,6 +336,28 @@ enum class JobState { NEW, HASHED, POSTED, DONE, FAILED }
 data class ServerReply(val code: Int, val eventId: String? = null, val needBlob: Boolean = false)
 
 object JobFlow {
+    /**
+     * Ключ квитанции (ТЗ §4.4, Т2.9) — один на тело запроса. Выдаётся до
+     * первого `POST /v1/ingest/event` и кладётся в очередь раньше, чем
+     * уходит запрос: иначе телефон, убитый между ответом сервера и `save`,
+     * повторил бы запрос с новым ключом, и квитанция осталась бы
+     * невостребованной. Уже выданный ключ не трогают — в этом весь смысл;
+     * «не трогают» держит очередь (`Queue.выдатьКлюч` пишет только в пустую
+     * колонку), потому что периодический и разовый воркеры друг друга не
+     * исключают и могут взять одну работу разом (Codex по #139).
+     *
+     * Случайный, а не производный от sha256: ключ принадлежит запросу, а
+     * тело при том же файле бывает разным (журнал звонков мог не успеть к
+     * первой попытке). Сервер отвечает прежней квитанцией на прежний ключ,
+     * тело не сверяя, — значит, ключ меняется ровно тогда, когда мы сами
+     * решили считать запрос другим: при возврате в `NEW`, где sha256 и тело
+     * считаются заново. Инвариант «`NEW` ⇒ ни sha256, ни ключа» держит
+     * очередь, в SQL и по состоянию строки, а не снимка: `Queue.сжечьКлюч`
+     * (409), `Queue.seen` (файл дорос), `Queue.retryFailed` (поправили
+     * токен), миграция 5 (возврат после отката).
+     */
+    fun новыйКлюч(): String = UUID.randomUUID().toString()
+
     /**
      * Работу уронило местным сбоем — не сервером. Что с ней делать.
      *

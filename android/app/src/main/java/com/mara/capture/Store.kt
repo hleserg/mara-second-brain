@@ -129,6 +129,9 @@ data class Job(
     val error: String? = null,
     val producer: String? = null,
     val path: String? = null,
+    /** Ключ квитанции идемпотентности (ТЗ §4.4, Т2.9): выдан до первого
+     *  `POST /v1/ingest/event`, повтор уходит с ним же. */
+    val idemKey: String? = null,
 ) {
     fun recording() = Recording(id, name, sizeBytes, modifiedMs, producer, path)
 }
@@ -139,14 +142,14 @@ data class Job(
  * Очередь обязана пережить reboot и force-stop (ТЗ §5.1E), поэтому она на
  * диске, а не в памяти воркера.
  */
-class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 4) {
+class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db", null, 5) {
 
     private val JOBS = """create table jobs(
                  id text primary key, name text, size integer, mtime integer,
                  state text, attempts integer default 0, sha256 text, event_id text,
                  seen_size integer default -1, seen_mtime integer default -1,
                  seen_at integer default 0, error text, producer text, updated integer,
-                 path text)"""
+                 path text, idem_key text)"""
     // `if not exists`: после отката APK ниже схемы 3 и возврата таблица уже
     // есть, а `onDowngrade` её не трогает (Codex по #136, круг 5)
     private val MESSAGES = """create table if not exists messages(
@@ -170,6 +173,22 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         // раз её не добавить (Codex по #136, круги 2–3)
         if (old < 4 && !естьКолонка(db, "jobs", "path")) {
             db.execSQL("alter table jobs add column path text")
+        }
+        // ключ квитанции (Т2.9); у работ, уехавших до обновления, его нет —
+        // ключ выдаст первый же прогон на `HASHED`, а `DONE` и `FAILED` он не
+        // нужен
+        if (old < 5) {
+            if (!естьКолонка(db, "jobs", "idem_key")) {
+                db.execSQL("alter table jobs add column idem_key text")
+            }
+            // Колонка уже была — базу открывал откаченный APK схемы 4. Он её
+            // не знает: на доросшем файле обнулил sha256, не тронув ключ, а
+            // мог и пересчитать хеш — строка в HASHED с ключом прежнего тела.
+            // Под старым ключом сервер отдал бы квитанцию про прежние байты
+            // (`need_blob=false` → DONE без заливки). Ключи до POST сжигаем
+            // все: свежий ключ стоит одного лишнего дедупа на сервере, старый
+            // — потерянной записи (Codex по #139, круги 2 и 4)
+            db.execSQL("update jobs set idem_key=null where state in ('NEW','HASHED')")
         }
     }
 
@@ -225,6 +244,10 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
                 прежние.put("seen_at", nowMs)
                 прежние.put("state", JobState.NEW.name)   // изменился — хеш недействителен
                 прежние.putNull("sha256")
+                // и ключ квитанции с ним: под старым ключом сервер отдал бы
+                // квитанцию про прежние байты, и доросший файл либо уехал бы
+                // лишний раз (409), либо лёг бы в DONE без события (ревью Т2.9)
+                прежние.putNull("idem_key")
             }
             db.update("jobs", прежние, "id=?", arrayOf(rec.id))
         }
@@ -234,14 +257,14 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         val out = mutableListOf<Job>()
         readableDatabase.rawQuery(
             "select id,name,size,mtime,state,attempts,sha256,event_id,seen_size,seen_mtime," +
-                "seen_at,error,producer,path from jobs where state not in (?,?) order by mtime",
+                "seen_at,error,producer,path,idem_key from jobs where state not in (?,?) order by mtime",
             arrayOf(JobState.DONE.name, JobState.FAILED.name)
         ).use { c ->
             while (c.moveToNext()) out += Job(
                 c.getString(0), c.getString(1), c.getLong(2), c.getLong(3),
                 JobState.valueOf(c.getString(4)), c.getInt(5), c.getString(6), c.getString(7),
                 c.getLong(8), c.getLong(9), c.getLong(10), c.getString(11), c.getString(12),
-                c.getString(13),
+                c.getString(13), c.getString(14),
             )
         }
         return out
@@ -251,8 +274,49 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         writableDatabase.update("jobs", ContentValues().apply {
             put("state", job.state.name); put("attempts", job.attempts)
             put("sha256", job.sha256); put("event_id", job.eventId)
+            // Ключ квитанции `save` не трогает вовсе: снимок бывает старее
+            // строки (второй воркер успел выдать ключ, сжечь его в `seen` или
+            // уйти дальше), и любая запись по снимку — хоть ключа, хоть null
+            // по `job.state == NEW` — вернула бы ключ под новое тело или стёрла
+            // бы выданный под принятый запрос. Выдаёт ключ только
+            // `выдатьКлюч`, сжигают — `сжечьКлюч` с проверкой состояния строки,
+            // `seen`, `retryFailed`, миграция 5 (Codex по #139, круги 3–4)
             put("error", job.error); put("updated", nowMs)
         }, "id=?", arrayOf(job.id))
+    }
+
+    /**
+     * Ключ квитанции работе — один, даже когда работу разом взяли два воркера
+     * (периодический `mara-sync` и разовый `mara-sync-once` друг друга не
+     * исключают): предложенный ключ ложится только в пустую колонку, а
+     * возвращается то, что в строке лежит после этого — своё или чужое.
+     * И только тому поколению тела, которое воркер держит в снимке:
+     * `state='HASHED'` и тот же `sha256`. Иначе воркер со старым снимком
+     * выдал бы ключ строке, которую скан уже увёл в NEW под доросший файл, а
+     * новый хеш унаследовал бы ключ прежнего тела (Codex по #139, круги 1 и 5).
+     * null — строки нет или она уже не та: работу пропустить.
+     */
+    fun выдатьКлюч(id: String, sha256: String, ключ: String): String? {
+        val db = writableDatabase
+        db.compileStatement("update jobs set idem_key=? where id=? and idem_key is null " +
+                "and state=? and sha256=?").apply {
+            bindString(1, ключ); bindString(2, id)
+            bindString(3, JobState.HASHED.name); bindString(4, sha256)
+        }.executeUpdateDelete()
+        return db.rawQuery("select idem_key from jobs where id=? and state=? and sha256=?",
+            arrayOf(id, JobState.HASHED.name, sha256))
+            .use { if (it.moveToFirst()) it.getString(0) else null }
+    }
+
+    /**
+     * Сжечь ключ при возврате в NEW после 409: тело с новым хешем — другое.
+     * Условие по состоянию **строки**, не снимка: запоздалый снимок другого
+     * воркера сюда не попадёт, а строку, которую уже увели из `из`, не
+     * тронем (Codex по #139, круг 4).
+     */
+    fun сжечьКлюч(id: String, из: JobState) {
+        writableDatabase.compileStatement("update jobs set idem_key=null where id=? and state=?")
+            .apply { bindString(1, id); bindString(2, из.name) }.executeUpdateDelete()
     }
 
     fun count(state: JobState): Int =
@@ -271,7 +335,9 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         db.compileStatement("update messages set state='NEW', error=null, attempts=0 where state='FAILED'")
             .executeUpdateDelete()
         return db.compileStatement(
-            "update jobs set state='NEW', sha256=null, error=null, attempts=0 where state='FAILED'"
+            // ключ квитанции сгорает вместе с хешем: тело посчитается заново
+            "update jobs set state='NEW', sha256=null, idem_key=null, error=null, attempts=0 " +
+                "where state='FAILED'"
         ).executeUpdateDelete()
     }
 

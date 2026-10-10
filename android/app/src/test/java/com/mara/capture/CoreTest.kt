@@ -290,6 +290,15 @@ class CoreTest {
         assertFalse("сервер берёт устройство из токена", ev.has("device_id"))
     }
 
+    @Test
+    fun `ключ квитанции уходит в теле и только когда он есть`() {
+        // ТЗ §4.4, Т2.9: сервер вынимает `idempotency_key` из тела до разбора
+        // события; без ключа поля нет вовсе — фикс контракта его не знает
+        val с = EventJson.build(файл, звонок, ША, "m4a", null, мск, null, "k-1")
+        assertEquals("k-1", с.getString("idempotency_key"))
+        assertFalse(EventJson.build(файл, звонок, ША, "m4a", null, мск).has("idempotency_key"))
+    }
+
     // ── сопоставление с журналом ──────────────────────────────────────────
 
     @Test
@@ -466,6 +475,17 @@ class CoreTest {
     fun `сеть легла — состояние не меняем`() {
         assertEquals(JobState.POSTED, JobFlow.next(JobState.POSTED, ServerReply(0)))
         assertEquals(JobState.HASHED, JobFlow.next(JobState.HASHED, ServerReply(503)))
+    }
+
+    @Test
+    fun `ключ квитанции годится серверу и не повторяется`() {
+        // «Один на работу» держит SQL в `Queue.выдатьКлюч` (пишет только в
+        // пустую колонку) — на JVM без SQLite его не проверить; здесь — что
+        // сам ключ сервер примет (строка до 128 знаков) и что два запроса не
+        // получат один ключ случайно.
+        val ключ = JobFlow.новыйКлюч()
+        assertTrue("сервер принимает строку до 128 знаков", ключ.length in 1..128)
+        assertNotEquals("две работы — два запроса", ключ, JobFlow.новыйКлюч())
     }
 
     private fun работа(state: JobState = JobState.POSTED, attempts: Int = 0) =

@@ -64,8 +64,19 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     /** true — сервер попросил подождать: прогон оборван, работу надо повторить. */
     private fun прогон(ctx: Context, q: Queue, api: Api, журнал: List<CallLogEntry>,
                        now: Long, s: Settings): Boolean {
-        for (job in q.pending()) {
-            if (!готов(q, job, now)) continue
+        for (было in q.pending()) {
+            if (!готов(q, было, now)) continue
+            // Ключ квитанции — в очередь до запроса и до `try`: снимок, который
+            // `послеСбоя` сохранит при броске ниже, обязан уже нести ключ,
+            // иначе бросок после ушедшего POST стёр бы его, и повтор уехал бы
+            // с новым (Т2.9, ревью). Выдаёт очередь, атомарно и только этому
+            // поколению тела (тот же sha256): второй воркер, взявший ту же
+            // работу, получит тот же ключ, а не свой; строка, которую скан
+            // успел увести в NEW, ключа не получит — работа пропускается
+            val job = if (было.state == JobState.HASHED && было.idemKey == null)
+                было.copy(idemKey = q.выдатьКлюч(было.id, было.sha256 ?: continue,
+                    JobFlow.новыйКлюч()) ?: continue)
+            else было
             // Одна работа не имеет права уронить весь прогон: из-за одной
             // записи не уезжала ни остальная очередь, ни сообщения. Приговор
             // здесь не выносится — это дело `JobFlow.послеСбоя`, и он же
@@ -108,8 +119,11 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             JobState.HASHED -> {
                 // подсказка — uri, путь медиатеки и имя: у ACR номер в каталоге (Т4.3)
                 val м = CallLogMatcher.match(журнал, job.modifiedMs, job.recording().подсказка())
+                // ключ квитанции уже в очереди — его выдал `прогон` до `try`;
+                // повтор после потерянного ответа уходит с тем же (Т2.9)
                 val body = EventJson.build(job.recording(), м?.entry, job.sha256!!,
-                    Device.ext(job.recording()), job.producer, ZoneId.systemDefault(), м?.by)
+                    Device.ext(job.recording()), job.producer, ZoneId.systemDefault(), м?.by,
+                    job.idemKey)
                 val r = api.postEvent(body)
                 q.save(job.copy(state = JobFlow.next(job.state, r), eventId = r.eventId,
                     attempts = job.attempts + 1, error = ошибка(r)), now)
@@ -124,6 +138,9 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 val дальше = JobFlow.next(job.state, r)
                 // 409 значит, что файл дописали, пока мы его читали: считаем
                 // заново, иначе на сервер уедет половина разговора
+                // ключ квитанции принадлежит телу, а тело с новым хешем —
+                // другое: сжечь, но только если строка всё ещё наша (POSTED)
+                if (дальше == JobState.NEW) q.сжечьКлюч(job.id, JobState.POSTED)
                 q.save(job.copy(state = дальше, attempts = job.attempts + 1,
                     sha256 = if (дальше == JobState.NEW) null else job.sha256,
                     error = ошибка(r)), now)
