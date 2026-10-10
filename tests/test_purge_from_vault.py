@@ -246,10 +246,24 @@ class Вычистка(unittest.TestCase):
         self.assertTrue(self._есть_в_r2("secret/key.md"))
 
     def test_remote_без_бакета_отвергается(self):
-        r = self._прогон("secret/key.md", REMOTE="r2:")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("нужен бакет", r.stderr)
+        # `r2:` и `r2:/` у rclone — корень со списком бакетов: предпроверка
+        # прошла бы, а `secret` из пути стал бы бакетом (Codex, круг 2).
+        for remote in ("r2:", "r2:/", "r2://", "r2"):
+            with self.subTest(remote=remote):
+                r = self._прогон("secret/key.md", REMOTE=remote)
+                self.assertEqual(r.returncode, 2, remote + r.stdout + r.stderr)
+                self.assertIn("нужен бакет", r.stderr)
         self.assertEqual(self._вызовы(), [])
+
+    def test_remote_с_хвостовым_слешем_нормализуется(self):
+        self._в_r2("secret/key.md")
+        r = self._прогон("secret/key.md", REMOTE="r2:bucket//")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self._есть_в_r2("secret/key.md"))
+        with open(self.log, encoding="utf-8") as f:
+            журнал = f.read()
+        self.assertIn("r2:bucket/secret/key.md", журнал)
+        self.assertNotIn("//", журнал)
 
     def test_r2_недоступен_с_начала_ничего_не_трогает(self):
         self._в_r2("secret/key.md")

@@ -19,10 +19,14 @@ TARGETS="${TARGETS:-${BUNDLES:-/mnt/backup/mara /mnt/win-backups/mara}}"
 export TARGETS
 
 [ $# -ge 1 ] || { echo "usage: $0 <путь-в-волте> [...]" >&2; exit 2; }
-case $REMOTE in
-  *:?*) ;;
-  *) echo "REMOTE=$REMOTE: нужен бакет (remote:bucket)" >&2; exit 2 ;;
-esac
+# `remote:` и `remote:/` у rclone — корень со списком бакетов: предпроверка
+# прошла бы, а первый компонент пути стал бы бакетом. Нужен непустой бакет
+# после двоеточия, не из одних слешей; хвостовые слеши срезаются, чтобы не
+# клеить `remote:bucket//путь`.
+bucket=${REMOTE#*:}; bucket=${bucket//\//}
+case $REMOTE in *:*) ;; *) bucket="" ;; esac
+[ -n "$bucket" ] || { echo "REMOTE=$REMOTE: нужен бакет (remote:bucket)" >&2; exit 2; }
+while [ "${REMOTE%/}" != "$REMOTE" ]; do REMOTE=${REMOTE%/}; done
 
 # Пути — только относительные, к файлам, без `..` и `./`: git-filter-repo
 # сравнивает строки как есть, и `./x` для него не `x` — история осталась бы,
