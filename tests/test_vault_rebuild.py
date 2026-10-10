@@ -209,11 +209,16 @@ class Пересборка(unittest.TestCase):
         self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
         self.assertIn('title: "прислать \\"большую\\" смету Анне"', карточки[self.card][1])
         # и перенесённые поля, которых правка словами не трогает
-        self.con.execute("update commitments set confidence=0.5, extractor='другая' "
+        self.con.execute("update commitments set confidence=0.5, extractor='другая', "
+                         "occurred='2026-09-02T14:06:00+03:00' "
                          "where source_native_id like '%/requests/1'")
+        self.con.execute("update conversations set occurred='2026-09-02T14:06:00+03:00'")
         итог, карточки = self.пересборка()
         self.assertIn("\nconfidence: 0.50\n", карточки[self.card][1])
         self.assertIn("\nextractor: другая\n", карточки[self.card][1])
+        for rel in (self.card, [w for w in self.written if "conversations" in w][0]):
+            self.assertIn("\noccurred: 2026-09-02T14:06:00+03:00\n", карточки[rel][1],
+                          "occurred — из строки, не из события (Codex, круг 2)")
         self.assertEqual(карточки[self.card][0], "разошлось", "реестр ушёл вперёд — видно")
 
     def test_заведённая_карточка_с_заметкой_с_переносом_совпадает(self):
