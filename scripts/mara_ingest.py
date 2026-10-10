@@ -603,9 +603,12 @@ def _открыть(root, создавать=True):
         import pathlib
         con = sqlite3.connect(pathlib.Path(os.path.abspath(путь)).as_uri() + "?mode=rw",
                               uri=True, timeout=30, isolation_level=None)
-        if os.path.getsize(путь) == 0:
-            # до первой pragma: `journal_mode=wal` уже пишет заголовок, и
-            # пустой файл перестал бы быть пустым
+        # до первой pragma: `journal_mode=wal` уже пишет заголовок, и
+        # пустой файл перестал бы быть пустым. Спрашиваем SQLite, а не
+        # файловую систему: `getsize` после открытия — ещё одна гонка с
+        # отвалившимся томом (Codex по #141, круг 4); `page_count` только
+        # читает заголовок, и у пустого файла он 0
+        if con.execute("pragma page_count").fetchone()[0] == 0:
             con.close()
             raise RuntimeError("contextd.db: пустой файл, схема не заведена — "
                                "сверке заводить нечего")
