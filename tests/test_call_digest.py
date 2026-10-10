@@ -206,6 +206,26 @@ class Доставка(_СтендДоставки):
         self.assertEqual(self.состояние(), "projected",
                          "владелец дайджеста не видел — звонок не обработан")
 
+    def test_дайджест_по_ревизии_из_реестра(self):
+        """Т5.0 (миграция 6): извлечение читается из реестра, как у проектора;
+        файла нет, строка есть — дайджест есть; ревизия новее файла —
+        дайджест по ревизии, а не по файлу."""
+        import call_extract as ce
+        xid = mi.uuid7()
+        ревизия = dict(ПУСТО, event_id=self.eid, extraction_id=xid,
+                       requests=[{"action": "прислать смету из реестра", "explicit": True,
+                                  "confidence": 0.95, "due_at": None,
+                                  "deadline_explicit": False, "deadline_phrase": "",
+                                  "disposition": "task", "evidence": []}])
+        ce.записать_ревизию(self.con, xid, ревизия)
+        self.con.commit()
+        os.remove(mi.extraction_path(self.dir, self.eid))
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        cd.run(self.eid, root=self.dir, env_file=пусто)
+        row = self.con.execute("select text from digests where event_id=?",
+                               (self.eid,)).fetchone()
+        self.assertIn("прислать смету из реестра", row["text"])
+
     def test_чужой_адресат_событие_не_закрывает(self):
         """Застава живёт в `deliver`, а закрывает событие `run` — и знать про
         отказ обязан именно он. `Адресат` проверяет заставу, `Доставка` без

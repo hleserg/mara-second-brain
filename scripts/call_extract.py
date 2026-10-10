@@ -360,6 +360,14 @@ def извлечение_события(con, event_id):
     return r["id"], json.loads(r["data_json"])
 
 
+def прочитать_ревизию(con, xid):
+    """Результат ревизии по её id (`commitments.extraction_id`); нет строки —
+    `None`. Пересборка читает ту ревизию, на которую ссылается карточка, а
+    не последнюю: между переизвлечением и перепроекцией они разные."""
+    r = con.execute("select data_json from extractions where id=?", (xid,)).fetchone()
+    return json.loads(r["data_json"]) if r else None
+
+
 def прочитать_извлечение(con, root, event_id):
     """Результат извлечения для читателей (проектор, пересборка): из реестра,
     где есть ревизия; иначе — файл `extractions/<event>.json` (сделан до

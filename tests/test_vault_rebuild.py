@@ -176,6 +176,33 @@ class Пересборка(unittest.TestCase):
         self.assertEqual(карточки[self.card][0], "совпало")
         self.assertIn("extraction_id: %s" % xid, карточки[self.card][1])
 
+    def test_пересборка_по_ревизии_карточки_а_не_по_последней(self):
+        """Переизвлечение прошло, перепроекция ещё нет: карточки ссылаются
+        на первую ревизию — пересборка рисует по ней (тело и `extraction_id`),
+        а не по последней, иначе «разошлось» на волте, который реестру
+        соответствует (ревью PR #128)."""
+        import call_extract as ce
+        первая = mi.uuid7()
+        ce.записать_ревизию(self.con, первая, dict(self.extr, extraction_id=первая))
+        self.con.commit()
+        cp.run(self.eid, self.vault, self.root)
+        вторая = mi.uuid7()
+        новое = json.loads(json.dumps(self.extr))
+        новое["requests"][0]["action"] = "прислать смету заново"
+        ce.записать_ревизию(self.con, вторая, dict(новое, extraction_id=вторая))
+        self.con.commit()
+        итог, карточки = self.пересборка()
+        self.assertEqual(карточки[self.card][0], "совпало", карточки[self.card][2])
+        self.assertIn("extraction_id: %s" % первая, карточки[self.card][1])
+        self.assertNotIn("заново", карточки[self.card][1])
+        # после перепроекции — по второй
+        cp.run(self.eid, self.vault, self.root)
+        итог, карточки = self.пересборка()
+        card2 = [rel for rel, (s, t, _) in карточки.items() if t and "заново" in t]
+        self.assertTrue(card2, "перепроекция не дошла до второй ревизии")
+        self.assertEqual(карточки[card2[0]][0], "совпало", карточки[card2[0]][2])
+        self.assertIn("extraction_id: %s" % вторая, карточки[card2[0]][1])
+
     def test_в_живой_волт_и_в_непустой_каталог_не_пишет(self):
         итог, карточки = self.пересборка()
         with self.assertRaises(RuntimeError) as e:

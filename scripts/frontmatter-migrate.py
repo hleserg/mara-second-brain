@@ -32,7 +32,7 @@ ORDER = ["title", "id", "type", "source", "source_id", "created", "occurred",
          "status", "owner", "promised_to", "due", "due_explicit", "origin",
          "domain", "classification", "storage_scope", "model_scope",
          "cloud_allowed", "audience", "retention_audio_until",
-         "content_sha256", "source_revision", "pipeline_version", "extraction_id",
+         "content_sha256", "source_revision", "pipeline_version",
          "confidence", "valid_from", "valid_until", "supersedes"]
 
 TYPE_BY_DIR = {

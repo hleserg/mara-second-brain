@@ -234,6 +234,12 @@ def транскрипт_без_извлечения(con, root):
     out = []
     for path in sorted(glob.glob(os.path.join(root, "transcripts", "*.jsonl"))):
         eid = os.path.basename(path)[:-6]
+        # ревизия в реестре (миграция 6) — извлечение есть, даже если файл
+        # не дописался: строка фиксируется раньше файла, и ставить модель
+        # на второй круг из-за файла незачем; файл — у извлечений до миграции
+        if con.execute("select 1 from extractions where event_id=? limit 1",
+                       (eid,)).fetchone():
+            continue
         if os.path.exists(mi.extraction_path(root, eid)):
             continue
         занято = con.execute(

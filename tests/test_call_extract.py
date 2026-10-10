@@ -307,6 +307,19 @@ class Шаг(unittest.TestCase):
         self.assertFalse(os.path.exists(self.mi.extraction_path(self.dir, self.eid)))
         self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid), data)
 
+    def test_сверка_не_ставит_извлечение_заново_по_строке(self):
+        """`транскрипт_без_извлечения`: строка в реестре есть, файла нет —
+        извлечение есть, модель на второй круг не ставится; нет ни того ни
+        другого — работа ставится, как раньше."""
+        import contextd_reconcile as rc
+        self.прогон({"requests": [], "commitments": []})
+        os.remove(self.mi.extraction_path(self.dir, self.eid))
+        self.assertEqual(rc.транскрипт_без_извлечения(self.con, self.dir), [])
+        self.con.execute("delete from extractions")
+        self.con.commit()
+        f = rc.транскрипт_без_извлечения(self.con, self.dir)
+        self.assertEqual([x["check"] for x in f], ["извлечение-поставлено"])
+
     def test_промпт_и_сверка_из_одной_расшифровки(self):
         """Codex по #121: файл и строки реестра разошлись (ASR умер между
         записью файла и фиксацией строк) — модель видит строки реестра, и

@@ -203,9 +203,20 @@ def _из_звонка(con, root, event_id, canon, пути):
     реестра: `{rel: (вид, oid, текст)}`."""
     ev = _событие(con, event_id)
     epath = mi.extraction_path(root, event_id)
+    # Ревизия — та, на которую ссылаются карточки звонка (`extraction_id`
+    # у всех одна), а не последняя: между переизвлечением и перепроекцией
+    # они разные, и по последней пересборка показала бы «разошлось» на
+    # волте, который реестру соответствует (ревью PR #128). Ссылок нет
+    # (до миграции 6) или они разные (перепроекция упала на полпути) —
+    # последняя из реестра, затем файл.
+    ссылки = {r[0] for r in con.execute(
+        "select extraction_id from commitments where origin_event=?", (event_id,))}
+    extraction = None
+    if len(ссылки) == 1 and None not in ссылки:
+        extraction = ce.прочитать_ревизию(con, next(iter(ссылки)))
     try:
-        # из реестра (ревизия, миграция 6); файл — у извлечений до неё
-        extraction = ce.прочитать_извлечение(con, root, event_id)
+        if extraction is None:
+            extraction = ce.прочитать_извлечение(con, root, event_id)
     except (OSError, ValueError) as e:
         raise НеПересобрать("извлечение %s не читается: %s"
                             % (os.path.relpath(epath, root), type(e).__name__))
