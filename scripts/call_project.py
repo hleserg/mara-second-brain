@@ -14,7 +14,7 @@ SQLite только очередь.
     python3 scripts/call_project.py --event call_<uuid> --vault /srv/vault
     python3 scripts/call_project.py --self-check
 """
-import os, sys, re, json, glob, hashlib, argparse, contextlib
+import os, sys, re, json, glob, hashlib, argparse, contextlib, sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1045,12 +1045,14 @@ def apply_correction(vault, event, con=None):
             raise
         # §5.2: карточка и строка легли — манифест и контрольная точка следом,
         # ещё под флоком: правка словами меняет проекцию, как и проектор звонка.
-        # Диск отказал — правка уже принята и ответ с id нужен Маре; манифест
-        # догонит следующая проекция, а до неё сверка это назовёт (ревью)
+        # Диск или база отказали (замок, I/O) — правка уже принята, и ответ с
+        # id нужен Маре: повтор увидел бы «уже так» и не доделал бы ничего;
+        # манифест и точку догонит следующая проекция, а до неё сверка это
+        # назовёт (ревью, Codex по #138, круг 3)
         if con is not None and (out.get("applied") or out.get("created")):
             try:
                 vault_manifest.записать(con, vault, когда)
-            except OSError as e:
+            except (OSError, sqlite3.OperationalError) as e:
                 out["manifest_error"] = e.__class__.__name__
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
