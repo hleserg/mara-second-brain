@@ -316,6 +316,9 @@ class Пересборка(unittest.TestCase):
         for т in ('позвонить "Анне"', 'а \\ б', 'конец \\"', "без кавычек", ""):
             self.assertEqual(mb.скаляр(yaml_str(т)), т, repr(т))
         self.assertEqual(mb.скаляр("'одинарные'"), "одинарные")
+        # косая рукой перед другим знаком остаётся (Codex, круг 5)
+        self.assertEqual(mb.скаляр('"use \\d+"'), "use \\d+")
+        self.assertEqual(mb.скаляр('"C:\\temp\\new"'), "C:\\temp\\new")
         self.assertEqual(mb.скаляр('"незакрытая'), "незакрытая")
 
     def test_неполный_волт_отказ(self):
