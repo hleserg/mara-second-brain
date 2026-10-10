@@ -290,14 +290,21 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
      * (периодический `mara-sync` и разовый `mara-sync-once` друг друга не
      * исключают): предложенный ключ ложится только в пустую колонку, а
      * возвращается то, что в строке лежит после этого — своё или чужое.
-     * null — строки нет (Codex по #139).
+     * И только тому поколению тела, которое воркер держит в снимке:
+     * `state='HASHED'` и тот же `sha256`. Иначе воркер со старым снимком
+     * выдал бы ключ строке, которую скан уже увёл в NEW под доросший файл, а
+     * новый хеш унаследовал бы ключ прежнего тела (Codex по #139, круги 1 и 5).
+     * null — строки нет или она уже не та: работу пропустить.
      */
-    fun выдатьКлюч(id: String, ключ: String): String? {
+    fun выдатьКлюч(id: String, sha256: String, ключ: String): String? {
         val db = writableDatabase
-        db.compileStatement("update jobs set idem_key=? where id=? and idem_key is null").apply {
+        db.compileStatement("update jobs set idem_key=? where id=? and idem_key is null " +
+                "and state=? and sha256=?").apply {
             bindString(1, ключ); bindString(2, id)
+            bindString(3, JobState.HASHED.name); bindString(4, sha256)
         }.executeUpdateDelete()
-        return db.rawQuery("select idem_key from jobs where id=?", arrayOf(id))
+        return db.rawQuery("select idem_key from jobs where id=? and state=? and sha256=?",
+            arrayOf(id, JobState.HASHED.name, sha256))
             .use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
