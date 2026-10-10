@@ -212,6 +212,32 @@ def contact(event):
     return p.get("contact_name") or p.get("number") or "неизвестный номер"
 
 
+# Заголовок карточки и дайджеста по исходу (Т4.3): у состоявшегося и
+# неизвестного — прежний «Звонок», чтобы карточки, нарисованные до этого,
+# остались байт в байт теми же.
+ЗАГОЛОВОК = {"missed": "Пропущенный звонок", "no-answer": "Недозвон"}
+
+
+def заголовок(event, extraction=None):
+    return ЗАГОЛОВОК.get(mi.исход_звонка(event.get("payload"), extraction), "Звонок")
+
+
+def строка_исхода(event, extraction=None):
+    """«Исход: не дозвонился (исходящий, 0 с)» — только у несостоявшихся;
+    у состоявшегося, неизвестного и сомнительного — None, не печатается."""
+    p = event.get("payload") or {}
+    код = mi.исход_звонка(p, extraction)
+    if код in (None, "answered"):
+        return None
+    направление = {"incoming": "входящий", "outgoing": "исходящий",
+                   "missed": "пропущенный"}[p["direction"]]
+    try:
+        сек = max(0, int(p.get("duration_s")))
+    except (TypeError, ValueError):
+        сек = 0
+    return "Исход: %s (%s, %d с)" % (mi.ИСХОДЫ[код], направление, сек)
+
+
 def is_owner(name, canon):
     n = (name or "").strip().lower()
     return n == OWNER or (canon or {}).get(n) == OWNER
@@ -354,13 +380,16 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
             mark = "" if it.get("disposition") == "task" else " · на проверку"
             lines.append("- %s%s%s%s" % (scrub(text), due, mark, метка(it)))
         lines.append("")
-    for line in (people_line(extraction, canon), projects_line(extraction, canon)):
+    for line in (строка_исхода(event, extraction), people_line(extraction, canon),
+                 projects_line(extraction, canon)):
         if line:
             lines.append(scrub(line))
     body = "\n".join(lines).rstrip() + "\n"
 
+    # `outcome` — только у несостоявшегося звонка: у состоявшегося поля нет,
+    # и карточки, нарисованные до Т4.3, остаются байт в байт теми же
     fm = frontmatter(
-        [("title", yaml_str("Звонок · %s · %s" % (who, human))),
+        [("title", yaml_str("%s · %s · %s" % (заголовок(event, extraction), who, human))),
          ("id", oid),
          ("type", "conversation"),
          ("source", "phone"),
@@ -380,7 +409,9 @@ def conversation_card(event, extraction, canon, ид=_новый, вольный
          ("pipeline_version", str(mi.PIPELINE_VERSION)),
          # Т5.0: из какой ревизии извлечения карточка (как у обязательства)
          ("extraction_id", extraction.get("extraction_id")),
-         ("valid_from", event.get("ended") or event.get("occurred"))],
+         ("valid_from", event.get("ended") or event.get("occurred")),
+         ("outcome", None if mi.звонок_состоялся(event.get("payload"), extraction)
+          else mi.исход_звонка(event.get("payload"), extraction))],
         lists=[("audience", ["mara"])])
     return path, fm + "\n" + body
 

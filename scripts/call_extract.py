@@ -44,7 +44,7 @@ OPTIONS = {"temperature": 0, "num_ctx": 8192}
 # Поднимать при любой правке их поведения, как `PROMPT_VERSION` — при правке
 # промпта; иначе два извлечения с одной моделью и одним промптом, но разными
 # правилами выглядят одинаково, и корпус Т5.5 сравнивает несравнимое.
-RULES_VERSION = 1
+RULES_VERSION = 2       # 2: правило исхода вызова (Т4.3) — см. `run`
 
 
 def конфигурация():
@@ -413,21 +413,74 @@ def run(event_id, root=None):
         segs = call_asr.read_jsonl(tpath)
         сегменты = сегменты_из(segs)
     текст = transcript_text(segs)
-    raw = ask_model(текст)
+    # Т4.3 (RULES_VERSION 2): исход вызова решается здесь — есть и журнал
+    # (payload), и расшифровка. Исход — по журналу (`mi.исход_звонка`); он
+    # идёт в ревизию, и проектор с дайджестом читают его оттуда. Модель не
+    # зовётся в одном случае: по журналу «пропущен» или «недозвон», нулевая
+    # длительность и ни слова речи в сегментах — гудки, извлекать нечего, а
+    # из гудков модель выдумывала бы просьбы; ревизия пишется пустой, с
+    # происхождением правила. Любая речь извлекается: сопоставление записи
+    # с журналом — по времени (окно пять минут), и короткий настоящий
+    # разговор, прижатый к недозвону, по длине от гудков не отличить;
+    # голосовая почта (`Device.callLog` кладёт её в `missed`, длительность
+    # больше нуля) несёт просьбы и номера (Codex по #135, круги 1–3). Слова —
+    # из речи сегментов, не из промпта с метками.
+    слов = sum(len((s.get("text") or "").split()) for s in segs)
+    исход = mi.исход_звонка(ev["payload"])
+    try:
+        сек = int(ev["payload"].get("duration_s"))
+    except (TypeError, ValueError):
+        сек = 0
+    правило_исхода = {"direction": ev["payload"].get("direction"),
+                      "duration_s": ev["payload"].get("duration_s"), "words": слов,
+                      "journal": исход}
+    правило = исход in ("missed", "no-answer") and сек <= 0 and слов == 0
+    if правило:
+        raw = {}
+        print("call_extract: %s — звонок %s (%s), речи нет, модель не звалась"
+              % (event_id, mi.ИСХОДЫ[исход], исход), file=sys.stderr)
+    else:
+        if исход in ("missed", "no-answer") and сек <= 0:
+            # речь при нулевой длительности: сопоставление по времени не даёт
+            # права называть разговор недозвоном — исход неизвестен, карточка
+            # как до Т4.3; журнальный исход остаётся в `outcome_rule.journal`
+            # (Codex по #135, круг 5)
+            print("call_extract: %s — по журналу %s, но %d слов речи: исход неизвестен, "
+                  "модель зовётся" % (event_id, mi.ИСХОДЫ[исход], слов), file=sys.stderr)
+            исход = None
+        elif исход in ("missed", "no-answer"):
+            print("call_extract: %s — по журналу %s, %d с (голосовая почта): модель зовётся"
+                  % (event_id, mi.ИСХОДЫ[исход], сек), file=sys.stderr)
+        raw = ask_model(текст)
     data = normalize(raw, occurred, сегменты)
+    data["outcome"] = исход or "unknown"
     отклонено = data.pop("evidence_rejected")
     data["event_id"] = event_id
     data["occurred_at"] = occurred
     data["pipeline_version"] = mi.PIPELINE_VERSION
     data["transcript_id"] = tid
-    data["extractor"] = MODEL          # ADR-0004 п.4: чем и по какой версии
-    data["prompt_version"] = PROMPT_VERSION
-    # Т5.0, ТЗ §9: правила — версией, конфигурация прогона и хеш входа —
-    # того текста, который ушёл модели (у legacy-расшифровки без строк
-    # `transcript_id` пустой, и хеш — единственный след входа)
     data["rules_version"] = RULES_VERSION
-    data["config"] = конфигурация()
-    data["input_sha256"] = hashlib.sha256(текст.encode("utf-8")).hexdigest()
+    # ADR-0004 п.4, ТЗ §9: чем и по какой версии. Входы правила исхода —
+    # `outcome_rule` — в конфигурации каждой ревизии: исход в ней выведен из
+    # них (Codex по #135, круг 3). Ревизия правила — без модели: промпта нет,
+    # конфигурация — только правило, хеш входа — от этих входов, а не от
+    # текста, которого модели не показывали; модельная — как прежде, плюс
+    # входы правила, хеш — от текста, ушедшего модели
+    if правило:
+        data["extractor"] = "rule:outcome"
+        data["prompt_version"] = None
+        data["config"] = {"rule": "outcome", "outcome_rule": правило_исхода}
+        data["input_sha256"] = hashlib.sha256(
+            json.dumps(data["config"], ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    else:
+        data["extractor"] = MODEL
+        data["prompt_version"] = PROMPT_VERSION
+        # Т5.0: конфигурация прогона и хеш входа — того текста, который ушёл
+        # модели (у legacy-расшифровки без строк `transcript_id` пустой, и
+        # хеш — единственный след входа)
+        data["config"] = dict(конфигурация(), outcome_rule=правило_исхода)
+        data["input_sha256"] = hashlib.sha256(текст.encode("utf-8")).hexdigest()
     # Т5.0, ТЗ §9.1: каждый прогон — новая производная ревизия в реестре
     # (миграция 6), прежние строки не трогаются; id ревизии — в самом
     # результате, по нему карточка скажет, из какой ревизии она. Строка,

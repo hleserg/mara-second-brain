@@ -3,7 +3,7 @@
 Модель тут не зовётся: она недетерминирована, а проверяем мы правила, а не её
 настроение. На вход подаётся то, что модель могла бы вернуть.
 """
-import os, sys, json, unittest
+import os, sys, json, hashlib, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import call_extract as ce
@@ -201,6 +201,102 @@ class Шаг(unittest.TestCase):
         with open(self.mi.extraction_path(self.dir, self.eid), encoding="utf-8") as fh:
             return json.load(fh)
 
+    def test_несостоявшийся_звонок_без_модели(self):
+        """Т4.3: недозвон без единого слова речи — гудки; модель не зовётся,
+        ревизия пустая с исходом и происхождением правила, событие
+        переходит как обычно."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "outgoing", "duration_s": 0,
+                                      "contact_name": "Анна"}), self.eid))
+        self.con.commit()
+        self.asr.записать_сегменты(self.con, self.eid, None, [
+            {"segment_id": "s0001", "start_ms": 0, "end_ms": 8000,
+             "speaker": "unknown-A", "text": ""}])
+
+        def не_звать(text, base_url=None, model=None):
+            raise AssertionError("модель позвали на недозвоне")
+        было = ce.ask_model
+        ce.ask_model = не_звать
+        try:
+            ce.run(self.eid, self.dir)
+        finally:
+            ce.ask_model = было
+        with open(self.mi.extraction_path(self.dir, self.eid), encoding="utf-8") as fh:
+            extr = json.load(fh)
+        self.assertEqual(extr["outcome"], "no-answer")
+        self.assertEqual((extr["requests"], extr["commitments"]), ([], []))
+        self.assertEqual(self.con.execute("select state from events where id=?",
+                                          (self.eid,)).fetchone()[0], "extracted")
+        # происхождение — правила, не модельного прогона (ADR-0004 п.4)
+        self.assertEqual(extr["extractor"], "rule:outcome")
+        self.assertIsNone(extr["prompt_version"])
+        self.assertEqual(extr["config"]["rule"], "outcome")
+        self.assertEqual(extr["config"]["outcome_rule"],
+                         {"direction": "outgoing", "duration_s": 0, "words": 0,
+                          "journal": "no-answer"})
+        self.assertNotIn("model", extr["config"], "настроек модели у ревизии правила нет")
+        self.assertEqual(extr["rules_version"], 2, "правило исхода — новая версия правил")
+        self.assertEqual(extr["input_sha256"], hashlib.sha256(json.dumps(
+            extr["config"], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest())
+        row = self.con.execute("select extractor, prompt_version from extractions "
+                               "where event_id=?", (self.eid,)).fetchone()
+        self.assertEqual(tuple(row), ("rule:outcome", None))
+        self.assertEqual(ce.прочитать_извлечение(self.con, self.dir, self.eid)["outcome"],
+                         "no-answer", "проектор прочитает исход из ревизии")
+
+    def test_речь_при_недозвоне_по_журналу_извлекается(self):
+        """Сопоставление с журналом — по времени; любая речь извлекается
+        моделью, а исход при нулевой длительности — неизвестен: называть
+        разговор недозвоном права нет, журнальный исход остаётся в
+        `outcome_rule.journal` (Codex по #135, круги 1, 3, 5). Слова — из
+        речи, не из меток промпта."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "outgoing", "duration_s": 0}), self.eid))
+        self.con.commit()
+        нарезка = [{"segment_id": "s%04d" % i, "start_ms": i * 5000, "end_ms": i * 5000 + 4000,
+                    "speaker": "unknown-A", "text": "перезвони мне завтра утром"}
+                   for i in range(1, 3)]
+        self.asr.записать_сегменты(self.con, self.eid, None, нарезка)
+        звали = []
+        было = ce.ask_model
+        ce.ask_model = lambda text, base_url=None, model=None: звали.append(text) or {"requests": []}
+        try:
+            ce.run(self.eid, self.dir)
+        finally:
+            ce.ask_model = было
+        self.assertEqual(len(звали), 1, "модель позвали — речь есть")
+        extr = ce.прочитать_извлечение(self.con, self.dir, self.eid)
+        self.assertEqual(extr["outcome"], "unknown", "речь при нуле секунд — не недозвон")
+        self.assertEqual((extr["extractor"], extr["prompt_version"]), (ce.MODEL, ce.PROMPT_VERSION))
+        self.assertEqual(extr["config"]["outcome_rule"],
+                         {"direction": "outgoing", "duration_s": 0, "words": 8,
+                          "journal": "no-answer"})
+        self.assertEqual(extr["config"]["model"], ce.MODEL, "настройки модели на месте")
+
+    def test_голосовая_почта_извлекается(self):
+        """`missed` с длительностью > 0 — голосовая почта (`Device.callLog`):
+        в ней бывает просьба, модель зовётся, исход остаётся `missed`."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "missed", "duration_s": 30}), self.eid))
+        self.con.commit()
+        extr = self.прогон({"requests": []})
+        self.assertEqual(extr["outcome"], "missed")
+        self.assertEqual(extr["extractor"], ce.MODEL)
+        self.assertNotIn("rule", extr["config"])
+        self.assertEqual((extr["config"]["outcome_rule"]["duration_s"],
+                          extr["config"]["outcome_rule"]["journal"]), (30, "missed"))
+
+    def test_состоявшийся_звонок_несёт_исход_в_ревизии(self):
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"direction": "incoming", "duration_s": 300}), self.eid))
+        self.con.commit()
+        extr = self.прогон({"requests": []})
+        self.assertEqual(extr["outcome"], "answered")
+        self.assertEqual(self.прогон({"requests": []})["outcome"], "answered")
+        self.con.execute("update events set payload_json='{}' where id=?", (self.eid,))
+        self.con.commit()
+        self.assertEqual(self.прогон({"requests": []})["outcome"], "unknown")
+
     def test_отказ_по_evidence_ложится_в_аудит(self):
         extr = self.прогон({"requests": [
             {"action": "прислать смету", "explicit": True, "confidence": 0.95,
@@ -247,7 +343,11 @@ class Шаг(unittest.TestCase):
         self.assertEqual(extr["config"], {"model": ce.MODEL, "options": ce.OPTIONS,
                                           "task_min": ce.TASK_MIN,
                                           "review_min": ce.REVIEW_MIN,
-                                          "schema_sha256": extr["config"]["schema_sha256"]})
+                                          "schema_sha256": extr["config"]["schema_sha256"],
+                                          # Т4.3: входы правила исхода — в каждой ревизии
+                                          "outcome_rule": {"direction": None,
+                                                           "duration_s": None, "words": 2,
+                                                           "journal": None}})
         self.assertEqual(len(extr["config"]["schema_sha256"]), 64,
                          "схема ответа тоже под происхождением")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(

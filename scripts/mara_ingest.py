@@ -101,6 +101,48 @@ create index if not exists projections_object on projections(object_id);
 """
 
 
+# Т4.3, ТЗ §8.4 и бэклог владельца от 14.09: недозвон попадал в дневник как
+# «поговорили». Исход вызова — по журналу звонков телефона, который приложение
+# кладёт в payload события (`EventJson.build`: `direction`, `duration_s`).
+ИСХОДЫ = {"answered": "поговорили", "missed": "пропущен", "no-answer": "не дозвонился"}
+
+
+def исход_звонка(payload, extraction=None):
+    """`answered` / `missed` / `no-answer` / None — исход вызова.
+
+    Решает шаг извлечения (`call_extract.run`): у него есть и журнал, и
+    расшифровка, и записанный им `outcome` в ревизии — авторитет
+    (`uncertain` — журнал говорит «не состоялся», а расшифровка длинная:
+    сопоставление по времени сомнительно, считаем как неизвестный). Ревизия
+    без поля (до Т4.3) — по журналу: пропущенный — тип звонка `missed`;
+    недозвон — исходящий с нулевой длительностью; поговорили — длительность
+    больше нуля. Журнала нет (старое приложение, звонок не сопоставился с
+    записью) или длительность не число — None: выдумывать исход хуже, чем
+    промолчать, и карточка остаётся прежней."""
+    if isinstance(extraction, dict) and "outcome" in extraction:
+        o = extraction.get("outcome")
+        return o if o in ИСХОДЫ else None
+    p = payload or {}
+    if p.get("direction") == "missed":
+        return "missed"             # и голосовая почта: длительность там > 0
+    try:
+        сек = int(p.get("duration_s"))
+    except (TypeError, ValueError):
+        return None
+    if сек > 0:
+        return "answered"
+    # ноль секунд без направления не толковать: недозвон от пропущенного
+    # отличает только направление, а телефон шлёт поля парой
+    if p.get("direction") == "outgoing":
+        return "no-answer"
+    return "missed" if p.get("direction") == "incoming" else None
+
+
+def звонок_состоялся(payload, extraction=None):
+    """Исход неизвестен или поговорили — разговор был или мог быть."""
+    return исход_звонка(payload, extraction) in (None, "answered")
+
+
 def now_iso():
     return datetime.now(TZ).isoformat(timespec="seconds")
 
