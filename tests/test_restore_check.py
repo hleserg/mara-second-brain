@@ -138,6 +138,21 @@ class Проверка(unittest.TestCase):
         сводка, з = self.проверка()
         self.assertEqual(сводка["evidence"]["не открывается"], 1, з)
 
+    def test_ссылки_без_объекта_и_без_сегмента(self):
+        """Codex по #126, круг 5: осиротевшая ссылка и аудио-ссылка без
+        сегмента — расхождения, хотя `foreign_key_check` их не видит."""
+        self.con.execute("update evidence_refs set segment_id=null")
+        сводка, з = self.проверка()
+        self.assertEqual(сводка["evidence"]["не открывается"], 1, з)
+        self.assertTrue(any("без сегмента" in т for _, т in з), з)
+        self.con.execute("pragma foreign_keys=off")
+        self.con.execute("delete from revisions")
+        self.con.execute("delete from commitments")
+        self.con.execute("delete from projections where object_kind='commitment'")
+        сводка, з = self.проверка()
+        self.assertTrue(any("без объекта" in т for _, т in з), з)
+        self.assertTrue(rc.расхождение(сводка, з))
+
     def test_чужой_id_в_шапке(self):
         text = open(os.path.join(self.vault, self.card), encoding="utf-8").read()
         oid = [l for l in text.splitlines() if l.startswith("id: ")][0][4:]

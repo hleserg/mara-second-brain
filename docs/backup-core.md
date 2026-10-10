@@ -450,6 +450,11 @@ install -m 600 /dev/stdin ~/.config/mara/backup-pass   # вставить фра
 #    install/mara.cron) — копия обязательна, на шаге 9 возвращается целиком.
 crontab -l > /var/tmp/crontab.before && crontab -r
 sudo systemctl stop contextd tdlib-ingest basic-memory-mcp
+#    И писатели с клиента: крон codex-mirror.sh (install/client.sh) и хук
+#    Claude на завершении сессии льют rsync-ом прямо в doctor:/srv/vault мимо
+#    демонов doctor; серверной заставы без правки ключей нет. На клиенте, до
+#    шага 9: снять строку крона и не завершать сессии Claude Code.
+#    (на клиенте)  crontab -l > ~/crontab.before && crontab -l | grep -v codex-mirror.sh | crontab -
 
 # 2. Проверить манифест и хеши копии, прежде чем что-то трогать
 scripts/core-backup.py --drill-only --targets /mnt/backup/mara
@@ -509,6 +514,7 @@ MARA_BLOBS=/srv/mara-blobs python3 scripts/contextd_reconcile.py
 #    --apply только при расхождении, прочитав его список
 sudo systemctl start contextd tdlib-ingest basic-memory-mcp
 crontab /var/tmp/crontab.before && bash install/install-cron.sh --check
+#    (на клиенте)  crontab ~/crontab.before
 ```
 
 Строки `blobs` указывают на пути внутри `/srv/mara-blobs`; учение на чистом

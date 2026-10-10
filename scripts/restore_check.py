@@ -190,9 +190,26 @@ def образец_evidence(con, root, выборка, rnd):
     """Выборка обязательств со ссылками производителя `model`: ссылка
     разрешается в сегмент, расшифровку и файл аудио события."""
     итог, out = Counter(), []
+    # Сплошные проверки до выборки: внешних ключей у `evidence_refs.object_id`
+    # нет, а `segment_id` у аудио-ссылки обязателен (ADR-0004 п.1), но
+    # схемой не вынужден — такие строки ни выборка, ни `foreign_key_check`
+    # не увидели бы (Codex по #126, круг 5)
+    без_объекта = con.execute(
+        "select count(*) from evidence_refs e left join commitments c on c.id=e.object_id "
+        "where e.object_kind='commitment' and c.id is null").fetchone()[0]
+    if без_объекта:
+        итог["не открывается"] += без_объекта
+        out.append(("evidence", "ссылок без объекта в реестре: %d" % без_объекта))
+    без_сегмента = con.execute(
+        "select count(*) from evidence_refs where kind='audio' and segment_id is null"
+    ).fetchone()[0]
+    if без_сегмента:
+        итог["не открывается"] += без_сегмента
+        out.append(("evidence", "аудио-ссылок без сегмента: %d" % без_сегмента))
     объекты = [r[0] for r in con.execute(
-        "select distinct object_id from evidence_refs where object_kind='commitment' "
-        "and producer='model' and segment_id is not null order by object_id")]
+        "select distinct e.object_id from evidence_refs e join commitments c on c.id=e.object_id "
+        "where e.object_kind='commitment' and e.producer='model' and e.segment_id is not null "
+        "order by e.object_id")]
     итог["со ссылками"] = len(объекты)
     for oid in rnd.sample(объекты, min(выборка, len(объекты))):
         for e in con.execute(
