@@ -264,7 +264,7 @@ retention в 04:40, `context_pack` в 04:25, `gmail_ingest --sync` каждые
 | 14 | SMS ingestion | confirmed | провайдер `Device.kt:151-184`, уведомления как запасной путь, роль SMS-приложения не запрашивается | 3 теста Kotlin |
 | 15 | Context Broker / `context_pack` | partially confirmed | единственный пакет — открытые обязательства (`scripts/context_pack.py:57,97-122`); people/project/decisions пакетов нет | 16 тестов |
 | 16 | Hermes `pre_llm_call`, время от doctor, кэш, fail-open | confirmed | `install/mara-context/__init__.py`: TTL 60 с, три слоя fail-open, таймаут 2 с | только `--demo`, в unittest не входит |
-| 17 | `mara_correction` | partially confirmed | `install/mara-context/__init__.py:57-83` + `call_project.apply_correction`; пишет только Markdown, без проверки версии | 7 тестов `::Правка` + 2 в `test_contextd.py` |
+| 17 | `mara_correction` | partially confirmed | `install/mara-context/__init__.py:57-83` + `call_project.apply_correction`; пишет только Markdown, без проверки версии; с 2026-10-10 — не больше 20 принятых правок в час на источник, дальше `429` с `Retry-After` (`contextd.ждать_с_правкой`) | 7 тестов `::Правка` + 2 в `test_contextd.py` + `::ТестЧастотаПравок` (6) |
 | 18 | Защита токенов устройств хешированием | confirmed | `scripts/contextd.py:43-49`: sha256 от `token_urlsafe(32)`, без соли | отдельного теста на сам хеш нет |
 | 19 | Loopback-only привязка | confirmed | `scripts/contextd.py:377`: адрес зашит, `--port` единственный параметр | теста нет |
 | 20 | Тела сообщений и транскрипты вне обычных логов | partially confirmed | `log_line` `:74-80` печатает только имена ключей | `test_тело_сообщения_не_попадает_в_лог` |

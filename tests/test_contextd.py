@@ -1373,6 +1373,121 @@ class ТестКвитанции(unittest.TestCase):
                          1, "вторая квитанция не записалась")
 
 
+class ТестЧастотаПравок(unittest.TestCase):
+    """Хвост Т3.1 (#39, #96 п.2), политика — мешок М5 п.3: правок словами от
+    одного источника не больше N в час, дальше 429 с `Retry-After`. Счёт — по
+    строкам `events`, так что дубль, повтор по ключу и отказ 400 не считаются,
+    а рестарт демона окно не сбрасывает."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.vault = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.vault, ".git"))
+        os.makedirs(os.path.join(self.vault, "kb/commitments"))
+        self.srv = contextd.make_server(self.dir, port=0, vault=self.vault)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        self.con = mi.connect(self.dir)
+        self.dev, self.token = contextd.pair(self.con, "мак")
+        self.было = contextd.КОРРЕКЦИЙ_В_ЧАС
+        contextd.КОРРЕКЦИЙ_В_ЧАС = 3
+        self.окружение = os.environ.pop("MARA_CORRECTIONS_PER_HOUR", None)
+
+    def tearDown(self):
+        contextd.КОРРЕКЦИЙ_В_ЧАС = self.было
+        if self.окружение is not None:
+            os.environ["MARA_CORRECTIONS_PER_HOUR"] = self.окружение
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def правка(self, sid, source="mara", ключ=None, payload=None):
+        тело = {"kind": "correction", "source": source, "source_id": sid,
+                "payload": payload or {"item": "дело " + sid, "status": "done"}}
+        req = urllib.request.Request(self.base + "/v1/ingest/event", method="POST",
+                                     data=json.dumps(тело).encode("utf-8"))
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        if ключ:
+            req.add_header("Idempotency-Key", ключ)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read() or b"{}"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}"), dict(e.headers)
+
+    def строк(self, source="mara"):
+        return self.con.execute("select count(*) from events where kind='correction' "
+                                "and source=?", (source,)).fetchone()[0]
+
+    def test_предел_на_источник_и_retry_after(self):
+        for i in range(3):
+            код, _, _ = self.правка("п%d" % i)
+            self.assertEqual(код, 200)
+        с_429 = contextd._отказы.get(429, 0)
+        код, ответ, заголовки = self.правка("п3")
+        self.assertEqual(код, 429)
+        self.assertIn("подождать", ответ["error"])
+        ждать = int(заголовки["Retry-After"])
+        self.assertTrue(1 <= ждать <= 3600, ждать)
+        self.assertEqual(self.строк(), 3, "отвергнутая правка строки не оставляет")
+        self.assertEqual(contextd._отказы.get(429, 0), с_429 + 1, "429 виден в счётчике")
+        # другой источник — своё окно
+        код, _, _ = self.правка("ч0", source="человек")
+        self.assertEqual(код, 200)
+
+    def test_дубль_и_повтор_по_ключу_не_считаются(self):
+        self.assertEqual(self.правка("а")[0], 200)
+        код, первый, _ = self.правка("б", ключ="k-b")
+        self.assertEqual(код, 200)
+        код, снова, _ = self.правка("а")
+        self.assertEqual((код, снова["duplicate"]), (200, True))
+        код, повтор, заголовки = self.правка("б", ключ="k-b")
+        self.assertEqual((код, заголовки.get("Idempotent-Replay")), (200, "true"))
+        self.assertEqual(self.правка("в")[0], 200, "дубль и повтор окно не заняли")
+        self.assertEqual(self.правка("г")[0], 429)
+        код, _, заголовки = self.правка("б", ключ="k-b")
+        self.assertEqual((код, заголовки.get("Idempotent-Replay")), (200, "true"),
+                         "повтор по ключу проходит и при полном окне")
+
+    def test_отказ_400_не_считается(self):
+        self.assertEqual(self.правка("а")[0], 200)
+        self.assertEqual(self.правка("б")[0], 200)
+        код, _, _ = self.правка("кривая", payload={"item": "x", "due": "пятница"})
+        self.assertEqual(код, 400)
+        self.assertEqual(self.правка("в")[0], 200)
+        self.assertEqual(self.правка("г")[0], 429)
+
+    def test_окно_отпускает_по_времени(self):
+        for i in range(3):
+            self.assertEqual(self.правка("п%d" % i)[0], 200)
+        self.assertEqual(self.правка("п3")[0], 429)
+        давно = (datetime.now(mi.TZ) - timedelta(hours=2)).isoformat(timespec="seconds")
+        self.con.execute("update events set received=? where kind='correction'", (давно,))
+        self.con.commit()
+        self.assertEqual(self.правка("п3")[0], 200)
+
+    def test_строка_без_времени_не_запирает(self):
+        for i in range(3):
+            self.assertEqual(self.правка("п%d" % i)[0], 200)
+        self.con.execute("update events set received='вчера' where kind='correction'")
+        self.con.commit()
+        self.assertEqual(contextd.ждать_с_правкой(self.con, "mara"), 0)
+
+    def test_порог_из_окружения(self):
+        for кривое in ("abc", "0", "-1", "1.5"):
+            os.environ["MARA_CORRECTIONS_PER_HOUR"] = кривое
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(contextd.коррекций_в_час(), 3, кривое)
+            self.assertIn("нужно целое от 1", out.getvalue())
+        os.environ["MARA_CORRECTIONS_PER_HOUR"] = ""
+        self.assertEqual(contextd.коррекций_в_час(), 3)
+        os.environ["MARA_CORRECTIONS_PER_HOUR"] = "1"
+        self.assertEqual(self.правка("а")[0], 200)
+        self.assertEqual(self.правка("б")[0], 429, "порог из окружения действует")
+        os.environ.pop("MARA_CORRECTIONS_PER_HOUR")
+
+
 class ТестScopes(unittest.TestCase):
     """Allowlist видов у устройства (ADR-0009, откат п. 2)."""
 
