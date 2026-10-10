@@ -1061,8 +1061,22 @@ def открыть_реестр(root):
     без `--migrate`, лечится командой; схема новее кода — код откатили без
     базы (RUNBOOK-deploy.md §6а), это `error` в обе стороны: пока не
     сойдутся, приём не пишет."""
+    путь = os.path.join(root, "contextd.db")
+    if not os.path.isfile(путь) or os.path.getsize(путь) == 0:
+        # до `connect`, как в `_migrate_cli`: он заводит пустую базу последней
+        # версией, и опечатка в `--root` крона давала бы зелёный отчёт и
+        # мусорный каталог 0700 (ревью #141)
+        return None, [находка("база-нет", "error",
+                              "%s нет или пуст — опечатка в --root или база не "
+                              "восстановлена; сверке заводить нечего" % путь)]
     try:
         return mi.connect(root), []
+    except sqlite3.DatabaseError as e:
+        # мусор вместо заголовка: `pragma journal_mode` падает ещё в
+        # `_открыть`, до `база_цела`, — та же находка, что у quick_check
+        return None, [находка("база-повреждена", "error",
+                              "contextd.db не открывается (%s) — восстанавливать "
+                              "из копии" % e)]
     except RuntimeError as e:
         текст = str(e)
         if "схема версии" not in текст:
@@ -1072,6 +1086,9 @@ def открыть_реестр(root):
             v = mi._версия(con)
         finally:
             con.close()
+        if v == mi.ВЕРСИЯ:
+            # `--migrate` успел между отказом и перечитыванием — один повтор
+            return mi.connect(root), []
         if v > mi.ВЕРСИЯ:
             return None, [находка("схема-новее-кода", "error",
                                   "contextd.db: схема %d, код знает до %d — код "

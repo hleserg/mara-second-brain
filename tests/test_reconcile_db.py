@@ -96,6 +96,31 @@ class БазаЦела(unittest.TestCase):
         self.assertEqual([x["check"] for x in f], ["схема-новее-кода"])
         self.assertEqual(f[0]["level"], "error")
 
+    def test_мусор_вместо_базы_это_находка_а_не_трасса(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        with open(os.path.join(root, "contextd.db"), "wb") as fh:
+            fh.write(b"\x00" * 100 + b"not a database" * 50)
+        con, f = rc.открыть_реестр(root)
+        self.assertIsNone(con)
+        self.assertEqual([(x["check"], x["level"]) for x in f],
+                         [("база-повреждена", "error")])
+
+    def test_нет_базы_это_находка_и_ничего_не_заводится(self):
+        # опечатка в --root крона раньше давала пустую базу и «всё сходится»
+        root = os.path.join(tempfile.mkdtemp(), "opechatka")
+        self.addCleanup(shutil.rmtree, os.path.dirname(root), True)
+        con, f = rc.открыть_реестр(root)
+        self.assertIsNone(con)
+        self.assertEqual([x["check"] for x in f], ["база-нет"])
+        self.assertFalse(os.path.exists(os.path.join(root, "contextd.db")), "завёл базу")
+        # пустой файл — тоже «нет», `connect` его завёл бы последней версией
+        os.makedirs(root)
+        open(os.path.join(root, "contextd.db"), "wb").close()
+        con, f = rc.открыть_реестр(root)
+        self.assertIsNone(con)
+        self.assertEqual([x["check"] for x in f], ["база-нет"])
+
     def test_здоровая_база_открывается_без_находок(self):
         con, f = rc.открыть_реестр(self.root)
         self.addCleanup(con.close)
@@ -105,6 +130,7 @@ class БазаЦела(unittest.TestCase):
         root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, root, True)
         mi.migrate(root, mi.ВЕРСИЯ - 1).close()
+        self.addCleanup(setattr, mi, "ROOT", mi.ROOT)   # main переставляет mi.ROOT
         поток = io.StringIO()
         with unittest.mock.patch.object(sys, "argv", ["rc", "--root", root, "--json"]), \
                 contextlib.redirect_stdout(поток):
