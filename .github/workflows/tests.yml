@@ -62,8 +62,10 @@ jobs:
         # (threat-model §4 п.10): здесь Gradle разрешает их и пишет
         # gradle.lockfile, который и читает сканер. Файл не коммитится —
         # в облачной сессии агента dl.google.com закрыт, и держать его
-        # в репозитории значило бы держать его протухшим.
-        run: ./gradlew :app:dependencies --write-locks --console=plain -q > /dev/null
+        # в репозитории значило бы держать его протухшим. Только
+        # runtime-classpath релиза — то, что едет на телефон; инструментарий
+        # AGP сюда не входит (см. app/build.gradle.kts).
+        run: ./gradlew :app:dependencies --configuration releaseRuntimeClasspath --write-locks --console=plain -q > /dev/null
         working-directory: android
       - name: osv-scanner
         # Версия и контрольная сумма прибиты: сканер цепочки поставки сам

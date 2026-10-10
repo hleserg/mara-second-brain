@@ -34,12 +34,17 @@ android {
 }
 
 // Закрепление версий ради сканера уязвимостей в CI (job `osv`, Т0.9 п.6):
-// `./gradlew :app:dependencies --write-locks` пишет gradle.lockfile со всеми
-// транзитивными зависимостями, и его читает osv-scanner. Самого файла в
-// репозитории нет (см. комментарий в .github/workflows/tests.yml), так что
-// на сборку это не влияет: без лок-файла режим закрепления ничего не требует.
-dependencyLocking {
-    lockAllConfigurations()
+// `./gradlew :app:dependencies --configuration releaseRuntimeClasspath
+// --write-locks` пишет gradle.lockfile с транзитивными зависимостями того,
+// что едет на телефон, и его читает osv-scanner. Только runtime-classpath
+// релиза, а не все конфигурации: `lockAllConfigurations()` захватывал и
+// инструментарий AGP (lint, компилятор — netty, protobuf, commons-io), и
+// первый же прогон дал 43 находки про сборочную машину, а не про
+// приложение. Самого лок-файла в репозитории нет (см. комментарий в
+// .github/workflows/tests.yml), так что на сборку это не влияет: без
+// лок-файла режим закрепления ничего не требует.
+configurations.configureEach {
+    if (name == "releaseRuntimeClasspath") resolutionStrategy.activateDependencyLocking()
 }
 
 dependencies {

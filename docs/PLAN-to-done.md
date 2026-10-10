@@ -276,8 +276,11 @@ Gmail в той части, где не нужен его браузер. **Ге
      Python с хешами.~~ *Сделано 2026-10-10:* job `osv` в
      `.github/workflows/tests.yml` — osv-scanner 2.6.0 (бинарь по
      контрольной сумме) по `gradle.lockfile`, который тот же job пишет
-     `./gradlew :app:dependencies --write-locks` (в `app/build.gradle.kts`
-     включён `dependencyLocking`; файл не коммитится — в облаке закрыт
+     `./gradlew :app:dependencies --configuration releaseRuntimeClasspath
+     --write-locks` (в `app/build.gradle.kts` закрепление только этой
+     конфигурации — того, что едет на телефон; `lockAllConfigurations`
+     ловил инструментарий AGP и дал 43 находки про netty/protobuf
+     сборочной машины; файл не коммитится — в облаке закрыт
      dl.google.com), и по `install/requirements-venv.txt` и
      `requirements-venv-tdlib.txt` — зависимостям обоих venv doctor,
      прибитым к версиям с sha256 каждого колеса (cp312/manylinux; 54 и 2
