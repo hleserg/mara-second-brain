@@ -427,15 +427,28 @@ scripts/core-backup.py --verify /srv/mara-blobs                     # шаг 2 �
 
 ## Восстановление
 
+Девять шагов ТЗ §5.3, в этом порядке. Проверка после шагов 5–8 — одна
+команда, `scripts/restore_check.py` (Т3б.2): целостность и версия схемы,
+блобы против реестра, пересборка проекций, стабильные id, образец
+evidence; код 0 — сошлось, 1 — расхождения названы строками, 2 — проверить
+нельзя. Учение Т3б.1 проходит эти же шаги на чистом каталоге и записывает
+время каждого.
+
 ```bash
 # 0. Парольная фраза из менеджера паролей
 mkdir -p -m 700 ~/.config/mara      # без него install скажет «cannot create»
 install -m 600 /dev/stdin ~/.config/mara/backup-pass   # вставить фразу, Ctrl-D
 
-# 1. Убедиться, что архив читается, прежде чем что-то трогать
+# 1. Остановить писателей: демон приёма, слушатель Telegram и кроны ядра.
+#    Иначе в восстановленную базу успеет лечь событие, которого нет в копии,
+#    а крон бэкапа перепишет архив тем, что восстанавливаем.
+sudo systemctl stop contextd tdlib-ingest
+crontab -l > /var/tmp/crontab.before && crontab -r     # вернуть на шаге 9
+
+# 2. Проверить манифест и хеши копии, прежде чем что-то трогать
 scripts/core-backup.py --drill-only --targets /mnt/backup/mara
 
-# 2. Развернуть базу и метаданные
+# 3. Развернуть базу, метаданные и аудио
 cd /mnt/backup/mara
 gpg --batch --pinentry-mode loopback --passphrase-file ~/.config/mara/backup-pass \
     -o /var/tmp/core.tar.gz -d "$(ls -1 core-*.tar.gz.gpg | tail -1)"
@@ -443,28 +456,34 @@ mkdir -p -m 700 /srv/mara-blobs && tar -xzf /var/tmp/core.tar.gz -C /srv/mara-bl
 # Развёрнутое сходится с описью: хеши, размеры, ни лишних, ни пропавших. Код 0.
 scripts/core-backup.py --verify /srv/mara-blobs
 rm /srv/mara-blobs/manifest.json /var/tmp/core.tar.gz
-
-# 2а. Карточки, которые реестр умеет нарисовать сам, — из него (Т2.6).
-#     Волт восстанавливается из git (шаг 5 RUNBOOK-deploy); пересборка его
-#     не заменяет, а проверяет: карточки без источника в реестре (перенесённые
-#     из волта до проектора) только из git и берутся. Сухой прогон сравнивает
-#     с волтом из git — код 1 с «разошлось» у правленных рукой до переноса
-#     ожидаем, смотреть дифф. Пустой каталог заполняется и без волта
-#     («Люди:» тогда без ссылок, пока entity-link.py не догонит).
-MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --check --diff --vault /srv/vault
-MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --into /var/tmp/vault-rebuilt --vault /srv/vault
-
-# 3. Аудио из зеркала
 cd /mnt/backup/mara && find calls -name '*.gpg' | while read -r f; do
   out="/srv/mara-blobs/${f%.gpg}"; mkdir -p "$(dirname "$out")"
   gpg --batch --quiet --pinentry-mode loopback \
       --passphrase-file ~/.config/mara/backup-pass -o "$out" -d "$f"
 done
+# Волт — из git (шаг 5 RUNBOOK-deploy): карточки без источника в реестре
+# (перенесённые из волта до проектора) берутся только оттуда.
 
-# 4. Заново войти в Telegram и Gmail (их состояние не бэкапится, см. выше)
+# 4. Миграция, если копия старее кода: `--migrate` и есть integrity_check
+MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate
 
-# 5. Убедиться, что ядро видит своё
-python3 scripts/contextd_reconcile.py
+# 5–8. Целостность, блобы ↔ реестр, пересборка проекций, стабильные id,
+#      образец evidence — одной проверкой. Код 1 с «разошлось» у карточек,
+#      правленных рукой после последней копии базы, ожидаем: это сведение
+#      о волте, не поломка восстановления; смотреть дифф.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/restore_check.py --root /srv/mara-blobs --vault /srv/vault
+MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --check --diff --vault /srv/vault
+# Карточки, которые реестр умеет нарисовать сам, — в пустой каталог (Т2.6);
+# в живой волт пересборка не пишет до Т2.8.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --into /var/tmp/vault-rebuilt --vault /srv/vault
+# Сверка приёма: манифесты ↔ блобы, расшифровки, извлечения, индекс, пакет.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/contextd_reconcile.py
+
+# 9. Безопасный возврат сервиса: заново войти в Telegram и Gmail (их
+#    состояние не бэкапится, см. выше), затем поднять демоны и кроны —
+#    расписание только через установщик, не из сохранённого crontab
+sudo systemctl start contextd tdlib-ingest
+bash install/install-cron.sh --apply && bash install/install-cron.sh --check
 ```
 
 Строки `blobs` указывают на пути внутри `/srv/mara-blobs`, поэтому

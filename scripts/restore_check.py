@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Проверка после восстановления (ТЗ §5.3 шаги 5, 7, 8; §17.3 п.6; план
+Т3б.2): «после restore проекции rebuild, blobs reconcile, sample evidence
+открывается».
+
+Запускается на восстановленном корне блобов (`--root`) и волте из git
+(`--vault`), до возврата сервиса (шаг 9 ранбука `docs/backup-core.md`).
+Ничего не пишет. Проверки, каждая — строкой отчёта с ключом:
+
+- «целостность» — `integrity_check` (полный, не `quick_check`: раз в
+  восстановление можно) и `foreign_key_check`; версия схемы против кода:
+  старее — сначала `mara_ingest.py --migrate` (шаг 4), новее — код откачен.
+- «блобы» — строки `blobs` без `purged_at` против диска: файла нет, размер
+  не тот, хеш не тот (хеш — у выборки `--sample`, или у всех с `--full`:
+  аудио на годы — часы чтения); файлы в `calls/` без строки — осиротевшие,
+  их не трогаем (единственная копия разговора стирается только по ретеншену
+  или команде, как в сверке).
+- «проекции» — `vault_rebuild.пересобрать`: сколько карточек реестр рисует
+  байт в байт с волтом из git, сколько разошлось (правки рукой, не
+  перенесённые до копии — ожидаемо после восстановления, смотреть
+  `vault_rebuild.py --check --diff`), без файла, без источника.
+- «id» — у каждой проекции с файлом `id:` в шапке равен ключу строки
+  объекта, `source_id` — её `source_native_id` (ADR-0002: стабильный id
+  пережил восстановление).
+- «evidence» — выборка обязательств со ссылками `evidence_refs`: сегмент и
+  расшифровка на месте, интервал в границах сегмента, аудио события на
+  диске (или стёрто по ретеншену — тогда ссылка ведёт в сегмент, не в файл,
+  и это не поломка). «Открывается» значит: по ссылке находится файл и
+  миллисекунды в нём, больше проверка ничего не слушает.
+
+Код выхода: 0 — всё сошлось, 1 — есть расхождения, 2 — проверить нельзя
+(база не открылась, волт не прочитан).
+
+    python3 scripts/restore_check.py --root /srv/mara-blobs --vault /srv/vault
+    python3 scripts/restore_check.py --root … --vault … --full --sample 10
+"""
+import os, sys, glob, json, hashlib, argparse, random, sqlite3
+from collections import Counter
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import mara_ingest as mi
+import ledger_import as li
+import vault_drift as vd
+import vault_rebuild as vr
+import context_pack
+
+ВЫБОРКА = 3
+
+
+def _sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for кусок in iter(lambda: fh.read(1 << 20), b""):
+            h.update(кусок)
+    return h.hexdigest()
+
+
+def целостность(con):
+    out = []
+    try:
+        итог = [r[0] for r in con.execute("pragma integrity_check").fetchall()]
+    except sqlite3.DatabaseError as e:
+        итог = ["%s: %s" % (type(e).__name__, e)]
+    if итог != ["ok"]:
+        out.append(("целостность", "integrity_check: %s" % "; ".join(итог[:3])))
+    fk = con.execute("pragma foreign_key_check").fetchall()
+    if fk:
+        out.append(("целостность", "foreign_key_check: %d нарушений, первое в %s"
+                    % (len(fk), fk[0][0])))
+    v = con.execute("pragma user_version").fetchone()[0]
+    if v < mi.ВЕРСИЯ:
+        out.append(("целостность", "схема версии %d, код ждёт %d — сначала `%s` (шаг 4)"
+                    % (v, mi.ВЕРСИЯ, mi.КОМАНДА)))
+    elif v > mi.ВЕРСИЯ:
+        out.append(("целостность", "схема версии %d новее кода (%d) — код откачен без базы"
+                    % (v, mi.ВЕРСИЯ)))
+    return out
+
+
+def блобы(con, root, выборка, полностью, rnd):
+    """→ (счётчики, замечания). Хеш — у выборки или у всех."""
+    итог, out = Counter(), []
+    строки = [dict(r) for r in con.execute(
+        "select sha256, path, bytes from blobs where purged_at is null order by sha256")]
+    итог["строк"] = len(строки)
+    на_месте = []
+    for r in строки:
+        p = r["path"]
+        if not p or not os.path.isfile(p):
+            итог["без файла"] += 1
+            out.append(("блобы", "%s: файла нет — %s" % (r["sha256"][:12], p)))
+            continue
+        if r["bytes"] is not None and os.path.getsize(p) != r["bytes"]:
+            итог["размер не тот"] += 1
+            out.append(("блобы", "%s: размер %d, в реестре %d"
+                        % (r["sha256"][:12], os.path.getsize(p), r["bytes"])))
+            continue
+        на_месте.append(r)
+    проверить = на_месте if полностью else rnd.sample(на_месте, min(выборка, len(на_месте)))
+    for r in проверить:
+        if _sha(r["path"]) != r["sha256"]:
+            итог["хеш не тот"] += 1
+            out.append(("блобы", "%s: хеш файла не тот — %s" % (r["sha256"][:12], r["path"])))
+    итог["хеш сверен"] = len(проверить)
+    известные = {os.path.realpath(r["path"]) for r in строки if r["path"]}
+    известные |= {os.path.realpath(r[0]) for r in con.execute(
+        "select path from blobs where purged_at is not null and path is not null")}
+    for p in glob.glob(os.path.join(root, "calls", "**", "*"), recursive=True):
+        if os.path.isfile(p) and os.path.realpath(p) not in известные:
+            итог["без строки"] += 1
+    if итог["без строки"]:
+        out.append(("блобы", "файлов в calls/ без строки blobs: %d — не трогаем, см. сверку"
+                    % итог["без строки"]))
+    return итог, out
+
+
+def стабильные_id(con, vault):
+    итог, out = Counter(), []
+    for p in con.execute("select path, object_kind, object_id from projections order by path"):
+        путь = os.path.join(vault, p["path"])
+        if not os.path.isfile(путь):
+            continue
+        with open(путь, "rb") as fh:
+            fm, _ = context_pack.mb.frontmatter(
+                fh.read().decode("utf-8", "replace").lstrip("﻿").replace("\r\n", "\n"))
+        итог["проверено"] += 1
+        if (fm.get("id") or "") != p["object_id"]:
+            итог["id не тот"] += 1
+            out.append(("id", "%s: в шапке id %r, в реестре %s"
+                        % (p["path"], fm.get("id"), p["object_id"])))
+            continue
+        таблица = {"commitment": "commitments", "conversation": "conversations"}.get(
+            p["object_kind"])
+        row = таблица and con.execute("select source_native_id from %s where id=?" % таблица,
+                                      (p["object_id"],)).fetchone()
+        if row and (li._строка(fm.get("source_id")) or "").strip() not in (
+                "", row["source_native_id"]):
+            итог["source_id не тот"] += 1
+            out.append(("id", "%s: source_id в шапке %r, ключ строки %s"
+                        % (p["path"], fm.get("source_id"), row["source_native_id"])))
+    return итог, out
+
+
+def образец_evidence(con, выборка, rnd):
+    """Выборка обязательств со ссылками производителя `model`: ссылка
+    разрешается в сегмент, расшифровку и файл аудио события."""
+    итог, out = Counter(), []
+    объекты = [r[0] for r in con.execute(
+        "select distinct object_id from evidence_refs where object_kind='commitment' "
+        "and producer='model' and segment_id is not null order by object_id")]
+    итог["со ссылками"] = len(объекты)
+    for oid in rnd.sample(объекты, min(выборка, len(объекты))):
+        for e in con.execute(
+                "select e.id, e.segment_id, e.start_ms, e.end_ms, s.start_ms as a, s.end_ms as b, "
+                "s.text, t.event_id, ev.blob_sha256, b.path, b.purged_at "
+                "from evidence_refs e left join transcript_segments s on s.id=e.segment_id "
+                "left join transcripts t on t.id=s.transcript_id "
+                "left join events ev on ev.id=t.event_id "
+                "left join blobs b on b.sha256=ev.blob_sha256 "
+                "where e.object_kind='commitment' and e.object_id=? and e.producer='model' "
+                "and e.segment_id is not null", (oid,)):
+            итог["ссылок"] += 1
+            if e["a"] is None:
+                итог["не открывается"] += 1
+                out.append(("evidence", "%s: сегмента %s нет в реестре" % (oid[-8:], e["segment_id"])))
+            elif not (e["a"] <= (e["start_ms"] if e["start_ms"] is not None else e["a"])
+                      <= (e["end_ms"] if e["end_ms"] is not None else e["b"]) <= e["b"]):
+                итог["не открывается"] += 1
+                out.append(("evidence", "%s: интервал %s–%s вне сегмента %s–%s"
+                            % (oid[-8:], e["start_ms"], e["end_ms"], e["a"], e["b"])))
+            elif e["event_id"] is None or e["blob_sha256"] is None:
+                итог["не открывается"] += 1
+                out.append(("evidence", "%s: у расшифровки нет события или аудио" % oid[-8:]))
+            elif e["purged_at"]:
+                итог["аудио стёрто по ретеншену"] += 1
+            elif not (e["path"] and os.path.isfile(e["path"])):
+                итог["не открывается"] += 1
+                out.append(("evidence", "%s: аудио %s не на диске — %s"
+                            % (oid[-8:], (e["blob_sha256"] or "")[:12], e["path"])))
+            else:
+                итог["открывается"] += 1
+    return итог, out
+
+
+def проверить(con, root, vault, выборка=ВЫБОРКА, полностью=False, seed=None):
+    """→ (сводка по разделам, замечания `(раздел, текст)`)."""
+    rnd = random.Random(seed)
+    сводка, замечания = {}, []
+    замечания += целостность(con)
+    сводка["блобы"], з = блобы(con, root, выборка, полностью, rnd)
+    замечания += з
+    итог, карточки = vr.пересобрать(con, root, vault)
+    сводка["проекции"] = итог
+    for rel, (состояние, _, причина) in sorted(карточки.items()):
+        if состояние in ("разошлось", "без файла"):
+            замечания.append(("проекции", "%s: %s" % (состояние, rel)))
+    сводка["id"], з = стабильные_id(con, vault)
+    замечания += з
+    сводка["evidence"], з = образец_evidence(con, выборка, rnd)
+    замечания += з
+    return сводка, замечания
+
+
+def расхождение(сводка, замечания):
+    return any(з[0] in ("целостность", "блобы", "id", "evidence") for з in замечания) \
+        or bool(сводка["проекции"]["без файла"])
+
+
+def строки_сводки(сводка):
+    б, п, и, e = сводка["блобы"], сводка["проекции"], сводка["id"], сводка["evidence"]
+    return [
+        "блобы: строк %d, без файла %d, размер не тот %d, хеш сверен %d, хеш не тот %d, "
+        "файлов без строки %d" % (б["строк"], б["без файла"], б["размер не тот"],
+                                  б["хеш сверен"], б["хеш не тот"], б["без строки"]),
+        vr.строка(п).replace("пересборка", "проекции"),
+        "id: проверено %d, id не тот %d, source_id не тот %d"
+        % (и["проверено"], и["id не тот"], и["source_id не тот"]),
+        "evidence: обязательств со ссылками %d, в выборке ссылок %d, открывается %d, "
+        "аудио стёрто по ретеншену %d, не открывается %d"
+        % (e["со ссылками"], e["ссылок"], e["открывается"], e["аудио стёрто по ретеншену"],
+           e["не открывается"])]
+
+
+def self_check():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root, vault = os.path.join(tmp, "b"), os.path.join(tmp, "v")
+        os.makedirs(root)
+        for под in ("kb/commitments", "kb/conversations", ".git"):
+            os.makedirs(os.path.join(vault, под))
+        con = mi.connect(root)
+        тело = b"audio"
+        s = hashlib.sha256(тело).hexdigest()
+        p = mi.blob_path(root, s, "wav")
+        os.makedirs(os.path.dirname(p))
+        with open(p, "wb") as fh:
+            fh.write(тело)
+        con.execute("insert into blobs(sha256,path,bytes,mime,created) values(?,?,?,?,?)",
+                    (s, p, len(тело), "audio/wav", mi.now_iso()))
+        сводка, з = проверить(con, root, vault)
+        assert not з and not расхождение(сводка, з), (сводка, з)
+        with open(p, "ab") as fh:
+            fh.write(b"x")
+        сводка, з = проверить(con, root, vault)
+        assert сводка["блобы"]["размер не тот"] == 1 and расхождение(сводка, з), сводка
+        con.execute("pragma user_version=1")
+        сводка, з = проверить(con, root, vault)
+        assert any("схема версии" in т for _, т in з), з
+    print("restore_check self-check: ок")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="проверка после восстановления (ТЗ §5.3)")
+    ap.add_argument("--root", default=mi.ROOT)
+    ap.add_argument("--vault", default=li.VAULT)
+    ap.add_argument("--sample", type=int, default=ВЫБОРКА,
+                    help="сколько блобов и обязательств сверять выборочно")
+    ap.add_argument("--full", action="store_true", help="хеш у всех блобов, не у выборки")
+    ap.add_argument("--self-check", action="store_true", dest="self_check")
+    a = ap.parse_args()
+    if a.self_check:
+        return self_check()
+    try:
+        con = vd.только_чтение(a.root)
+        сводка, замечания = проверить(con, a.root, a.vault, a.sample, a.full)
+    except (vd.ВолтНеПрочитан, sqlite3.OperationalError) as e:
+        print("restore_check: %s" % e, file=sys.stderr)
+        return 2
+    for s in строки_сводки(сводка):
+        print(s)
+    for раздел, текст in замечания:
+        print("  %s: %s" % (раздел, текст))
+    плохо = расхождение(сводка, замечания)
+    print("итог: %s" % ("расхождения есть" if плохо else "сошлось"))
+    return 1 if плохо else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
