@@ -613,7 +613,13 @@ def вписать_id(con, vault, dry_run=False):
                 tmp = p + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
                     fh.write(новый)
+                    # fsync до rename и каталог после: манифест и контрольная
+                    # точка ниже пишутся надёжно, и карточка обязана пережить
+                    # сбой вместе с ними (§5.2, Codex по #138, круг 2)
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 os.replace(tmp, p)
+                vault_manifest.fsync_каталога(os.path.dirname(p))
                 # отпечаток проекции — на новые байты, иначе следующая
                 # сверка сочтёт нашу же правку чужой
                 with open(p, "rb") as fh:

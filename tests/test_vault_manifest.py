@@ -94,11 +94,20 @@ class Манифест(unittest.TestCase):
         self.assertEqual(self.манифест()["hash"], h1, "`written` в манифест не входит")
         self.assertEqual(os.stat(os.path.join(self.vault, vm.ПУТЬ)).st_mtime_ns, mtime)
         self.assertNotIn("written", next(iter(self.манифест()["projections"].values())))
-        # а повреждённый на диске — переписывается и при том же хеше
-        with open(os.path.join(self.vault, vm.ПУТЬ), "w") as fh:
+        # а повреждённый на диске — переписывается и при том же хеше: битый JSON
+        # и подменённая строка под нетронутым верхним `hash`
+        путь = os.path.join(self.vault, vm.ПУТЬ)
+        with open(путь, "w") as fh:
             fh.write("{")
         vm.записать(self.con, self.vault)
         self.assertEqual(self.манифест()["hash"], h1)
+        док = self.манифест()
+        док["projections"][self.card]["sha256"] = "подделка"
+        with open(путь, "w", encoding="utf-8") as fh:
+            json.dump(док, fh)
+        self.assertEqual(vm.проверить(self.con, self.vault)[0]["манифест повреждён"], 1)
+        vm.записать(self.con, self.vault)
+        self.assertEqual(vm.проверить(self.con, self.vault)[1], [], "перезаписан")
 
     def test_правка_рукой_видна_только_строго(self):
         with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:

@@ -115,7 +115,10 @@ def тот_же(vault, h):
         док = прочитать(vault)
     except (OSError, ValueError):
         return False
-    return док["hash"] == h and док.get("pipeline_version") == mi.PIPELINE_VERSION
+    # верхний хеш пересчитывается от содержимого: подменённая строка при
+    # нетронутом `hash` иначе осталась бы навсегда (Codex по #138, круг 2)
+    return (док["hash"] == h and хеш(док["projections"]) == h
+            and док.get("pipeline_version") == mi.PIPELINE_VERSION)
 
 
 def записать(con, vault, когда=None):
