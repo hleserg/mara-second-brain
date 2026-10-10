@@ -368,6 +368,42 @@ class Отмена(unittest.TestCase):
         cp.build_now(v)
         self.assertNotIn("устарела", self.текст(v), "пустой пакет в истории не лежал")
 
+    def test_битый_манифест_рвёт_цепочку_со_словами(self):
+        """Манифеста нет — первая сборка, молча; есть, но битый — отмены
+        не будет (назвать предыдущий нечем), и об этом строка в stderr."""
+        import io, contextlib
+        v = волт()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cp.build_now(v)
+        self.assertEqual(err.getvalue(), "", "первая сборка молчит")
+        with open(os.path.join(v, "_system/context/manifest.json"), "w") as fh:
+            fh.write("{garbage")
+        карточка(v, "b.md", title="перезвонить", due="2026-09-05")
+        with contextlib.redirect_stderr(err):
+            cp.build_now(v)
+        self.assertIn("манифест", err.getvalue())
+        self.assertIn("начинается заново", err.getvalue())
+        self.assertNotIn("устарела", self.текст(v))
+        self.assertIsNone(self.манифест(v)["supersedes"])
+
+    def test_now_pack_отдаёт_подпись_своего_текста(self):
+        """Читатель без замка между записью now.md и манифеста: подпись и
+        `supersedes` обязаны описывать отданный текст, а не соседний."""
+        import hashlib, json, contextd
+        v = волт()
+        было = cp.build_now(v)
+        карточка(v, "b.md", title="перезвонить", due="2026-09-05")
+        стало = cp.build_now(v)
+        пакет = contextd.now_pack(v)
+        self.assertEqual((пакет["sha256"], пакет["supersedes"]), (стало, было))
+        # манифест отстал от текста (как между двумя записями) — подпись от текста
+        with open(os.path.join(v, "_system/context/manifest.json"), "w") as fh:
+            json.dump({"sha256": было, "supersedes": None, "items": 1, "bytes": 1}, fh)
+        пакет = contextd.now_pack(v)
+        self.assertEqual(пакет["sha256"], hashlib.sha256(пакет["text"].encode()).hexdigest())
+        self.assertIsNone(пакет["supersedes"], "чужой supersedes не приписывается")
+
     def test_строка_отмены_входит_в_бюджет(self):
         v = волт(пусто=True)
         for i in range(40):

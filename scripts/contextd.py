@@ -1302,13 +1302,27 @@ def now_pack(vault=None):
     """
     import context_pack
     d = os.path.join(vault or VAULT, "_system/context")
-    try:
-        with open(os.path.join(d, "now.md"), encoding="utf-8") as fh:
-            text = context_pack.выделить(fh.read())
-        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as fh:
-            m = json.load(fh)
-    except (OSError, ValueError):
-        return None
+    # Писатель кладёт now.md, затем манифест; читатель без замка может попасть
+    # между ними и отдать новый текст со старой подписью. Поэтому манифест
+    # читается первым, подпись сверяется с текстом, при расхождении — одна
+    # перечитка; не сошлось и после неё — подпись считается от текста, а
+    # `supersedes` неизвестен (ревью PR #132, P3): клиент получает поля,
+    # которые описывают ровно этот текст, а не соседний.
+    for попытка in (1, 2):
+        try:
+            with open(os.path.join(d, "manifest.json"), encoding="utf-8") as fh:
+                m = json.load(fh)
+            with open(os.path.join(d, "now.md"), encoding="utf-8") as fh:
+                text = context_pack.выделить(fh.read())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(m, dict):
+            m = {}
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if m.get("sha256") == sha:
+            break
+    else:
+        m = {"sha256": sha, "generated": m.get("generated"), "items": m.get("items")}
     if not text:
         return None                      # пусто или один чужой фронтматтер
     return {"text": text, "sha256": m.get("sha256"), "supersedes": m.get("supersedes"),

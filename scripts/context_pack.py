@@ -208,13 +208,22 @@ def выделить(text):
 
 def _прежний(d):
     """Манифест прошлой сборки: (подпись, что она отменяла), либо (None, None).
-    Пустой прошлый пакет (нуль байт) отменять нечем — его в истории нет."""
+    Пустой прошлый пакет (нуль байт) отменять нечем — его в истории нет.
+    Манифеста нет — первая сборка, молча; есть, но не читается или битый —
+    цепочка отмен начинается заново, и об этом строка в stderr: старый пакет
+    в истории Hermes лежит, а назвать его нечем (ревью PR #132, P3)."""
+    путь = os.path.join(d, "manifest.json")
     try:
-        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as fh:
+        with open(путь, encoding="utf-8") as fh:
             m = json.load(fh)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None, None
+    except (OSError, ValueError) as e:
+        m = e
     if not isinstance(m, dict):
+        print("context_pack: манифест %s не прочитан (%s) — цепочка supersedes "
+              "начинается заново" % (путь, m if isinstance(m, Exception) else "не словарь"),
+              file=sys.stderr)
         return None, None
     sha = m.get("sha256") if m.get("bytes") else None
     отменял = m.get("supersedes")
