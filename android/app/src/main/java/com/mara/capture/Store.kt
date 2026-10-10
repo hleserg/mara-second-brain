@@ -176,12 +176,17 @@ class Queue(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "queue.db",
         }
         // ключ квитанции (Т2.9); у работ, уехавших до обновления, его нет —
         // ключ выдаст первый же прогон на `HASHED`, а `DONE` и `FAILED` он не
-        // нужен. Цена отката ниже 5 и возврата: откаченный код колонку не
-        // знает и на дописанном файле обнулит sha256, не тронув ключ, — после
-        // апгрейда такая работа уйдёт под старым ключом один раз (409 → NEW
-        // сожжёт его); это принято, а не починено
-        if (old < 5 && !естьКолонка(db, "jobs", "idem_key")) {
-            db.execSQL("alter table jobs add column idem_key text")
+        // нужен
+        if (old < 5) {
+            if (!естьКолонка(db, "jobs", "idem_key")) {
+                db.execSQL("alter table jobs add column idem_key text")
+            }
+            // Колонка уже была — базу открывал откаченный APK схемы 4. Он её
+            // не знает: на доросшем файле обнулил sha256, не тронув ключ, и
+            // под старым ключом сервер отдал бы квитанцию про прежние байты
+            // (`need_blob=false` → DONE без заливки). NEW ⇒ ни хеша, ни ключа
+            // — восстанавливаем инвариант за него (Codex по #139, круг 2)
+            db.execSQL("update jobs set idem_key=null where state='NEW'")
         }
     }
 
