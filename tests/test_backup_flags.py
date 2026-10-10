@@ -103,7 +103,11 @@ class Флаги(unittest.TestCase):
              "--work", os.path.join(self.tmp, "work")]
             + list(флаги),
             capture_output=True, text=True,
-            env={**os.environ,
+            env={**{k: v for k, v in os.environ.items()
+                    if k != "MARA_CORE_SNAPSHOTS"},
+                 # без переменной каталога снимков: иначе на машине, где она
+                 # выставлена, `--snapshot` писал бы в боевой каталог и
+                 # оставался зелёным — ожидание берётся из того же `mi.снимки`
                  "MARA_BACKUP_ALLOW_SAME_DEV": "1",
                  "MARA_STATE": os.path.join(self.tmp, "state")})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -314,15 +318,140 @@ class Флаги(unittest.TestCase):
         for дата in ("2000-01-01", "2000-01-02", "2000-01-03"):
             open(os.path.join(self.цель,
                               "core-%s.tar.gz.gpg" % дата), "w").close()
-        self.запуск("--no-audio", "--no-drill", "--keep", "2")
-        осталось = sorted(
-            os.path.basename(f) for f in
-            glob.glob(os.path.join(self.цель, "core-*.tar.gz.gpg")))
+        # Поколения выключены явно: с Т3б.5 по умолчанию остаётся ещё
+        # свежайший архив каждой из пяти недель, и три даты января 2000-го
+        # пережили бы `--keep 2` законно — тест про суточный счёт, не про них.
+        self.запуск("--no-audio", "--no-drill", "--keep", "2",
+                    "--keep-weekly", "0", "--keep-monthly", "0")
+        осталось = self.архивы()
         self.assertEqual(len(осталось), 2, осталось)
         # Именно два свежайших по имени, а не два случайных: `2000-01-01` и
         # `2000-01-02` обязаны уйти, сегодняшний — остаться.
         self.assertNotIn("core-2000-01-01.tar.gz.gpg", осталось)
         self.assertIn("core-2000-01-03.tar.gz.gpg", осталось)
+
+    def архивы(self):
+        return sorted(os.path.basename(f) for f in
+                      glob.glob(os.path.join(self.цель, "core-*.tar.gz.gpg")))
+
+    def test_keep_0_не_ротирует(self):
+        """Три нуля — «не ротировать», как `--keep 0` до поколений. Пустое
+        множество оставшихся стёрло бы с носителя всё, включая архив этой
+        ночи (ревью, P2)."""
+        os.makedirs(self.цель)
+        for дата in ("2000-01-01", "2000-01-02"):
+            open(os.path.join(self.цель,
+                              "core-%s.tar.gz.gpg" % дата), "w").close()
+        self.запуск("--no-audio", "--no-drill", "--keep", "0",
+                    "--keep-weekly", "0", "--keep-monthly", "0")
+        self.assertEqual(len(self.архивы()), 3, self.архивы())
+
+    def test_keep_weekly_доезжает_до_ротации(self):
+        """`--keep-weekly` оставляет свежайший архив каждой из N недель ISO
+        поверх суточного счёта (Т3б.5). Недели здесь: 1999-W52 (1 и 2 января
+        2000-го), 2000-W01 (3-е и 5-е) и текущая (сегодняшний архив)."""
+        os.makedirs(self.цель)
+        for дата in ("2000-01-01", "2000-01-02", "2000-01-03", "2000-01-05"):
+            open(os.path.join(self.цель,
+                              "core-%s.tar.gz.gpg" % дата), "w").close()
+        # сайдкар уходит со своим архивом, а не по собственному счёту
+        open(os.path.join(self.цель, "core-2000-01-02.manifest.json"), "w").close()
+        self.запуск("--no-audio", "--no-drill", "--keep", "1",
+                    "--keep-weekly", "2", "--keep-monthly", "0")
+        осталось = self.архивы()
+        # Две недели — текущая и 2000-W01; из 2000-W01 свежайший — 5-е.
+        # Дефолтные пять недель (мутант, не донёсший флаг) оставили бы и
+        # 1999-W52 — то есть 2 января.
+        self.assertEqual(len(осталось), 2, осталось)
+        self.assertIn("core-2000-01-05.tar.gz.gpg", осталось)
+        self.assertNotIn("core-2000-01-03.tar.gz.gpg", осталось)
+        self.assertNotIn("core-2000-01-02.tar.gz.gpg", осталось)
+        self.assertFalse(glob.glob(os.path.join(self.цель, "core-2000-*.manifest.json")),
+                         "сайдкар пережил свой архив")
+
+    def test_keep_monthly_доезжает_до_ротации(self):
+        """`--keep-monthly` — свежайший архив каждого из N месяцев. Дефолтные
+        шесть месяцев (флаг не доехал) оставили бы и январь."""
+        os.makedirs(self.цель)
+        for дата in ("2000-01-05", "2000-02-03", "2000-02-04"):
+            open(os.path.join(self.цель,
+                              "core-%s.tar.gz.gpg" % дата), "w").close()
+        self.запуск("--no-audio", "--no-drill", "--keep", "1",
+                    "--keep-weekly", "0", "--keep-monthly", "2")
+        осталось = self.архивы()
+        self.assertEqual(len(осталось), 2, осталось)
+        self.assertIn("core-2000-02-04.tar.gz.gpg", осталось)
+        self.assertNotIn("core-2000-02-03.tar.gz.gpg", осталось)
+        self.assertNotIn("core-2000-01-05.tar.gz.gpg", осталось)
+
+    def test_snapshot_пишет_копию_и_выходит(self):
+        """`--snapshot` (Т3б.5): копия базы в каталог, ротация по
+        `--snapshot-keep`, и ни носителей, ни архива — команда выходит до них.
+        Копия сверяется с живой базой счётом событий изнутри: заглушка,
+        создающая пустой файл с правильным именем, прошла бы по `exists`."""
+        куда = os.path.join(self.tmp, "snap")
+        os.makedirs(куда, mode=0o755)          # чужой каталог с широкими правами
+        for n in (1, 2):
+            open(os.path.join(куда, "contextd-2000-01-0%dT0000.db" % n), "w").close()
+        r, _ = self.запуск("--snapshot", куда, "--snapshot-keep", "2")
+        self.assertTrue(os.path.exists(r["снимок"]), r)
+        # Незашифрованная база с разговорами: 0600 на файле, 0700 на каталоге,
+        # каким бы каталог ни был до прогона (Codex, круг 2, P1). SQLite
+        # заводит файл по umask — без явного chmod это 0644.
+        self.assertEqual(oct(os.stat(r["снимок"]).st_mode & 0o777), oct(0o600))
+        self.assertEqual(oct(os.stat(куда).st_mode & 0o777), oct(0o700))
+        self.assertEqual(os.path.dirname(r["снимок"]), куда, r)
+        self.assertEqual(r["осталось"], 2, r)
+        остались = sorted(os.listdir(куда))
+        self.assertEqual(len(остались), 2, остались)
+        self.assertNotIn("contextd-2000-01-01T0000.db", остались)
+        self.assertFalse([f for f in остались if f.endswith(".tmp")], остались)
+        живая = sqlite3.connect("file:%s?mode=ro" % os.path.join(self.root, "contextd.db"), uri=True)
+        копия = sqlite3.connect("file:%s?mode=ro" % r["снимок"], uri=True)
+        try:
+            for т in ("events", "blobs", "devices"):
+                self.assertEqual(копия.execute("select count(*) from %s" % т).fetchone()[0],
+                                 живая.execute("select count(*) from %s" % т).fetchone()[0], т)
+            self.assertEqual(копия.execute("pragma quick_check").fetchone()[0], "ok")
+            # Не WAL. Мутант без `journal_mode=delete` хвостов после close()
+            # не оставляет — SQLite убирает их за последним соединением, — а
+            # заводит при следующем ro-открытии (ревью, P3).
+            self.assertEqual(копия.execute("pragma journal_mode").fetchone()[0], "delete")
+        finally:
+            живая.close(); копия.close()
+        # до носителей дело не дошло: ни каталога цели, ни отметки
+        self.assertFalse(os.path.exists(self.цель), "снимок полез на носитель")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "state")), "снимок оставил отметку носителей")
+
+    def test_snapshot_не_идёт_поверх_другого(self):
+        """Второй прогон поверх затянувшегося не снимает его живой `.tmp` и
+        не пишет сам (Codex, P1): замок — flock на каталоге снимков."""
+        import fcntl
+        куда = os.path.join(self.tmp, "snap")
+        os.makedirs(куда)
+        чужой = os.path.join(куда, ".contextd-2000-01-01T0000.db.tmp")
+        open(чужой, "w").close()
+        держу = os.open(куда, os.O_RDONLY)
+        fcntl.flock(держу, fcntl.LOCK_EX)
+        try:
+            r = subprocess.run(
+                [sys.executable, СКРИПТ, "--root", self.root, "--snapshot", куда],
+                capture_output=True, text=True,
+                env={**os.environ, "MARA_STATE": os.path.join(self.tmp, "state")})
+        finally:
+            os.close(держу)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("уже идёт", r.stderr)
+        self.assertEqual(sorted(os.listdir(куда)), [os.path.basename(чужой)],
+                         "второй прогон тронул каталог")
+
+    def test_snapshot_без_каталога_пишет_под_корень(self):
+        """Без аргумента — `snapshots/` под корнем блобов (`mi.снимки`): это
+        дорога крона, и дефолт должен быть тем же, что читает сверка."""
+        r, _ = self.запуск("--snapshot")
+        self.assertEqual(os.path.dirname(r["снимок"]), mi.снимки(self.root), r)
+        self.assertTrue(os.path.exists(r["снимок"]), r)
+        self.assertEqual(oct(os.stat(mi.снимки(self.root)).st_mode & 0o777), oct(0o700))
 
 
 if __name__ == "__main__":

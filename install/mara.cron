@@ -36,9 +36,20 @@ MARA_CORE_BACKUP_MAX_DAYS=2.2
 # `test_install_cron` считает его вхождения в живом crontab, и упоминание
 # сходит за вторую работу.
 MARA_RAW_DAYS=30
+# Порог сверки частого снимка реестра (Т3б.5), в часах. Снимок пишется раз в
+# час в :25, сверка идёт в :07: к ней снимку 42 минуты, после одного
+# пропуска 1,7 ч, после двух — 2,7. 2,2 — между ними: «два пропущенных снимка
+# подряд» звенят на первой же сверке после второго, задержка на полчаса — нет.
+# Живёт здесь по той же причине, что порог выше.
+MARA_CORE_SNAPSHOT_MAX_H=2.2
 # Бэкап ядра раньше ретеншена: ретеншен вычищает аудио по сроку, и запись,
 # удалённая в 4:40, обязана быть уже на носителе (docs/backup-core.md).
 10   4 * * *  /usr/bin/python3 @REPO@/scripts/core-backup.py >> @STATE@/core-backup.log 2>&1
+# Частый локальный снимок реестра между ночными архивами (Т3б.5, §5.3):
+# копия базы через backup API в snapshots/ под корнем, без шифрования и без
+# носителей, сутки снимков по счёту. В :25, чтобы к сверке в :07 свежему
+# снимку было 42 минуты (порог — выше, MARA_CORE_SNAPSHOT_MAX_H).
+25   * * * *  /usr/bin/python3 @REPO@/scripts/core-backup.py --snapshot >> @STATE@/core-snapshot.log 2>&1
 40   4 * * *  /usr/bin/python3 @REPO@/scripts/blob_retention.py >> @STATE@/retention.log 2>&1
 7    * * * *  /usr/bin/python3 @REPO@/scripts/contextd_reconcile.py >> @STATE@/reconcile.log 2>&1
 0    8 * * *  /usr/bin/python3 @REPO@/scripts/contextd_reconcile.py --telegram >> @STATE@/reconcile.log 2>&1

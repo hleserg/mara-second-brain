@@ -137,7 +137,9 @@ class Манифест(unittest.TestCase):
         # Поля §5.3, которых раньше не было. Хост — вызовом, не литералом.
         self.assertEqual(r["версия"], 2, r)
         self.assertEqual(r["host"], socket.gethostname(), r)
-        self.assertEqual(r["retention"], {"class": "daily", "keep": 8}, r)
+        # Поколения (Т3б.5): политика целиком, не только суточный счёт.
+        self.assertEqual(r["retention"],
+                         {"class": "daily", "keep": 8, "weekly": 5, "monthly": 6}, r)
         con = sqlite3.connect(os.path.join(self.root, "contextd.db"))
         версия_схемы = con.execute("pragma user_version").fetchone()[0]
         con.close()
