@@ -1,7 +1,7 @@
 """HTTP-поверхность приёма (ТЗ §4, §20)."""
 import contextlib, os, sys, io, json, hashlib, socket, stat, struct
 import tempfile, threading, time, unittest, unittest.mock, sqlite3
-import urllib.request, urllib.error, urllib.parse
+import urllib.request, urllib.error, urllib.parse, http.client
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
@@ -1222,6 +1222,104 @@ class ТестВоркерЖивучий(unittest.TestCase):
             contextd.worker(стоп, каталог)
         self.assertEqual(len(вызовов), 2, "после ошибки воркер не продолжил")
 
+
+
+class ТестЗанятостьБазы(unittest.TestCase):
+    """Т2.1б: состязание за блокировку видно в `/metrics` —
+    `mara_db_locked_total{where=…}`. База занята по-настоящему: второе
+    соединение держит `begin immediate`, а у демона `busy_timeout` ужат до
+    0,1 с, чтобы не ждать штатные 30."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        mi.ROOT = self.dir
+        self.con = mi.connect(self.dir)
+        # Счётчик — модульный глобал, а соседи по файлу могли его тронуть
+        self.addCleanup(contextd._заперто.update, dict(contextd._заперто))
+        contextd._заперто.update(http=0, worker=0)
+        настоящий = mi.connect
+
+        def connect(*a, **kw):
+            c = настоящий(*a, **kw)
+            c.execute("pragma busy_timeout=100")
+            return c
+        патч = unittest.mock.patch.object(mi, "connect", connect)
+        патч.start()
+        self.addCleanup(патч.stop)
+
+    def занять(self):
+        держит = sqlite3.connect(os.path.join(self.dir, "contextd.db"),
+                                 isolation_level=None)
+        держит.execute("begin immediate")
+        self.addCleanup(держит.close)
+        return держит
+
+    def счёт(self):
+        строки = contextd.metrics(self.con, self.dir, None).splitlines()
+        return dict(s.rsplit(" ", 1) for s in строки
+                    if s.startswith("mara_db_locked_total"))
+
+    def test_нули_отдаются_всегда(self):
+        self.assertEqual(self.счёт(), {'mara_db_locked_total{where="http"}': "0",
+                                       'mara_db_locked_total{where="worker"}': "0"})
+
+    def test_запрос_не_дождался_базы(self):
+        _, токен = contextd.pair(self.con, "телефон")
+        srv = contextd.make_server(self.dir, port=0, vault=tempfile.mkdtemp())
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        держит = self.занять()
+        запрос = urllib.request.Request(
+            "http://127.0.0.1:%d/v1/ingest/event" % srv.server_address[1],
+            data=json.dumps({"kind": "message", "source": "sms",
+                             "source_id": "x", "payload": {}}).encode(),
+            headers={"Authorization": "Bearer " + токен,
+                     "Content-Type": "application/json"})
+        # трейсбек `handle_error` — в stderr, тесту он ни к чему
+        with contextlib.redirect_stderr(io.StringIO()) as err, \
+                self.assertRaises((urllib.error.URLError, ConnectionError,
+                                   http.client.HTTPException)):
+            urllib.request.urlopen(запрос, timeout=10)
+        держит.rollback()
+        self.assertIn("database is locked", err.getvalue())
+        self.assertEqual(self.счёт()['mara_db_locked_total{where="http"}'], "1")
+        self.assertEqual(self.счёт()['mara_db_locked_total{where="worker"}'], "0")
+
+    def test_шаг_воркера_не_дождался_базы(self):
+        eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                         "source_id": "w", "payload": {}})
+        mi.add_job(self.con, eid, "digest")
+        держит = self.занять()
+        стоп = threading.Event()
+        # ждать некогда: первая же пауза после ошибки и есть конец теста
+        with unittest.mock.patch.object(threading.Event, "wait",
+                                        lambda self, t=None: стоп.set()), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            contextd.worker(стоп, self.dir)
+        держит.rollback()
+        self.assertIn("database is locked", out.getvalue())
+        self.assertEqual(self.счёт()['mara_db_locked_total{where="worker"}'], "1")
+        self.assertEqual(self.счёт()['mara_db_locked_total{where="http"}'], "0")
+
+    def test_поломка_не_занятость(self):
+        """Нет таблицы или битый файл — не состязание: в счётчик не идут."""
+        try:
+            self.con.execute("select * from нет_такой")
+        except sqlite3.OperationalError as e:
+            нет_таблицы = e
+        держит = self.занять()
+        try:
+            mi.connect(self.dir).execute("begin immediate")
+        except sqlite3.OperationalError as e:
+            занята = e
+        держит.rollback()
+        self.assertFalse(contextd.база_занята(нет_таблицы))
+        self.assertTrue(contextd.база_занята(занята))
+        # без кода (бросили руками) — по тексту
+        self.assertTrue(contextd.база_занята(
+            sqlite3.OperationalError("database is locked")))
+        self.assertFalse(contextd.база_занята(ValueError("database is locked")))
 
 class ТестКвитанции(unittest.TestCase):
     """Т2.9, ТЗ §4.4: приём принимает `idempotency_key`, повтор с тем же
