@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 ЕСТЬ_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
-РАСШИФРОВКА = "Серёж привет пришли смету до пятницы"
+РАСШИФРОВКА = "Шеф привет пришли смету до пятницы"
 ИЗВЛЕЧЕНИЕ = {
     "requests": [{"action": "прислать смету", "requester": "Анна", "owner": "sergey",
                   "explicit": True, "confidence": 0.93, "deadline_phrase": "до пятницы",

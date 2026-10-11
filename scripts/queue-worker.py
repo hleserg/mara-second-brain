@@ -225,9 +225,9 @@ def self_check():
     card = os.path.join(tempfile.mkdtemp(), "s.md")
     open(card, "w", encoding="utf-8").write(
         "---\ntitle: x\ndistilled: false\n---\n\nстарое тело\n")
-    canon = {"mara": "mara", "сергей": "sergey"}
+    canon = {"mara": "mara", "олег": "oleg"}
     assert rewrite_card(card, {"title": "Т", "summary": "с", "facts": ["ф"],
-                               "people": ["Сергей", "Вася"],
+                               "people": ["Олег", "Вася"],
                                "links": ["mara", "выдуманная-сущность"]}, canon)
     got = open(card, encoding="utf-8").read()
     assert "distilled: true" in got and "старое тело" not in got
@@ -235,7 +235,7 @@ def self_check():
     assert "Связи: [[mara]]\n" in got + "\n", got
     assert "выдуманная" not in got
     # знакомое имя линкуется на канон, незнакомое остаётся текстом
-    assert "Люди: [[sergey|Сергей]], Вася\n" in got + "\n", got
+    assert "Люди: [[oleg|Олег]], Вася\n" in got + "\n", got
     # без реестра ссылок не бывает вовсе, а не «все подряд»
     assert entity_block([]) == "" and rewrite_card(card, {"links": ["mara"]}) \
            and "Связи" not in open(card, encoding="utf-8").read()

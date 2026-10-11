@@ -21,7 +21,7 @@ EXTR = {"requests": [{"action": "прислать смету", "requester": "А�
                          "evidence": [{"start_ms": 700000, "end_ms": 710000}]}],
         "decisions": [], "constraints": [], "open_questions": [],
         "changed_instructions": [], "followups": [],
-        "people_mentioned": ["Анна", "Серёж"], "projects_mentioned": ["ремонт"]}
+        "people_mentioned": ["Анна", "Шеф"], "projects_mentioned": ["ремонт"]}
 
 
 class Карточка(unittest.TestCase):
@@ -51,7 +51,7 @@ class Карточка(unittest.TestCase):
         self.assertIn("Проекты: ", text)
 
     def test_хозяин_не_попадает_в_люди(self):
-        _, text = cp.conversation_card(EVENT, EXTR, {"серёж": "sergey", "анна": "anna"})
+        _, text = cp.conversation_card(EVENT, EXTR, {"шеф": "sergey", "анна": "anna"})
         people = [l for l in text.splitlines() if l.startswith("Люди: ")][0]
         self.assertNotIn("sergey", people, "себя в собеседники не записываем")
         self.assertIn("anna", people)

@@ -74,11 +74,11 @@ class Разбор(unittest.TestCase):
 
 
 class События(unittest.TestCase):
-    msgs = w.parse(["02.09.26, 14:05 - Анна: привет", "02.09.26, 14:06 - Сергей: ок",
+    msgs = w.parse(["02.09.26, 14:05 - Анна: привет", "02.09.26, 14:06 - Олег: ок",
                     "02.09.26, 14:07 - Петя: и я"], tz=МСК)
 
     def test_контракт_и_свои_исходящие(self):
-        ev = list(w.events(self.msgs, "Семья", me="Сергей"))
+        ev = list(w.events(self.msgs, "Семья", me="Олег"))
         self.assertEqual(ev[0]["source"], "whatsapp")
         self.assertEqual(ev[0]["classification"], "personal")
         self.assertEqual(ev[0]["payload"]["chat_type"], "group")
@@ -107,7 +107,7 @@ class События(unittest.TestCase):
         self.assertEqual(w.message_id(w.ПАКЕТ, "Анна", "Анна", "ок", ев_ms(ев[0])), ев[0]["source_id"])
 
     def test_личный_чат_когда_кроме_меня_один(self):
-        ev = list(w.events(self.msgs[:2], "Анна", me="Сергей"))
+        ev = list(w.events(self.msgs[:2], "Анна", me="Олег"))
         self.assertEqual(ev[0]["payload"]["chat_type"], "private")
 
     def test_без_me_двое_пишущих_тоже_личный(self):

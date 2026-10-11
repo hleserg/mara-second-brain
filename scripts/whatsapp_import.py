@@ -5,7 +5,7 @@
 своих исходящих. Экспорт закрывает эти дыры задним числом: владелец делает
 «Экспорт чата → без медиа», кладёт файл на doctor и запускает:
 
-    whatsapp_import.py "Чат WhatsApp с Анна Петрова.txt" --me "Сергей"
+    whatsapp_import.py "Чат WhatsApp с Анна Петрова.txt" --me "Олег"
 
 Ключ сообщения тот же, что считает телефон (`MessageId.of` в Core.kt):
 sha256(package|chat|sender|text'|минута эпохи). Поэтому то, что уже поймано
@@ -200,12 +200,12 @@ def self_check():
     tz = datetime.timezone(datetime.timedelta(hours=3))
     ru = ["02.09.26, 14:05 - Анна Петрова: Купи хлеб",
           "и молоко",
-          "02.09.26, 14:06 - Сергей: ок",
+          "02.09.26, 14:06 - Олег: ок",
           "02.09.26, 14:07 - Анна Петрова добавил(а) Петю",
           "это продолжение системной строки, его не берём",
           "\u200e02.09.26, 14:08 - Петя: \u200e<Медиа отсутствует>"]
     got = parse(ru, tz=tz)
-    assert [m["sender"] for m in got] == ["Анна Петрова", "Сергей", "Петя"], got
+    assert [m["sender"] for m in got] == ["Анна Петрова", "Олег", "Петя"], got
     assert got[0]["text"] == "Купи хлеб\nи молоко" and got[0]["iso"] == "2026-09-02T14:05:00+03:00"
     assert got[0]["at_ms"] // 60000 == 1788347100000 // 60000, "минута сходится с телефоном"
     en = ["9/2/26, 2:05 PM - Anna: hi", "9/2/26, 12:01 AM - Anna: night"]
@@ -217,7 +217,7 @@ def self_check():
     assert got[1]["sender"] == "Анна" and got[1]["text"] == "как дела: нормально?"
     assert parse(["13/2/26, 10:00 - A: x"], tz=tz)[0]["iso"].startswith("2026-02-13"), "13 не месяц"
 
-    evs = list(events(parse(ru, tz=tz), "Семья", me="Сергей"))
+    evs = list(events(parse(ru, tz=tz), "Семья", me="Олег"))
     assert evs[0]["payload"]["chat_type"] == "group" and evs[1]["payload"]["outgoing"]
     assert evs[1]["payload"]["sender_name"] == "" and evs[0]["payload"]["via"] == "export"
     assert evs[0]["source_id"] == message_id(ПАКЕТ, "Семья", "Анна Петрова", "Купи хлеб\nи молоко", 1788347100000)
