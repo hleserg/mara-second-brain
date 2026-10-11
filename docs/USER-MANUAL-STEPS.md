@@ -379,7 +379,7 @@ Android всё равно держит один VPN за раз. Но если e
 
    ```bash
    scp "Чат WhatsApp с Анна Петрова.txt" doctor:/tmp/
-   ssh doctor '~/mara-second-brain/scripts/whatsapp_import.py "/tmp/Чат WhatsApp с Анна Петрова.txt" --me "<ваше имя в экспорте>" --dry-run'
+   ssh doctor '~/mara-second-brain/scripts/whatsapp_import.py "/tmp/Чат WhatsApp с Анна Петрова.txt" --me "<твоё имя в экспорте>" --dry-run'
    ```
 
    `--me` — как ты подписан в экспорте (обычно имя из профиля): эти

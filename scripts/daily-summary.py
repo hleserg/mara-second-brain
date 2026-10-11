@@ -96,7 +96,7 @@ def cards(d, day):
 
 
 def nolinks(text):
-    """`[[sergey|Сергей]]` → `Сергей`. С автосвязей (§5.4) тело карточки
+    """`[[oleg|Олег]]` → `Олег`. С автосвязей (§5.4) тело карточки
     размечено викилинками, а сводка уезжает в телеграм, где `[[…]]` — просто
     квадратные скобки в тексте. Модель охотно копирует их из источника."""
     return re.sub(r"\[\[([^\]|#\n]+?)(?:\|([^\]\n]*))?\]\]",
@@ -274,7 +274,7 @@ def self_check():
     for sub in ("kb/notes", "kb/sessions", "daily"): os.makedirs(os.path.join(v, sub))
     open(os.path.join(v, "kb/notes/g.md"), "w", encoding="utf-8").write(
         "---\noccurred: 2026-08-31\nproject: '[[atman]]'\nsensitive: false\n---\n"
-        "\n# Починил синк\nтело\nЛюди: [[sergey|Сергей]]\n")
+        "\n# Починил синк\nтело\nЛюди: [[oleg|Олег]]\n")
     open(os.path.join(v, "kb/notes/old.md"), "w", encoding="utf-8").write(
         "---\noccurred: 2026-08-30\nproject: x\n---\n\n# Не тот день\n")
     open(os.path.join(v, "kb/notes/secret.md"), "w", encoding="utf-8").write(
@@ -301,7 +301,7 @@ def self_check():
     open(os.path.join(v2, "daily/2026-08-31.md"), "w", encoding="utf-8").write("# д\nтолько дневник\n")
     assert "только дневник" in summary(v2, "2026-08-31", raw=True)
     # викилинки из карточек в сводку не просачиваются
-    assert nolinks("Люди: [[sergey|Сергей]], [[atman]]") == "Люди: Сергей, atman"
+    assert nolinks("Люди: [[oleg|Олег]], [[atman]]") == "Люди: Олег, atman"
     assert "[[" not in cards(os.path.join(v, "kb/notes"), "2026-08-31")[0][2]
     print("daily-summary: самопроверка ок")
     return 0

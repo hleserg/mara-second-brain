@@ -212,24 +212,24 @@ def self_check():
     assert norm("Attadipa") == norm("attadipa") == "attadipa"
     assert norm("make_style_dataset") == norm("make-style-dataset")
     assert norm("Ёлка") == norm("елка")
-    assert stem("Smart Home") == "smart-home" and stem("Сергей") == ""
+    assert stem("Smart Home") == "smart-home" and stem("Олег") == ""
     # бот и «неизвестно» отсекаются, живое имя — нет
     assert DENY.search("dependabot[bot]") and DENY.search("unknown")
-    assert not DENY.search("Сергей") and not DENY.search("Robot Framework")
+    assert not DENY.search("Олег") and not DENY.search("Robot Framework")
     assert DENY.search("dependabot") and DENY.search("Blocks Task Runner")
-    canon = {"сергей": "sergey", "sergey": "sergey",
+    canon = {"олег": "oleg", "oleg": "oleg",
              "attadipa": "attadipa", "meshcore": "meshcore"}
     # ссылка всегда на канон: голый [[алиас]] Obsidian не резолвит
-    assert linkify(["Сергей", "attadipa", "Вася"], canon) == \
-           ["[[sergey|Сергей]]", "[[attadipa]]", "Вася"]
+    assert linkify(["Олег", "attadipa", "Вася"], canon) == \
+           ["[[oleg|Олег]]", "[[attadipa]]", "Вася"]
     # готовую ссылку из дистиллятора не оборачиваем второй раз
-    assert linkify(["[[meshcore]]", "[[sergey|Сергей]]"], canon) == \
-           ["[[meshcore]]", "[[sergey|Сергей]]"]
+    assert linkify(["[[meshcore]]", "[[oleg|Олег]]"], canon) == \
+           ["[[meshcore]]", "[[oleg|Олег]]"]
     txt = ("---\ntitle: x\noccurred: 2026-08-31\nproject: \'attadipa\'\n---\n"
-           "\n# Т\n\nЛюди: Сергей, dependabot[bot]\n"
+           "\n# Т\n\nЛюди: Олег, dependabot[bot]\n"
            "Проекты: attadipa\n")
     new, n = relink(txt, canon)
-    assert "Люди: [[sergey|Сергей]], dependabot[bot]" in new, new
+    assert "Люди: [[oleg|Олег]], dependabot[bot]" in new, new
     assert "Проекты: [[attadipa]]" in new and n == 3, (new, n)
     # шапку догоняем тоже: старые карточки писались до того, как завелись сущности
     assert 'project: "[[attadipa]]"' in new, new
@@ -251,7 +251,7 @@ def self_check():
     made, review = create(v, h, {}, 2)
     # имя берётся в самой частой написанной форме; при равенстве — первая
     assert [m[2] for m in made] == ["attadipa"], made
-    assert ("Сергей", "человек — заводим только руками") in [(r[1], r[3]) for r in review]
+    assert ("Олег", "человек — заводим только руками") in [(r[1], r[3]) for r in review]
     assert ("Ponytail", "упоминаний 1, порог 2") in [(r[1], r[3]) for r in review]
     # у заведённой сущности алиас второй формы и ссылка на первое упоминание
     assert "type: project" in made[0][1] and "aliases:\n- Attadipa" in made[0][1] and "[[b]], 2026-08-01" in made[0][1]

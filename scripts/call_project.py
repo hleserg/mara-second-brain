@@ -1129,8 +1129,8 @@ def self_check():
                           "evidence": [{"start_ms": 252000, "end_ms": 260000}]}],
             "commitments": [], "decisions": [], "open_questions": [],
             "changed_instructions": [], "constraints": [], "followups": [],
-            "people_mentioned": ["Анна", "Серёж"], "projects_mentioned": []}
-    path, text = conversation_card(event, extr, {"серёж": "sergey"})
+            "people_mentioned": ["Анна", "Шеф"], "projects_mentioned": []}
+    path, text = conversation_card(event, extr, {"шеф": "sergey"})
     assert path == "kb/conversations/2026-09-02-1405-anna.md", path
     # класс символов, а не один вход: на этом стоит потолок перечисления в
     # сверке (`contextd_reconcile`, обход `kb/`) — точка, пробел, NFD и
