@@ -39,6 +39,19 @@ class Обезличить(unittest.TestCase):
         self.assertIn("kb/commitments/…", s)
         self.assertIn("Permission denied", s, "причина остаётся")
 
+    def test_карточка_человека_тоже(self):
+        """`call_project.person_card` пишет `entities/people/<slug(имени)>.md`
+        тем же шагом `project`."""
+        s = mi.обезличить("/srv/vault/entities/people/anna-petrova.md: Permission denied")
+        self.assertNotIn("anna-petrova", s)
+        self.assertEqual(s, "/srv/vault/entities/people/…: Permission denied")
+
+    def test_после_пути_диагностика_остаётся(self):
+        self.assertEqual(mi.обезличить("%s: конфликт" % КАРТОЧКА),
+                         "kb/conversations/…: конфликт")
+        self.assertEqual(mi.обезличить("%s;потом" % ОБЕЩАНИЕ),
+                         "kb/commitments/…;потом")
+
     def test_обычный_текст_не_трогается(self):
         for s in ("telegram 400: chat not found", "таймаут часа на шаге asr", ""):
             self.assertEqual(mi.обезличить(s), s)
@@ -58,6 +71,16 @@ class ХвостШага(unittest.TestCase):
         self.assertNotIn("anna-petrova", err)
         self.assertNotIn(ТОКЕН, err)
         self.assertIn("Read-only file system", err)
+
+    def test_срез_не_оставляет_обрубок_пути(self):
+        """Обезличивание до среза: срез `[-500:]` посреди пути оставил бы
+        `b/conversations/…имя…` без `kb/`, и шаблон его бы не узнал."""
+        хвост = "x" * 1000 + КАРТОЧКА + " " + "y" * (500 - len(КАРТОЧКА) + 3)
+        готово = subprocess.CompletedProcess([], 1, "", хвост)
+        with unittest.mock.patch.object(contextd.subprocess, "run", return_value=готово):
+            _, err = contextd.run_step("project", "call_x")
+        self.assertLessEqual(len(err), 500)
+        self.assertNotIn("anna-petrova", err)
 
 
 class Сверка(unittest.TestCase):
@@ -89,6 +112,16 @@ class Сверка(unittest.TestCase):
                 unittest.mock.patch.object(cd, "env", lambda: {}):
             исход = rc.доложить([rc.находка("x", "warn", "что-то")])
         self.assertEqual(исход, "failed: InvalidURL")
+
+    def test_доложить_и_на_кривом_заголовке(self):
+        """urllib бросает `ValueError` с заголовком целиком, если в значении
+        перевод строки."""
+        def deliver(*a):
+            raise ValueError("Invalid header value b'Bearer %s\\r'" % ТОКЕН)
+        with unittest.mock.patch.object(cd, "deliver", deliver), \
+                unittest.mock.patch.object(cd, "env", lambda: {}):
+            self.assertEqual(rc.доложить([rc.находка("x", "warn", "что-то")]),
+                             "failed: ValueError")
 
 
 class Дайджест(unittest.TestCase):
@@ -152,6 +185,25 @@ class Телеграм(unittest.TestCase):
         self.assertEqual(len(журнал), 1)
         self.assertNotIn("424242", журнал[0])
         self.assertTrue(журнал[0].endswith(" ok"), журнал[0])
+
+    def test_дамп_апдейтов_не_включается(self):
+        """python-telegram на DEBUG пишет апдейты целиком, с текстами;
+        `serve` закрепляет его логгер на INFO до подключения."""
+        import logging
+        логгер = logging.getLogger("telegram.tdjson")
+        self.addCleanup(логгер.setLevel, логгер.level)
+        логгер.setLevel(logging.DEBUG)
+
+        class Стоп(Exception):
+            pass
+
+        def _connect(home):
+            raise Стоп
+        with unittest.mock.patch.dict(os.environ, {"MARA_CONTEXT_TOKEN": "t"}), \
+                unittest.mock.patch.object(ti, "_connect", _connect), \
+                self.assertRaises(Стоп):
+            ti.serve(tempfile.mkdtemp())
+        self.assertEqual(логгер.level, logging.INFO)
 
 
 if __name__ == "__main__":

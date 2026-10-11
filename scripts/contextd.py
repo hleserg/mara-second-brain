@@ -1658,8 +1658,9 @@ def run_step(kind, event_id):
         if gpu:
             GPU.release()
     # хвост stderr уходит в `jobs.last_error`, оттуда — в сверку и Telegram:
-    # без путей карточек и секретов (§15.1)
-    return r.returncode == 0, mi.обезличить((r.stderr or "")[-500:])
+    # без путей карточек и секретов (§15.1). Обезличиваем до среза: срез
+    # посреди пути или токена оставил бы обрубок, который шаблон не узнает
+    return r.returncode == 0, mi.обезличить(r.stderr or "")[-500:]
 
 
 def worker(stop, root):
