@@ -513,6 +513,16 @@ def metrics(con, root=None, vault=None):
         "json_extract(detail_json, '$.outcome') end, 'unknown') as o, count(*) "
         "from audit_events where action='correction' group by o order by o"
     ).fetchall()
+    # Попытки шагов (`job_attempts`, ADR-0010 п.8) по виду работы и исходу:
+    # у законченных — сумма секунд, у брошенных (`lease_expired`, воркер
+    # умер посреди шага) длительности нет, только счёт
+    попытки = con.execute(
+        "select j.kind, a.outcome, count(*), "
+        "sum(cast(strftime('%s', a.finished) as integer) - "
+        "cast(strftime('%s', a.started) as integer)) "
+        "from job_attempts a join jobs j on j.id = a.job_id "
+        "where a.outcome is not null "
+        "group by j.kind, a.outcome order by j.kind, a.outcome").fetchall()
     # `actor_type` в схеме не обязателен: без него — `unknown`, а не «None»
     ревизии = con.execute("select coalesce(actor_type, 'unknown') as t, count(*) "
                           "from revisions group by t order by t").fetchall()
@@ -532,6 +542,16 @@ def metrics(con, root=None, vault=None):
         # Порогу тревоги это знать: ретрай последней ступени держит метрику
         # высокой законно. Пустая очередь — 0: ждать некому.
         ("mara_ingest_oldest_job_seconds", ждёт),
+        # «ASR/diarization/extraction duration/status»: длительность шага
+        # (`asr`, `extract`, `project`, `digest`) по исходу — `ok`, `retry`,
+        # `dlq` — парой summary `_sum`/`_count`: среднее за окно —
+        # `rate(_sum) / rate(_count)`. Брошенные попытки — отдельным счётом
+        *[('mara_job_duration_seconds_%s{kind="%s",outcome="%s"}'
+           % (часть, метка(k), метка(o)), v)
+          for k, o, n, сек in попытки if o != "lease_expired"
+          for часть, v in (("sum", сек or 0), ("count", n))],
+        *[('mara_job_attempts_abandoned_total{kind="%s"}' % метка(k), n)
+          for k, o, n, _ in попытки if o == "lease_expired"],
         # «MCP/domain mutations and conflicts»: правки словами по исходу —
         # `applied`/`created` меняют реестр, `noop`, `not_found`,
         # `ambiguous`, `conflict` — нет. Правка, упавшая исключением,

@@ -900,6 +900,7 @@ def claim_job(con, kinds=None, now=None):
                    "where id=? and lease_until<? and state='ready'",
                    (now + LEASE_SEC, now_iso(), row["id"], now)).rowcount != 1:
         return None
+    _начать_попытку(con, row["id"])
     job = dict(row)
     job["lease_until"] = now + LEASE_SEC
     return job
@@ -915,6 +916,35 @@ def next_delay(attempts):
     return int(base * random.uniform(0.8, 1.2)) if base else 0
 
 
+def _начать_попытку(con, job_id):
+    """Строка `job_attempts` на каждую выдачу работы (ADR-0010 п.8, Т9.1):
+    когда начали, когда кончили, чем. Отсюда длительности стадий §15.1 —
+    `jobs` помнит только последнюю ошибку и число неудач.
+
+    Номер попытки свой, а не `jobs.attempts`: тот считает неудачи, а работа,
+    чья аренда истекла (воркер умер посреди шага), выдаётся снова без неудачи
+    — и столкнулась бы с собственной прошлой строкой по ключу. Брошенную так
+    попытку закрываем исходом `lease_expired` без `finished`: когда умер
+    воркер, мы не знаем, и выдумывать длительность нельзя."""
+    con.execute("update job_attempts set outcome='lease_expired' "
+                "where job_id=? and finished is null and outcome is null", (job_id,))
+    номер = con.execute("select coalesce(max(attempt), 0) + 1 from job_attempts "
+                        "where job_id=?", (job_id,)).fetchone()[0]
+    con.execute("insert into job_attempts(job_id, attempt, started) values(?,?,?)",
+                (job_id, номер, now_iso()))
+
+
+def _закрыть_попытку(con, job_id, исход):
+    """Последняя открытая попытка работы — `ok`, `retry` или `dlq`. Работу
+    закрыли без выдачи (самопроверки, ручная починка) — открытой попытки
+    нет, и писать нечего. Текст ошибки сюда не копируем: это хвост stderr
+    шага, он уже лежит в `jobs.last_error`, а копия на каждую попытку
+    множила бы его без нужды (§15.1 — в журналах не место содержимому)."""
+    con.execute("update job_attempts set finished=?, outcome=? "
+                "where job_id=? and finished is null and outcome is null",
+                (now_iso(), исход, job_id))
+
+
 def finish_job(con, job_id, ok, error=None):
     """Закрыть работу успехом или назначить ретрай; после последней — DLQ."""
     row = con.execute("select attempts from jobs where id=?", (job_id,)).fetchone()
@@ -923,13 +953,16 @@ def finish_job(con, job_id, ok, error=None):
     if ok:
         con.execute("update jobs set state='done', lease_until=0, updated=? where id=?",
                     (now_iso(), job_id))
+        _закрыть_попытку(con, job_id, "ok")
         return
     attempts = row["attempts"] + 1
     if attempts >= len(RETRY):
         con.execute("update jobs set state='dlq', attempts=?, last_error=?, "
                     "lease_until=0, updated=? where id=?",
                     (attempts, (error or "")[:500], now_iso(), job_id))
+        _закрыть_попытку(con, job_id, "dlq")
         return
+    _закрыть_попытку(con, job_id, "retry")
     con.execute("update jobs set attempts=?, last_error=?, next_at=?, lease_until=0, "
                 "updated=? where id=?",
                 (attempts, (error or "")[:500],

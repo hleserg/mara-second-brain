@@ -1,5 +1,5 @@
 """Приём: дедуп, аренда работ, расписание ретраев (ТЗ §17, §20)."""
-import os, sys, sqlite3, tempfile, unittest, unittest.mock, subprocess
+import os, sys, sqlite3, tempfile, time, unittest, unittest.mock, subprocess
 from datetime import datetime, timedelta, timezone
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
@@ -185,6 +185,48 @@ class Работы(unittest.TestCase):
         self.con.execute("update jobs set state='dlq' where id=?", (jid,))
         self.assertNotEqual(jid, mi.add_job(self.con, self.eid, "asr"),
                             "сверка чинит именно dlq — ей нельзя мешать")
+
+    def попытки(self, jid):
+        return [tuple(r) for r in self.con.execute(
+            "select attempt, outcome, started is not null, finished is not null "
+            "from job_attempts where job_id=? order by attempt", (jid,))]
+
+    def test_каждая_выдача_пишет_попытку_с_исходом(self):
+        """Т9.1, ADR-0010 п.8: попытка на каждую выдачу. Неудача — `retry`,
+        воркер умер посреди шага — `lease_expired` без конца (когда умер, не
+        знаем), успех — `ok`. Номер свой: повторная выдача после истёкшей
+        аренды неудачей не считается, а строка нужна новая."""
+        jid = mi.add_job(self.con, self.eid, "asr")
+        потом = int(time.time()) + 10 ** 6       # ретрай и аренда позади
+        self.assertEqual(mi.claim_job(self.con)["id"], jid)
+        self.assertEqual(self.попытки(jid), [(1, None, 1, 0)], "попытка не открылась")
+        mi.finish_job(self.con, jid, False, "сбой")
+        self.assertEqual(mi.claim_job(self.con, now=потом)["id"], jid)
+        # аренда второй истекла: третья выдача закрывает её брошенной
+        self.assertEqual(mi.claim_job(self.con, now=потом + mi.LEASE_SEC + 1)["id"], jid)
+        mi.finish_job(self.con, jid, True)
+        self.assertEqual(self.попытки(jid), [(1, "retry", 1, 1),
+                                             (2, "lease_expired", 1, 0),
+                                             (3, "ok", 1, 1)])
+        self.assertEqual(self.con.execute("select attempts from jobs where id=?",
+                                          (jid,)).fetchone()[0], 1,
+                         "брошенная попытка — не неудача")
+
+    def test_последняя_неудача_закрывает_попытку_dlq(self):
+        jid = mi.add_job(self.con, self.eid, "asr")
+        self.con.execute("update jobs set attempts=? where id=?",
+                         (len(mi.RETRY) - 1, jid))
+        mi.claim_job(self.con)
+        mi.finish_job(self.con, jid, False, "сбой")
+        self.assertEqual(self.попытки(jid), [(1, "dlq", 1, 1)])
+        # текст ошибки остаётся в `jobs.last_error`, в попытку не копируется
+        self.assertIsNone(self.con.execute(
+            "select error from job_attempts where job_id=?", (jid,)).fetchone()[0])
+
+    def test_закрытие_без_выдачи_попыток_не_плодит(self):
+        jid = mi.add_job(self.con, self.eid, "asr")
+        mi.finish_job(self.con, jid, True)
+        self.assertEqual(self.попытки(jid), [])
 
 
 # Ровно то, что стоит на doctor: ключи ledger без `not null` (НБ12 из #39).

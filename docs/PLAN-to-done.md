@@ -1368,10 +1368,20 @@ Gmail в той части, где не нужен его браузер. **Ге
   «MCP/domain mutations and conflicts» — `mara_corrections_total{outcome}`
   (исход из `audit_events`) и `mara_version_conflicts_open`, «entity/revision
   created» — `mara_revisions_total{actor_type}`. Тесты
-  `tests/test_contextd.py::ТестМетрикиСтадий`. Открыто: длительности
-  ASR/извлечения (`job_attempts` с `started`/`finished` есть с миграции 2,
-  но в неё никто не пишет — ADR-0010 п.8),
-  бэкап и проверка восстановления как метрики (сейчас — находки сверки
+  `tests/test_contextd.py::ТестМетрикиСтадий`.
+  *Ход 2026-10-11, длительности шагов:* `job_attempts` (с миграции 2)
+  наконец заполняется — та часть ADR-0010 п.8, что не требует узлов и
+  отмены: строка на каждую выдачу работы (`claim_job`), исход `ok`/`retry`/
+  `dlq` при закрытии (`finish_job`), повторная выдача после истёкшей аренды
+  закрывает прежнюю `lease_expired` без конца (когда умер воркер, не знаем).
+  Номер попытки свой, а не `jobs.attempts`: тот считает неудачи. Текст
+  ошибки не копируется — он в `jobs.last_error`. В `/metrics` — «ASR/…
+  duration/status»: `mara_job_duration_seconds_sum`/`_count{kind,outcome}`
+  и `mara_job_attempts_abandoned_total{kind}`. Тесты
+  `tests/test_mara_ingest.py::Работы` (жизненный цикл попытки),
+  `ТестМетрикиСтадий` (длительности при смешанных сдвигах). Узел попытки
+  (колонки нет) и отмена — Т7.2/Т7.6.
+  Открыто: бэкап и проверка восстановления как метрики (сейчас — находки сверки
   `бэкап`/`снимок`), загрузка вычислителей (Т7), рекордер (Т4.2) и главное —
   **читатель**: тревог на метрики нет, их видят только руками (§7 аудита,
   `mara_whatsapp_lag_seconds`); санитизированные логи с gated sensitive mode.
