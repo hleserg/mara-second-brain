@@ -314,9 +314,9 @@ def scope_ok(con, device_id, kind):
 
 def scopes_from_history(con, device_id, days=30):
     """Виды, которые устройство слало за `days` дней. Пусто — истории нет."""
-    since = (datetime.now(mi.TZ) - timedelta(days=days)).isoformat(timespec="seconds")
+    since = mi.в_utc(datetime.now(mi.TZ) - timedelta(days=days))
     return sorted({r["kind"] for r in con.execute(
-        "select distinct kind from events where device_id=? and received>=?",
+        "select distinct kind from events where device_id=? and received_utc>=?",
         (device_id, since)) if r["kind"]})
 
 
@@ -454,7 +454,9 @@ def metrics(con, root=None, vault=None):
     """
     root = root or mi.ROOT
     q = lambda sql, *a: con.execute(sql, a).fetchone()[0]
-    last = con.execute("select received from events order by received desc limit 1").fetchone()
+    # последнее по времени, а не по строке: сдвиги в `received` бывают разные
+    last = con.execute("select received from events "
+                       "order by received_utc desc limit 1").fetchone()
     lag = age_of(last[0] if last else None, 0)
     seen = con.execute("select last_seen from devices where revoked_at is null "
                        "order by last_seen desc limit 1").fetchone()
@@ -532,7 +534,7 @@ def age_of(iso, none=-1):
 def source_lag(con, source):
     """Секунды с последнего события источника; −1 — не было ни одного."""
     row = con.execute("select received from events where source=? "
-                      "order by received desc limit 1", (source,)).fetchone()
+                      "order by received_utc desc limit 1", (source,)).fetchone()
     return age_of(row[0] if row else None)
 
 

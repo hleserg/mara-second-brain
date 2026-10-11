@@ -574,9 +574,11 @@ def источник_замолчал(con, days=3, fresh_hours=24):
     живой источник, его тишина ничего не значит."""
     out = []
     for src in ТЕЛЕФОННЫЕ:
-        # max() в SQLite тянет остальные колонки из той же строки
-        for last in con.execute("select device_id, max(received) as received, payload_json "
-                                "from events where source=? group by device_id", (src,)):
+        # max() в SQLite тянет остальные колонки из той же строки; максимум —
+        # по времени в UTC (миграция 7), а не по строке со сдвигом
+        for last in con.execute("select device_id, max(received_utc), received, "
+                                "payload_json from events where source=? "
+                                "group by device_id", (src,)):
             if json.loads(last["payload_json"] or "{}").get("via") == "export":
                 continue
             age = _возраст(last["received"])
@@ -613,7 +615,7 @@ def запись_не_долита(con, hours=24):
         "select e.id, e.received from events e "
         "left join blobs b on b.sha256=e.blob_sha256 "
         "where e.blob_sha256 is not null and b.sha256 is null "
-        "and e.state not in ('stale','quarantined') order by e.received").fetchall()
+        "and e.state not in ('stale','quarantined') order by e.received_utc").fetchall()
     старые = [r["id"] for r in rows if (_возраст(r["received"]) or 0) > hours * 3600]
     if not старые:
         return []

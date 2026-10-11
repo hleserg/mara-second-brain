@@ -1,5 +1,6 @@
 """Приём: дедуп, аренда работ, расписание ретраев (ТЗ §17, §20)."""
 import os, sys, sqlite3, tempfile, unittest, unittest.mock, subprocess
+from datetime import datetime, timedelta, timezone
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, СКРИПТЫ)
@@ -681,6 +682,67 @@ class Сущности(unittest.TestCase):
         con = mi.migrate(self.dir)
         self.assertIn("extractions", таблицы())
         self.assertIn("extraction_id", колонки())
+        con.close()
+
+    def test_миграция_7_время_в_utc_и_путь_вниз(self):
+        """Т2.1б, ТЗ §5.1: у события время в UTC рядом с исходной строкой.
+        Колонки вычисляемые: считаются из исходной строки, правку её
+        догоняют сами; метка без сдвига — NULL, а не догадка «это UTC»;
+        откат 7 → 6 безусловный — своего в колонках ничего нет."""
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        строки = (("e1", "2026-10-10T17:43:14+03:00", "2026-10-10T14:00:00Z"),
+                  ("e2", "2026-10-10T02:00:00-12:00", "2026-10-10 10:00:00.5+05:00"),
+                  ("e3", "2026-10-10T14:40:00+00:00", "2026-10-10T14:05"),
+                  ("e4", "вчера", None))
+        for ид, пришло, было in строки:
+            con.execute("insert into events(id,kind,dedupe_key,received,occurred) "
+                        "values(?,?,?,?,?)", (ид, "message", "k-" + ид, пришло, было))
+        utc = lambda ид: tuple(con.execute(
+            "select received_utc, occurred_utc from events where id=?", (ид,)).fetchone())
+        self.assertEqual(utc("e1"), ("2026-10-10T14:43:14Z", "2026-10-10T14:00:00Z"))
+        self.assertEqual(utc("e2"), ("2026-10-10T14:00:00Z", "2026-10-10T05:00:00Z"))
+        self.assertEqual(utc("e3"), ("2026-10-10T14:40:00Z", None), "без сдвига — не догадка")
+        self.assertEqual(utc("e4"), (None, None))
+        # строковый порядок исходных врёт, по UTC — верный
+        self.assertEqual([r[0] for r in con.execute(
+            "select id from events where received_utc is not null order by received_utc")],
+            ["e2", "e3", "e1"])
+        con.execute("update events set received='2026-10-09T10:00:00+03:00' where id='e1'")
+        self.assertEqual(utc("e1")[0], "2026-10-09T07:00:00Z", "правку исходной догоняет")
+        индексы = lambda: {r[0] for r in con.execute(
+            "select name from sqlite_master where type='index'")}
+        self.assertIn("events_received_utc", индексы())
+        self.assertEqual(mi.в_utc(datetime(2026, 10, 10, 17, 43, 14,
+                                           tzinfo=timezone(timedelta(hours=3)))),
+                         "2026-10-10T14:43:14Z", "формат тот же, что у колонки")
+        con.close()
+        con = mi.migrate(self.dir, 6)
+        колонки = {r[1] for r in con.execute("pragma table_xinfo(events)")}
+        self.assertFalse({"received_utc", "occurred_utc"} & колонки)
+        self.assertNotIn("events_received_utc", индексы())
+        self.assertEqual(con.execute("select received from events where id='e2'").fetchone()[0],
+                         "2026-10-10T02:00:00-12:00", "исходные строки целы")
+        self.assertEqual(self.версия(), 6)
+        con.close()
+        con = mi.migrate(self.dir)
+        self.assertEqual(utc("e2")[0], "2026-10-10T14:00:00Z")
+        con.close()
+
+    def test_состояние_сообщения_по_времени_а_не_по_строке(self):
+        """Правка позже оригинала по времени, но раньше по строке: оригинал
+        со сдвигом +14, правка в UTC. Порядок по строке `occurred` отдал бы
+        оригинал как последнюю ревизию."""
+        con = mi.connect(self.dir)
+        оригинал = {"source": "telegram", "source_id": "7/1",
+                    "occurred_at": "2026-10-10T20:00:00+14:00",
+                    "payload": {"text": "приду в пять"}}
+        правка = {"source": "telegram", "source_id": "7/1/edit/1",
+                  "occurred_at": "2026-10-10T08:00:00+00:00",
+                  "payload": {"text": "приду в шесть", "revision_of": "7/1"}}
+        for ev in (оригинал, правка):
+            mi.put_event(con, dict(ev, kind="message"))
+        self.assertEqual(mi.message_state(con, "telegram", "7/1")["text"], "приду в шесть")
         con.close()
 
     def test_откат_не_стирает_данные_молча(self):

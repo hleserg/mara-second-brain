@@ -6,7 +6,7 @@
 """
 import os, sys, io, json, glob, time, subprocess, tempfile, unittest
 from unittest import mock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -132,6 +132,22 @@ class СверкаИсточников(unittest.TestCase):
         self.событие("whatsapp", 1, device="dev_imp", via="export"); self.устройство("dev_imp", hours_ago=100)
         f = rc.источник_замолчал(self.con)
         self.assertEqual([x["device"] for x in f], ["тел"], "телефон молчит, хоть импортёр и залил вчера")
+
+    def test_последнее_событие_по_времени_а_не_по_строке(self):
+        # Т2.1б: два события одного телефона в разных сдвигах (смена
+        # `MARA_TZ_HOURS`). По времени последнее — 2 дн. 10 ч назад, тишины
+        # нет; по строке больше старое (+14:00), ему 3 дн. 2 ч — ложная находка
+        сейчас = datetime.now(timezone.utc)
+        for sid, назад, сдвиг in (("a", timedelta(days=3, hours=2), 14),
+                                  ("b", timedelta(days=2, hours=10), -12)):
+            eid, _ = mi.put_event(self.con, {"kind": "message", "source": "sms",
+                                             "source_id": sid, "device_id": "dev_x",
+                                             "payload": {"text": "x"}})
+            когда = (сейчас - назад).astimezone(timezone(timedelta(hours=сдвиг)))
+            self.con.execute("update events set received=? where id=?",
+                             (когда.isoformat(timespec="seconds"), eid))
+        self.устройство()
+        self.assertEqual(rc.источник_замолчал(self.con), [])
 
     def test_старый_экспорт_сам_по_себе_не_находка(self):
         self.событие("whatsapp", 20, device="dev_imp", via="export"); self.устройство("dev_imp")
