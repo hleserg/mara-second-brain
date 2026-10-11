@@ -1373,6 +1373,45 @@ class ТестКвитанции(unittest.TestCase):
                          1, "вторая квитанция не записалась")
 
 
+class ТестВремяВUTC(unittest.TestCase):
+    """Т2.1б: «последнее событие» метрик — по времени, а не по строке.
+    Строки `received` с разными сдвигами (смена `MARA_TZ_HOURS`) лексически
+    упорядочены иначе, чем во времени."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.con = mi.connect(self.dir)
+
+    def tearDown(self):
+        self.con.close()
+
+    def test_лаг_источника_по_последнему_по_времени(self):
+        сейчас = datetime.now(timezone.utc)
+        позже = (сейчас - timedelta(hours=1)).astimezone(timezone(timedelta(hours=0)))
+        раньше = (сейчас - timedelta(hours=3)).astimezone(timezone(timedelta(hours=14)))
+        for sid, когда in (("a", раньше), ("b", позже)):
+            eid, _ = mi.put_event(self.con, {"kind": "message", "source": "sms",
+                                             "source_id": sid, "payload": {}})
+            self.con.execute("update events set received=? where id=?",
+                             (когда.isoformat(timespec="seconds"), eid))
+        # лексически «раньше» (+14:00) больше: по строке лаг был бы часа три
+        лаг = contextd.source_lag(self.con, "sms")
+        self.assertTrue(3500 <= лаг <= 3700, лаг)
+
+    def test_виды_из_истории_по_utc(self):
+        # событие на 10 часов моложе границы в 30 дней, записанное в −12:00:
+        # по строке оно на пять часов «старше» границы в +03:00 и выпало бы
+        # из истории
+        когда = (datetime.now(timezone.utc) - timedelta(days=30) + timedelta(hours=10)
+                 ).astimezone(timezone(timedelta(hours=-12)))
+        eid, _ = mi.put_event(self.con, {"kind": "message", "source": "sms",
+                                         "source_id": "x", "device_id": "dev",
+                                         "payload": {}})
+        self.con.execute("update events set received=? where id=?",
+                         (когда.isoformat(timespec="seconds"), eid))
+        self.assertEqual(contextd.scopes_from_history(self.con, "dev"), ["message"])
+
+
 class ТестЧастотаПравок(unittest.TestCase):
     """Хвост Т3.1 (#39, #96 п.2), политика — мешок М5 п.3: правок словами с
     одного устройства не больше N в час, дальше 429 с `Retry-After`. Счёт — по

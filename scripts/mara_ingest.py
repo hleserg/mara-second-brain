@@ -528,13 +528,58 @@ def _откат_6(con):
     con.execute("drop table extractions")
 
 
+# Миграция 7 (Т2.1б, ТЗ §5.1 «UTC плюс сохранённый исходный сдвиг»): у
+# события — время в UTC рядом с исходной строкой. `received` пишется
+# `now_iso()` со сдвигом `MARA_TZ_HOURS`, `occurred` — как прислал источник,
+# тоже со сдвигом; исходные строки остаются нетронутыми — сдвиг источника
+# сохранён. Но строковый порядок по ним — порядок времени только при одном
+# сдвиге: после смены `MARA_TZ_HOURS` или у источников с разными сдвигами
+# `order by received` и `max(received)` врут (что и вскрыл лимит правок,
+# #145). Колонки — **вычисляемые** (`generated … virtual`): SQLite считает
+# их из исходной строки на чтении, так что ни заполнять при вставке, ни
+# переписывать задним числом нечего, и разойтись с исходной строкой они не
+# могут — даже когда её правят напрямую. UTC только у метки со сдвигом
+# (`…Z` или `…±HH:MM`): строку без сдвига SQLite прочёл бы как UTC, а это
+# догадка — честнее NULL. Формат один — `YYYY-MM-DDTHH:MM:SSZ`, строковый
+# порядок совпадает со временным. Индекс на `received_utc` — под «последнее
+# событие» метрик и сверки. Откат: индекс, потом колонки; данных в них нет —
+# всё выводится из исходных строк.
+UTC_ФОРМАТ = "%Y-%m-%dT%H:%M:%SZ"
+_В_UTC = ("case when {c} like '%Z' or {c} glob '*[+-][0-9][0-9]:[0-9][0-9]' "
+          "then strftime('" + UTC_ФОРМАТ + "', {c}) end")
+КОЛОНКИ_7 = (("events", "received_utc", "received"),
+             ("events", "occurred_utc", "occurred"))
+
+
+def _миграция_7(con):
+    for таблица, поле, из in КОЛОНКИ_7:
+        con.execute("alter table %s add column %s text generated always as (%s) "
+                    "virtual" % (таблица, поле, _В_UTC.format(c=из)))
+    con.execute("create index if not exists events_received_utc "
+                "on events(received_utc)")
+
+
+def _откат_7(con):
+    """Назад к 6 — без условий: вычисляемые колонки ничего своего не хранят,
+    всё выводится из `received` и `occurred`, которые остаются."""
+    con.execute("drop index if exists events_received_utc")
+    for таблица, поле, _ in КОЛОНКИ_7:
+        con.execute("alter table %s drop column %s" % (таблица, поле))
+
+
+def в_utc(когда):
+    """`datetime` со сдвигом → строка в формате вычисляемых колонок
+    миграции 7, для сравнения с `received_utc`/`occurred_utc`."""
+    return когда.astimezone(timezone.utc).strftime(UTC_ФОРМАТ)
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
 МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3, _миграция_4, _миграция_5,
-            _миграция_6)
+            _миграция_6, _миграция_7)
 # Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
 # ниже него только пустая база.
-ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5, _откат_6)
+ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5, _откат_6, _откат_7)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 
@@ -1107,8 +1152,12 @@ def message_state(con, source, key):
     наружу одно состояние. Последняя ревизия побеждает, надгробие — None.
     Единственный вход для чтения переписки: сырые строки events — не интерфейс.
     """
+    # По времени в UTC (миграция 7): у правки и оригинала из разных сдвигов
+    # строки `occurred` сравнивались бы неверно. Метка без сдвига — NULL в
+    # `occurred_utc`, такие идут первыми и между собой — по исходной строке.
     rows = con.execute("select source_id, payload_json from events where source=? "
-                       "and (source_id=? or source_id like ?) order by occurred, received",
+                       "and (source_id=? or source_id like ?) "
+                       "order by occurred_utc, occurred, received_utc",
                        (source, key, key + "/%")).fetchall()
     state = None
     for r in rows:
