@@ -1266,6 +1266,55 @@ class ТестМетрикиСтадий(unittest.TestCase):
         ждёт = int(self.метрики()["mara_ingest_oldest_job_seconds"])
         self.assertTrue(7100 <= ждёт <= 7300, ждёт)
 
+    def test_длительности_шагов_по_виду_и_исходу(self):
+        """Т9.1, «ASR/… duration/status»: пара `_sum`/`_count` по виду работы и
+        исходу, брошенные попытки — отдельным счётом. Начало и конец в
+        разных сдвигах: длительность — по времени, а не по строкам."""
+        def попытка(sid, kind, n, outcome, начало, конец):
+            eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                             "source_id": sid, "payload": {}})
+            jid = mi.add_job(self.con, eid, kind)
+            self.con.execute("insert into job_attempts(job_id, attempt, started, "
+                             "finished, outcome) values(?,?,?,?,?)",
+                             (jid, n, начало, конец, outcome))
+        попытка("a", "asr", 1, "ok", "2026-10-10T10:00:00+03:00",
+                "2026-10-10T07:10:00Z")                       # 600 с
+        попытка("b", "asr", 1, "ok", "2026-10-10T10:00:00-12:00",
+                "2026-10-11T12:20:00+14:00")                  # 1200 с
+        попытка("c", "asr", 1, "retry", "2026-10-10T10:00:00+03:00",
+                "2026-10-10T10:00:30+03:00")                  # 30 с
+        попытка("d", "extract", 1, "lease_expired", "2026-10-10T10:00:00+03:00", None)
+        попытка("e", "extract", 2, None, "2026-10-10T10:00:00+03:00", None)  # идёт
+        попытка("f", "digest", 1, "ok", "2026-10-10T10:00:00+03:00",
+                "2026-10-10T10:00:05+03:00")                  # тот же исход, другой вид
+        м = {k: v for k, v in self.метрики().items()
+             if k.startswith(("mara_job_duration", "mara_job_attempts"))}
+        self.assertEqual(м, {
+            'mara_job_duration_seconds_sum{kind="asr",outcome="ok"}': "1800",
+            'mara_job_duration_seconds_count{kind="asr",outcome="ok"}': "2",
+            'mara_job_duration_seconds_sum{kind="asr",outcome="retry"}': "30",
+            'mara_job_duration_seconds_count{kind="asr",outcome="retry"}': "1",
+            'mara_job_duration_seconds_sum{kind="digest",outcome="ok"}': "5",
+            'mara_job_duration_seconds_count{kind="digest",outcome="ok"}': "1",
+            # брошенные — по каждому виду шага, с нулём
+            'mara_job_attempts_abandoned_total{kind="asr"}': "0",
+            'mara_job_attempts_abandoned_total{kind="digest"}': "0",
+            'mara_job_attempts_abandoned_total{kind="extract"}': "1",
+            'mara_job_attempts_abandoned_total{kind="project"}': "0"})
+
+    def test_закрыть_работу_закрывает_свою_попытку(self):
+        """Воркер передаёт номер из `claim_job`: опоздавший после повторной
+        выдачи закрывает свою (уже брошенную) попытку, а не чужую."""
+        eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                         "source_id": "з", "payload": {}})
+        jid = mi.add_job(self.con, eid, "asr")
+        первый = mi.claim_job(self.con)
+        mi.claim_job(self.con, now=int(time.time()) + mi.LEASE_SEC + 1)
+        contextd.закрыть_работу(self.con, первый, True, "")
+        self.assertEqual([tuple(r) for r in self.con.execute(
+            "select attempt, outcome from job_attempts where job_id=? "
+            "order by attempt", (jid,))], [(1, "lease_expired"), (2, None)])
+
     def test_правка_по_настоящему_пути_ложится_с_исходом(self):
         """Исход пишет `apply_correction` в `audit_events` — проверяем на
         ней, а не на вставленной руками строке."""

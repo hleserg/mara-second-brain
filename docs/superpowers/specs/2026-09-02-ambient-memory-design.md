@@ -435,8 +435,13 @@ JSONL-транскрипты и сырые уведомления остаютс
 времени, а не по строке; пустая очередь — 0), `mara_corrections_total{outcome}`
 (правки словами по исходу из `audit_events`: `applied`/`created` меняют
 реестр, остальные — нет), `mara_version_conflicts_open` (открытые конфликты
-версий в `alerts`) и `mara_revisions_total{actor_type}` (ревизии по актору) —
-тоже запросом к базе. Сверх списка заведён и
+версий в `alerts`), `mara_revisions_total{actor_type}` (ревизии по актору)
+и длительности шагов из `job_attempts` — `mara_job_duration_seconds_sum`/
+`_count{kind,outcome}` (среднее — `rate(_sum) / rate(_count)`) и
+`mara_job_attempts_abandoned_total{kind}` (итог попытки не записан: воркер
+умер посреди шага или упёрся в занятую базу при закрытии; ряд по каждому виду
+шага, с нулём) — тоже запросом к базе. Разрешение длительностей — целые
+секунды. Сверх списка заведён и
 `mara_http_errors_total{code}` — сколько отказов демон отдал сам, через `say`.
 Он и `mara_db_locked_total{where}` (Т2.1б: сколько раз запрос — `http` —
 или поток воркера — `worker` — упёрся в занятую базу) — единственные здесь,
