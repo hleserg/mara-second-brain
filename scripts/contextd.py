@@ -500,6 +500,22 @@ def metrics(con, root=None, vault=None):
     devices = [(n, age_of(t)) for n, t in con.execute(
         "select name, max(last_seen) from devices where revoked_at is null "
         "group by name order by name")]
+    # Старейшая ждущая работа — по времени, а не по строке: `strftime('%s')`
+    # сдвиг учитывает, `min()` по строкам `created` — нет
+    старейшая = q("select min(cast(strftime('%s', created) as integer)) "
+                  "from jobs where state='ready'")
+    ждёт = max(0, int(time.time()) - старейшая) if старейшая is not None else 0
+    # Исход правки — из `audit_events`: `call_project.apply_correction` пишет
+    # его той же транзакцией, что и саму правку. Кривой json не роняет
+    # экспозицию: `json_valid` до `json_extract`
+    правки = con.execute(
+        "select coalesce(case when json_valid(detail_json) then "
+        "json_extract(detail_json, '$.outcome') end, 'unknown') as o, count(*) "
+        "from audit_events where action='correction' group by o order by o"
+    ).fetchall()
+    # `actor_type` в схеме не обязателен: без него — `unknown`, а не «None»
+    ревизии = con.execute("select coalesce(actor_type, 'unknown') as t, count(*) "
+                          "from revisions group by t order by t").fetchall()
     rows = [
         ("mara_ingest_queue_depth", q("select count(*) from jobs where state='ready'")),
         ("mara_ingest_lag_seconds", lag),
@@ -508,8 +524,33 @@ def metrics(con, root=None, vault=None):
          q("select count(*) from jobs where state='ready' and kind='asr'")),
         ("mara_task_extraction_failures_total",
          q("select count(*) from jobs where kind='extract' and state='dlq'")),
+        # §15.1, Т9.1. «queue depth/oldest job»: глубина не отличит десять
+        # свежих работ от одной, что висит сутки, — возраст старейшей
+        # незакрытой отличит. Незакрытая — это `ready` целиком: и та, что ждёт
+        # ретрая по `RETRY` (последняя ступень — 12 ч, вся лестница — около
+        # 14,6 ч до DLQ), и та, что сейчас в аренде у воркера (ASR — до часа).
+        # Порогу тревоги это знать: ретрай последней ступени держит метрику
+        # высокой законно. Пустая очередь — 0: ждать некому.
+        ("mara_ingest_oldest_job_seconds", ждёт),
+        # «MCP/domain mutations and conflicts»: правки словами по исходу —
+        # `applied`/`created` меняют реестр, `noop`, `not_found`,
+        # `ambiguous`, `conflict` — нет. Правка, упавшая исключением,
+        # откатывается вместе со своей строкой аудита и сюда не попадает.
+        # Конфликты версий — открытые `alerts` (Т2.3, очередь ревью),
+        # закрывать их пока некому, так что рост и есть сигнал
+        *[('mara_corrections_total{outcome="%s"}' % метка(o), n)
+          for o, n in правки],
+        ("mara_version_conflicts_open",
+         q("select count(*) from alerts where kind='version_conflict' "
+           "and state='open'")),
+        # «entity/revision created»: ревизии по тому, кто менял — `import`
+        # (`ledger_import.ПЕРЕНОС_АКТОР`), `projector` и `human` (переносы
+        # карточек в `call_project`). Счёт из базы, а не из памяти: рестарт
+        # его не теряет, а строки ревизий не удаляются
+        *[('mara_revisions_total{actor_type="%s"}' % метка(t), n)
+          for t, n in ревизии],
         ("mara_mobile_last_seen_seconds", mobile),
-        *[('mara_device_last_seen_seconds{name="%s"}' % n.replace('\\', '\\\\').replace('"', '\\"'), a)
+        *[('mara_device_last_seen_seconds{name="%s"}' % метка(n), a)
           for n, a in devices],
         # Семантика (хвост #39, Т3.1): «записей обещано, но тела ещё нет».
         # Считаются события в `new` с объявленным `blob_sha256` — телефон
@@ -545,6 +586,14 @@ def metrics(con, root=None, vault=None):
         *[('mara_db_locked_total{where="%s"}' % k, n) for k, n in заперто],
     ]
     return "".join("%s %s\n" % (k, v) for k, v in rows)
+
+
+def метка(значение):
+    """Значение метки Prometheus: обратный слеш, кавычка и перевод строки
+    экранируются (так требует текстовый формат), иначе имя устройства с
+    кавычкой или переводом строки ломает экспозицию."""
+    return (str(значение).replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n"))
 
 
 def age_of(iso, none=-1):

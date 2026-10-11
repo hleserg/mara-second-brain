@@ -1225,6 +1225,100 @@ class ТестВоркерЖивучий(unittest.TestCase):
         self.assertEqual(len(вызовов), 2, "после ошибки воркер не продолжил")
 
 
+class ТестМетрикиСтадий(unittest.TestCase):
+    """Т9.1, ТЗ §15.1: стадии, которых в `/metrics` не было, — старейшая
+    работа в очереди, правки, открытые конфликты версий, ревизии по актору.
+    Всё считается запросом к базе, как и остальное в `metrics()`."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.con = mi.connect(self.dir)
+
+    def tearDown(self):
+        self.con.close()
+
+    def метрики(self):
+        return dict(s.rsplit(" ", 1) for s in
+                    contextd.metrics(self.con, self.dir, None).splitlines())
+
+    def работа(self, sid, назад, сдвиг, state="ready"):
+        eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                         "source_id": sid, "payload": {}})
+        mi.add_job(self.con, eid, "asr")
+        когда = (datetime.now(timezone.utc) - назад).astimezone(
+            timezone(timedelta(hours=сдвиг)))
+        self.con.execute("update jobs set created=?, state=? where event_id=?",
+                         (когда.isoformat(timespec="seconds"), state, eid))
+
+    def test_пустой_реестр(self):
+        м = self.метрики()
+        self.assertEqual(м["mara_ingest_oldest_job_seconds"], "0")
+        self.assertEqual(м["mara_version_conflicts_open"], "0")
+        self.assertFalse([k for k in м if k.startswith(("mara_revisions_total",
+                                                         "mara_corrections_total"))])
+
+    def test_старейшая_работа_по_времени_а_не_по_строке(self):
+        # по строке меньше та, что в −12:00 (десять минут), по времени
+        # старше та, что в +14:00 (два часа); `dlq` в очередь не входит
+        self.работа("a", timedelta(hours=2), 14)
+        self.работа("b", timedelta(minutes=10), -12)
+        self.работа("c", timedelta(days=3), 0, state="dlq")
+        ждёт = int(self.метрики()["mara_ingest_oldest_job_seconds"])
+        self.assertTrue(7100 <= ждёт <= 7300, ждёт)
+
+    def test_правка_по_настоящему_пути_ложится_с_исходом(self):
+        """Исход пишет `apply_correction` в `audit_events` — проверяем на
+        ней, а не на вставленной руками строке."""
+        import call_project
+        vault = tempfile.mkdtemp()
+        for под in ("kb/commitments", ".git"):
+            os.makedirs(os.path.join(vault, под))
+        for n, payload in enumerate(({"item": "забор", "status": "open"},
+                                     {"item": "чего нет", "status": "done"})):
+            ev = {"kind": "correction", "source": "mara", "source_id": "c%d" % n,
+                  "payload": payload}
+            eid, _ = mi.put_event(self.con, ev)
+            call_project.apply_correction(vault, dict(ev, id=eid), self.con)
+        м = self.метрики()
+        self.assertEqual(м.get('mara_corrections_total{outcome="created"}'), "1", м)
+        self.assertEqual(м.get('mara_corrections_total{outcome="not_found"}'), "1", м)
+
+    def test_правки_конфликты_ревизии(self):
+        for n, (action, detail) in enumerate((
+                ("correction", '{"outcome": "applied"}'),
+                ("correction", '{"outcome": "applied"}'),
+                ("correction", '{"outcome": "conflict"}'),
+                ("correction", "не json"),
+                ("correction", None),
+                ("transition", '{"outcome": "applied"}'))):
+            self.con.execute("insert into audit_events(id, occurred, action, "
+                             "detail_json) values(?, ?, ?, ?)",
+                             ("a%d" % n, mi.now_iso(), action, detail))
+        for aid, kind, state in (("a1", "version_conflict", "open"),
+                                 ("a2", "version_conflict", "resolved"),
+                                 ("a3", "другое", "open")):
+            self.con.execute("insert into alerts(id, kind, state, opened) "
+                             "values(?, ?, ?, ?)", (aid, kind, state, mi.now_iso()))
+        for v, актор in ((1, "import"), (2, "human"), (3, "human"), (4, None),
+                         (5, 'с"кавычкой'), (6, "слеш\\и\nстрока")):
+            self.con.execute("insert into revisions(object_kind, object_id, version, "
+                             "actor_type, occurred) values('commitment', 'o', ?, ?, ?)",
+                             (v, актор, mi.now_iso()))
+        м = self.метрики()
+        self.assertEqual({k: v for k, v in м.items()
+                          if k.startswith("mara_corrections_total")},
+                         {'mara_corrections_total{outcome="applied"}': "2",
+                          'mara_corrections_total{outcome="conflict"}': "1",
+                          'mara_corrections_total{outcome="unknown"}': "2"})
+        self.assertEqual(м["mara_version_conflicts_open"], "1")
+        self.assertEqual({k: v for k, v in м.items()
+                          if k.startswith("mara_revisions_total")},
+                         {'mara_revisions_total{actor_type="human"}': "2",
+                          'mara_revisions_total{actor_type="import"}': "1",
+                          'mara_revisions_total{actor_type="unknown"}': "1",
+                          'mara_revisions_total{actor_type="с\\"кавычкой"}': "1",
+                          'mara_revisions_total{actor_type="слеш\\\\и\\nстрока"}': "1"})
+
 
 class ТестЗанятостьБазы(unittest.TestCase):
     """Т2.1б: состязание за блокировку видно в `/metrics` —

@@ -1361,6 +1361,20 @@ Gmail в той части, где не нужен его браузер. **Ге
 ### Волна 9 — наблюдаемость, управление, приёмка
 
 - [ ] **Т9.1 §15.1: метрики, санитизированные логи, тревоги.** Размер M.
+  *Ход 2026-10-11, метрики стадий:* в `/metrics` добавлены стадии §15.1,
+  которых не было: «queue … oldest job» — `mara_ingest_oldest_job_seconds`
+  (старейшая работа в `ready`, включая ждущие ретрая — до 14,6 ч по
+  `RETRY` — и взятые в аренду; по `strftime('%s')`, а не по строке),
+  «MCP/domain mutations and conflicts» — `mara_corrections_total{outcome}`
+  (исход из `audit_events`) и `mara_version_conflicts_open`, «entity/revision
+  created» — `mara_revisions_total{actor_type}`. Тесты
+  `tests/test_contextd.py::ТестМетрикиСтадий`. Открыто: длительности
+  ASR/извлечения (`job_attempts` с `started`/`finished` есть с миграции 2,
+  но в неё никто не пишет — ADR-0010 п.8),
+  бэкап и проверка восстановления как метрики (сейчас — находки сверки
+  `бэкап`/`снимок`), загрузка вычислителей (Т7), рекордер (Т4.2) и главное —
+  **читатель**: тревог на метрики нет, их видят только руками (§7 аудита,
+  `mara_whatsapp_lag_seconds`); санитизированные логи с gated sensitive mode.
 - [x] **Т9.2 Три недостающих ADR: 0004, 0010, 0011.** §21 требует 12,
   есть 9. Размер M. *Сделано 2026-10-05:* `0004-evidence-provenance`,
   `0010-compute-scheduling`, `0011-widget-extension-boundary`, статус
