@@ -572,6 +572,22 @@ def _откат_7(con):
         con.execute("alter table %s drop column %s" % (таблица, поле))
 
 
+def база_занята(беда):
+    """`SQLITE_BUSY` («database is locked») — чужая транзакция держала базу
+    дольше `busy_timeout` (30 с, ADR-0005). Код берём младшим байтом:
+    расширенные `SQLITE_BUSY_*` — та же занятость (`BUSY_SNAPSHOT` бросается
+    сразу, без ожидания, но причина та же — чужой писатель). Прочие
+    `OperationalError` — нет таблицы, `SQLITE_LOCKED` внутри своего же
+    соединения — поломка, а не состязание, и сюда не идут. Текст — на случай
+    ошибки без кода."""
+    if not isinstance(беда, sqlite3.OperationalError):
+        return False
+    код = getattr(беда, "sqlite_errorcode", None)
+    if код is not None:
+        return код & 0xff == sqlite3.SQLITE_BUSY
+    return "database is locked" in str(беда)
+
+
 def в_utc(когда):
     """`datetime` со сдвигом → строка в формате вычисляемых колонок
     миграции 7, для сравнения с `received_utc`/`occurred_utc`."""
