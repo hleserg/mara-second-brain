@@ -1285,6 +1285,8 @@ class ТестМетрикиСтадий(unittest.TestCase):
                 "2026-10-10T10:00:30+03:00")                  # 30 с
         попытка("d", "extract", 1, "lease_expired", "2026-10-10T10:00:00+03:00", None)
         попытка("e", "extract", 2, None, "2026-10-10T10:00:00+03:00", None)  # идёт
+        попытка("f", "digest", 1, "ok", "2026-10-10T10:00:00+03:00",
+                "2026-10-10T10:00:05+03:00")                  # тот же исход, другой вид
         м = {k: v for k, v in self.метрики().items()
              if k.startswith(("mara_job_duration", "mara_job_attempts"))}
         self.assertEqual(м, {
@@ -1292,7 +1294,26 @@ class ТестМетрикиСтадий(unittest.TestCase):
             'mara_job_duration_seconds_count{kind="asr",outcome="ok"}': "2",
             'mara_job_duration_seconds_sum{kind="asr",outcome="retry"}': "30",
             'mara_job_duration_seconds_count{kind="asr",outcome="retry"}': "1",
-            'mara_job_attempts_abandoned_total{kind="extract"}': "1"})
+            'mara_job_duration_seconds_sum{kind="digest",outcome="ok"}': "5",
+            'mara_job_duration_seconds_count{kind="digest",outcome="ok"}': "1",
+            # брошенные — по каждому виду шага, с нулём
+            'mara_job_attempts_abandoned_total{kind="asr"}': "0",
+            'mara_job_attempts_abandoned_total{kind="digest"}': "0",
+            'mara_job_attempts_abandoned_total{kind="extract"}': "1",
+            'mara_job_attempts_abandoned_total{kind="project"}': "0"})
+
+    def test_закрыть_работу_закрывает_свою_попытку(self):
+        """Воркер передаёт номер из `claim_job`: опоздавший после повторной
+        выдачи закрывает свою (уже брошенную) попытку, а не чужую."""
+        eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                         "source_id": "з", "payload": {}})
+        jid = mi.add_job(self.con, eid, "asr")
+        первый = mi.claim_job(self.con)
+        mi.claim_job(self.con, now=int(time.time()) + mi.LEASE_SEC + 1)
+        contextd.закрыть_работу(self.con, первый, True, "")
+        self.assertEqual([tuple(r) for r in self.con.execute(
+            "select attempt, outcome from job_attempts where job_id=? "
+            "order by attempt", (jid,))], [(1, "lease_expired"), (2, None)])
 
     def test_правка_по_настоящему_пути_ложится_с_исходом(self):
         """Исход пишет `apply_correction` в `audit_events` — проверяем на

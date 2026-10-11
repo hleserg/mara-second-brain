@@ -514,8 +514,9 @@ def metrics(con, root=None, vault=None):
         "from audit_events where action='correction' group by o order by o"
     ).fetchall()
     # Попытки шагов (`job_attempts`, ADR-0010 п.8) по виду работы и исходу:
-    # у законченных — сумма секунд, у брошенных (`lease_expired`, воркер
-    # умер посреди шага) длительности нет, только счёт
+    # у законченных — сумма секунд, у брошенных (`lease_expired`: итог не
+    # записан — воркер умер посреди шага или упёрся в занятую базу при
+    # закрытии) длительности нет, только счёт
     попытки = con.execute(
         "select j.kind, a.outcome, count(*), "
         "sum(cast(strftime('%s', a.finished) as integer) - "
@@ -545,13 +546,20 @@ def metrics(con, root=None, vault=None):
         # «ASR/diarization/extraction duration/status»: длительность шага
         # (`asr`, `extract`, `project`, `digest`) по исходу — `ok`, `retry`,
         # `dlq` — парой summary `_sum`/`_count`: среднее за окно —
-        # `rate(_sum) / rate(_count)`. Брошенные попытки — отдельным счётом
+        # `rate(_sum) / rate(_count)`. Разрешение — целые секунды (`now_iso`
+        # без долей): у `project` и `digest` среднее будет почти нулём, это
+        # не поломка. Брошенные попытки — отдельным счётом
         *[('mara_job_duration_seconds_%s{kind="%s",outcome="%s"}'
            % (часть, метка(k), метка(o)), v)
           for k, o, n, сек in попытки if o != "lease_expired"
           for часть, v in (("sum", сек or 0), ("count", n))],
+        # брошенные — по каждому виду шага, с нулём: тревога на рост не
+        # должна пропускать первую брошенную из-за того, что ряда не было.
+        # Длительности появляются с первой законченной попыткой
         *[('mara_job_attempts_abandoned_total{kind="%s"}' % метка(k), n)
-          for k, o, n, _ in попытки if o == "lease_expired"],
+          for k, n in sorted(dict(
+              [(k, 0) for k in STEP] +
+              [(k, n) for k, o, n, _ in попытки if o == "lease_expired"]).items())],
         # «MCP/domain mutations and conflicts»: правки словами по исходу —
         # `applied`/`created` меняют реестр, `noop`, `not_found`,
         # `ambiguous`, `conflict` — нет. Правка, упавшая исключением,
@@ -1680,7 +1688,7 @@ def закрыть_работу(con, job, ok, err):
     цепочку доводила сверка (`транскрипт_без_извлечения`).
     """
     with транзакция(con):
-        mi.finish_job(con, job["id"], ok, err)
+        mi.finish_job(con, job["id"], ok, err, job.get("attempt"))
         if ok and job["kind"] in NEXT:
             mi.add_job(con, job["event_id"], NEXT[job["kind"]])
 

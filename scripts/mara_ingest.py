@@ -896,13 +896,19 @@ def claim_job(con, kinds=None, now=None):
     # `select` и `update` два воркера проходили оба, и час GPU уходил дважды —
     # та же болезнь, что вылечена в `finish_stored`. Проигравший вернётся сюда
     # следующим тиком: работа никуда не делась, а спешить некуда.
-    if con.execute("update jobs set lease_until=?, updated=? "
-                   "where id=? and lease_until<? and state='ready'",
-                   (now + LEASE_SEC, now_iso(), row["id"], now)).rowcount != 1:
-        return None
-    _начать_попытку(con, row["id"])
+    #
+    # Аренда и строка попытки — одной транзакцией: по отдельности занятая
+    # база между ними оставляла взятую аренду без попытки (работа простаивала
+    # `LEASE_SEC`, а брошенную потом нечем было и назвать).
+    with транзакция(con):
+        if con.execute("update jobs set lease_until=?, updated=? "
+                       "where id=? and lease_until<? and state='ready'",
+                       (now + LEASE_SEC, now_iso(), row["id"], now)).rowcount != 1:
+            return None
+        номер = _начать_попытку(con, row["id"])
     job = dict(row)
     job["lease_until"] = now + LEASE_SEC
+    job["attempt"] = номер
     return job
 
 
@@ -922,51 +928,64 @@ def _начать_попытку(con, job_id):
     `jobs` помнит только последнюю ошибку и число неудач.
 
     Номер попытки свой, а не `jobs.attempts`: тот считает неудачи, а работа,
-    чья аренда истекла (воркер умер посреди шага), выдаётся снова без неудачи
-    — и столкнулась бы с собственной прошлой строкой по ключу. Брошенную так
-    попытку закрываем исходом `lease_expired` без `finished`: когда умер
-    воркер, мы не знаем, и выдумывать длительность нельзя."""
+    чья аренда истекла, выдаётся снова без неудачи — и столкнулась бы с
+    собственной прошлой строкой по ключу. Прежнюю незакрытую попытку такая
+    выдача закрывает исходом `lease_expired` без `finished`: итог её не
+    записан — воркер умер посреди шага или упёрся в занятую базу, закрывая
+    работу, — и выдумывать длительность нельзя. Возвращает номер: попытку
+    закрывает тот, кто её открыл, а не любой доигравший."""
     con.execute("update job_attempts set outcome='lease_expired' "
                 "where job_id=? and finished is null and outcome is null", (job_id,))
     номер = con.execute("select coalesce(max(attempt), 0) + 1 from job_attempts "
                         "where job_id=?", (job_id,)).fetchone()[0]
     con.execute("insert into job_attempts(job_id, attempt, started) values(?,?,?)",
                 (job_id, номер, now_iso()))
+    return номер
 
 
-def _закрыть_попытку(con, job_id, исход):
-    """Последняя открытая попытка работы — `ok`, `retry` или `dlq`. Работу
-    закрыли без выдачи (самопроверки, ручная починка) — открытой попытки
-    нет, и писать нечего. Текст ошибки сюда не копируем: это хвост stderr
-    шага, он уже лежит в `jobs.last_error`, а копия на каждую попытку
-    множила бы его без нужды (§15.1 — в журналах не место содержимому)."""
-    con.execute("update job_attempts set finished=?, outcome=? "
-                "where job_id=? and finished is null and outcome is null",
-                (now_iso(), исход, job_id))
+def _закрыть_попытку(con, job_id, исход, попытка=None):
+    """Попытка `попытка` работы — `ok`, `retry` или `dlq`, если она ещё
+    открыта. Её уже закрыли брошенной (аренда истекла, работу выдали снова)
+    — доигравший опоздал, и чужую попытку, открытую после него, он не
+    трогает: иначе её длительность считалась бы от чужого старта. Номера нет
+    (самопроверки, ручная починка) — закрываются все открытые; работу
+    закрыли без выдачи — открытых нет, и писать нечего.
+
+    Текст ошибки сюда не копируем: это хвост stderr шага, он уже лежит в
+    `jobs.last_error`, а копия на каждую попытку множила бы его без нужды
+    (§15.1 — в журналах не место содержимому)."""
+    q = ("update job_attempts set finished=?, outcome=? "
+         "where job_id=? and finished is null and outcome is null")
+    args = [now_iso(), исход, job_id]
+    if попытка is not None:
+        q += " and attempt=?"
+        args.append(попытка)
+    con.execute(q, args)
 
 
-def finish_job(con, job_id, ok, error=None):
-    """Закрыть работу успехом или назначить ретрай; после последней — DLQ."""
+def finish_job(con, job_id, ok, error=None, попытка=None):
+    """Закрыть работу успехом или назначить ретрай; после последней — DLQ.
+    `попытка` — номер из `claim_job`: закрывается ровно она."""
     row = con.execute("select attempts from jobs where id=?", (job_id,)).fetchone()
     if not row:
         return
     if ok:
         con.execute("update jobs set state='done', lease_until=0, updated=? where id=?",
                     (now_iso(), job_id))
-        _закрыть_попытку(con, job_id, "ok")
+        _закрыть_попытку(con, job_id, "ok", попытка)
         return
     attempts = row["attempts"] + 1
     if attempts >= len(RETRY):
         con.execute("update jobs set state='dlq', attempts=?, last_error=?, "
                     "lease_until=0, updated=? where id=?",
                     (attempts, (error or "")[:500], now_iso(), job_id))
-        _закрыть_попытку(con, job_id, "dlq")
+        _закрыть_попытку(con, job_id, "dlq", попытка)
         return
-    _закрыть_попытку(con, job_id, "retry")
     con.execute("update jobs set attempts=?, last_error=?, next_at=?, lease_until=0, "
                 "updated=? where id=?",
                 (attempts, (error or "")[:500],
                  int(time.time()) + next_delay(attempts), now_iso(), job_id))
+    _закрыть_попытку(con, job_id, "retry", попытка)
 
 
 def audit(con, action, actor, object_kind=None, object_id=None, detail=None,
