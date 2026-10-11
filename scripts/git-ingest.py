@@ -180,7 +180,7 @@ def self_check():
     assert "sensitive: true" in sc and "в облако не отправляется" in sc
     # заголовок склоняется, проект приводится к канону, ключ из сообщения коммита
     # не доезжает до карточки
-    txt = "abc1234 Сергей\nчинил синк\n\ndef5678 Сергей\nещё раз\n"
+    txt = "abc1234 Иван\nчинил синк\n\ndef5678 Иван\nещё раз\n"
     c = card("Attadipa", datetime(2026, 8, 31).date(), txt, {"attadipa": "attadipa"}, "raw/git/x.txt")
     assert "2 коммита за 2026-08-31" in c, c
     assert 'project: "[[attadipa]]"' in c
