@@ -1,10 +1,10 @@
 """Приём: дедуп, аренда работ, расписание ретраев (ТЗ §17, §20)."""
 import os, sys, sqlite3, tempfile, unittest, unittest.mock, subprocess
+from datetime import datetime, timedelta, timezone
 
 СКРИПТЫ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, СКРИПТЫ)
 import mara_ingest as mi
-from datetime import datetime, timedelta, timezone
 
 EV = {"kind": "call", "source": "phone", "source_id": "call-1",
       "occurred_at": "2026-09-02T14:05:00+03:00",

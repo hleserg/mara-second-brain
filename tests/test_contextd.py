@@ -1397,6 +1397,11 @@ class ТестВремяВUTC(unittest.TestCase):
         # лексически «раньше» (+14:00) больше: по строке лаг был бы часа три
         лаг = contextd.source_lag(self.con, "sms")
         self.assertTrue(3500 <= лаг <= 3700, лаг)
+        # то же «последнее» — у общей метрики лага реестра
+        строка = [l for l in contextd.metrics(self.con, self.dir, None).splitlines()
+                  if l.startswith("mara_ingest_lag_seconds ")]
+        лаг = float(строка[0].split()[1])
+        self.assertTrue(3500 <= лаг <= 3700, лаг)
 
     def test_виды_из_истории_по_utc(self):
         # событие на 10 часов моложе границы в 30 дней, записанное в −12:00:

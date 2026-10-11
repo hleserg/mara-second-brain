@@ -74,7 +74,7 @@ Hermes) и GitHub API. **По репозиторию это не проверя�
 | GnuPG | 2.4.4 | из Ubuntu | GPL-3.0-or-later | adopt |
 | git-filter-repo | `a40bce548d2c` (`~/.local/bin`) | не сверял | MIT | adopt |
 | python3 | 3.12.3 (Ubuntu), в CI 3.12 | из Ubuntu | PSF-2.0 | adopt |
-| SQLite | 3.45.1 (`libsqlite3-0`, Ubuntu) | из Ubuntu | Public Domain | adopt |
+| SQLite | 3.45.1 (`libsqlite3-0`, Ubuntu); нужна ≥ 3.31 — вычисляемые колонки миграции 7, откат ≥ 3.35 | из Ubuntu | Public Domain | adopt |
 | git | 2.43.0 (Ubuntu) | из Ubuntu | GPL-2.0-only | adopt |
 | OpenSSH (клиент) | 9.6p1 (Ubuntu) | из Ubuntu | BSD-2-Clause и др. | adopt |
 | rsync | 3.2.7 (Ubuntu) | из Ubuntu | GPL-3.0-or-later | adopt |
