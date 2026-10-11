@@ -15,7 +15,7 @@
     python3 scripts/contextd_reconcile.py --telegram
     python3 scripts/contextd_reconcile.py --self-check
 """
-import os, sys, json, glob, time, sqlite3, argparse
+import os, sys, json, glob, time, sqlite3, argparse, http.client
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -681,7 +681,8 @@ def дайджест_не_доставлен(con):
     """Дайджест собран, но до владельца не дошёл: звонок разобран, а человек о
     нём не узнал (§17 `TZ-ambient-memory.md`). Оба недоставленных состояния
     настроечные, и оба чинятся одним файлом `/etc/mara/contextd.env`:
-    `no-transport` — нет токена или адресата вовсе, `not-private` — адресат
+    `no-transport` — нет токена или адресата вовсе либо токен не похож на
+    токен бота (пробел, комментарий в строке env), `not-private` — адресат
     есть, но это не личный чат владельца, и застава §8.3 `TZ.md` отправку не
     пустила (#61).
     `failed` уводит работу в ретрай, и если та встанет насовсем — о ней
@@ -701,7 +702,7 @@ def дайджест_не_доставлен(con):
     чужой = len(rows) - без
     чем = []
     if без:
-        чем.append("нет токена или адресата: %d" % без)
+        чем.append("нет токена или адресата, или токен кривой: %d" % без)
     if чужой:
         чем.append("адресат не личный чат владельца: %d" % чужой)
     return [находка("дайджест-не-доставлен", "warn",
@@ -757,8 +758,13 @@ def dlq(con):
         return []
     row = con.execute("select kind, last_error from jobs where state='dlq' "
                       "order by updated desc limit 1").fetchone()
+    # Причина — последняя строка хвоста (у трейсбека это само исключение), а
+    # не срез из его середины, и обезличенная: строки, легшие до
+    # `mi.обезличить` в `run_step`, ещё могут нести путь карточки (§15.1)
+    строки = [l for l in (row["last_error"] or "").splitlines() if l.strip()]
+    причина = mi.обезличить(строки[-1].strip() if строки else "")[:120]
     return [находка("работы-в-dlq", "warn", "в DLQ работ: %d, последняя %s — %s"
-                    % (n, row["kind"], (row["last_error"] or "")[:120]), count=n)]
+                    % (n, row["kind"], причина), count=n)]
 
 
 # §5.1 ТЗ просит `quick_check` по расписанию и слежку за WAL. Порог WAL в
@@ -1066,8 +1072,10 @@ def доложить(находки):
     e = cd.env()
     try:
         return cd.deliver(t, e.get("TELEGRAM_BOT_TOKEN"), e.get("TELEGRAM_HOME_CHANNEL"))
-    except OSError as err:
-        return "failed: %s" % err
+    except (OSError, http.client.HTTPException, ValueError) as err:
+        # класс, а не текст: `InvalidURL` и `ValueError` заголовка несут
+        # адрес с токеном внутри (§15.1)
+        return "failed: %s" % type(err).__name__
 
 
 def открыть_реестр(root):

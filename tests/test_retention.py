@@ -209,7 +209,7 @@ class СверкаИсточников(unittest.TestCase):
         self.assertEqual(f[0]["count"], 3,
                          "доставленный дайджест — не находка, "
                          "а чужой адресат — находка")
-        self.assertIn("нет токена или адресата: 1", f[0]["detail"])
+        self.assertIn("нет токена или адресата, или токен кривой: 1", f[0]["detail"])
         self.assertIn("адресат не личный чат владельца: 2", f[0]["detail"],
                       "владелец должен прочитать, какая из двух дыр")
         self.assertEqual(f[0]["sample"], [eid, eid, eid])
@@ -245,7 +245,7 @@ class СверкаИсточников(unittest.TestCase):
         self.con.execute("delete from digests")
         дайджест("d2", "no-transport")
         detail = rc.дайджест_не_доставлен(self.con)[0]["detail"]
-        self.assertIn("нет токена или адресата: 1", detail)
+        self.assertIn("нет токена или адресата, или токен кривой: 1", detail)
         self.assertNotIn("адресат не личный", detail,
                          "чужого адресата здесь нет")
 

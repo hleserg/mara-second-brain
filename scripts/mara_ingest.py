@@ -21,7 +21,7 @@
     MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate
     MARA_BLOBS=/srv/mara-blobs python3 scripts/mara_ingest.py --migrate 1   # откат
 """
-import os, sys, json, time, uuid, random, sqlite3, hashlib, threading
+import os, re, sys, json, time, uuid, random, sqlite3, hashlib, threading
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=float(os.environ.get("MARA_TZ_HOURS", 3))))
@@ -586,6 +586,26 @@ def база_занята(беда):
     if код is not None:
         return код & 0xff == sqlite3.SQLITE_BUSY
     return "database is locked" in str(беда)
+
+
+# Пути карточек несут имя или номер собеседника (`slug(contact)`), имя из
+# адресной книги (`entities/people/`, `call_project.person_card`) и пересказ
+# обязательства (`slug(action)`) — в хвост ошибки они не должны уходить.
+# Имя файла кончается на разделителе: двоеточие и точка с запятой после
+# пути — уже диагностика, а не имя
+КАРТОЧКА_В_ТЕКСТЕ = re.compile(
+    r"((?:kb/(?:conversations|commitments)|entities/people)/)[^\s'\",)\]:;|»`]+")
+
+
+def обезличить(текст):
+    """Хвост ошибки шага — для журнала, `jobs.last_error`, сверки и Telegram
+    (ТЗ §15.1: в журналах нет содержимого, номеров и токенов). Путь карточки
+    — до каталога, секреты — слоем 1 `redact` (там же токен бота)."""
+    from redact import SECRETS
+    текст = КАРТОЧКА_В_ТЕКСТЕ.sub(r"\1…", текст or "")
+    for rx, repl in SECRETS:
+        текст = rx.sub(repl, текст)
+    return текст
 
 
 def в_utc(когда):

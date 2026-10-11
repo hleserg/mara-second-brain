@@ -17,7 +17,7 @@ source_id, и правка с тем же ключом просто пропал
 `telegram` (python-telegram, venv-tdlib) импортируется только в --login,
 --serve и --catch-up: разбор и самопроверка живут без неё, гейт зелёный везде.
 """
-import os, sys, json, time, signal, secrets, getpass, argparse, threading
+import os, sys, json, time, signal, secrets, getpass, argparse, threading, hashlib, logging
 import urllib.request, urllib.error
 from datetime import datetime, timezone
 
@@ -33,6 +33,16 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
 
 def state_dir(root=ROOT):
     return os.path.join(root, "tdlib")
+
+
+def _метка(source_id):
+    """`source_id` для журнала: `chat_id` личного чата — это id собеседника
+    в Telegram, а строка пишется на каждое сообщение (§15.1). Хеш связывает
+    повторы одного сообщения (`dup` после `ok`) и не называет человека в
+    открытую. Это псевдонимизация, а не шифр: без соли, и по списку
+    кандидатов `chat_id` его можно перебрать. У `whatsapp_import`
+    `source_id` уже хеш, и в журнал уходят те же 12 знаков."""
+    return hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:12]
 
 
 def iso(ts):
@@ -244,13 +254,15 @@ class Демон:
                 r = self.post(ev)
             except urllib.error.HTTPError as e:
                 if 400 <= e.code < 500:
-                    self.log("%s: contextd отверг (%d), пропускаю" % (ev["source_id"], e.code))
+                    self.log("%s: contextd отверг (%d), пропускаю" % (_метка(ev["source_id"]),
+                                                                    e.code))
                     return None
                 err = "%d" % e.code
             except Exception as e:
                 err = "%s: %s" % (type(e).__name__, e)
             else:
-                self.log("%s %s" % (ev["source_id"], "dup" if r.get("duplicate") else "ok"))
+                self.log("%s %s" % (_метка(ev["source_id"]),
+                                    "dup" if r.get("duplicate") else "ok"))
                 self.beat()
                 return r
             self.log("contextd не отвечает (%s), повтор через %d с" % (err, pause))
@@ -413,6 +425,10 @@ def serve(home, once=False):
     token = os.environ.get("MARA_CONTEXT_TOKEN")
     if not token:
         raise НетВхода("нет MARA_CONTEXT_TOKEN: contextd.py --pair tdlib → /etc/mara/tdlib.env")
+    # python-telegram на DEBUG дампит апдейты целиком, с текстами
+    # сообщений; сейчас логирование не настроено и уровень — WARNING, но
+    # чей-нибудь `basicConfig(level=DEBUG)` не должен включить дамп (§15.1)
+    logging.getLogger("telegram.tdjson").setLevel(logging.INFO)
     tg = _connect(home)
     d = Демон(tg, poster(URL, token), home)
     if once:
