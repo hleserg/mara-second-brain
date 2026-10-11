@@ -1355,6 +1355,30 @@ class ТестЗанятостьБазы(unittest.TestCase):
         self.assertIn("OperationalError", ответ["applied"]["text"])
         self.assertEqual(self.счёт()['mara_db_locked_total{where="http"}'], "1")
 
+    def test_правка_легла_а_манифест_упёрся_в_базу(self):
+        """Codex по #149: карточка записана, а манифест после неё упёрся в
+        занятую базу — `apply_correction` ловит это сама и возвращает
+        `manifest_error`, исключения наверху нет. Счёт — по признаку."""
+        import vault_manifest
+        _, токен = contextd.pair(self.con, "телефон")
+        vault = tempfile.mkdtemp()
+        os.makedirs(os.path.join(vault, ".git"))
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        адрес = self.сервер(vault)
+        беда = self.занятость()
+
+        def записать(*a, **kw):
+            raise беда
+        with unittest.mock.patch.object(vault_manifest, "записать", записать), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with urllib.request.urlopen(self.запрос(адрес, токен, {
+                    "kind": "correction", "source": "mara", "source_id": "м",
+                    "payload": {"item": "забор", "status": "open"}}), timeout=10) as r:
+                ответ = json.loads(r.read())
+        self.assertTrue(ответ["applied"].get("created"), ответ)
+        self.assertEqual(ответ["applied"].get("manifest_error"), "OperationalError")
+        self.assertEqual(self.счёт()['mara_db_locked_total{where="http"}'], "1")
+
     def test_поломка_в_потоках_не_считается(self):
         """Нет таблицы — поломка: ни запрос, ни воркер её в занятость не пишут."""
         _, токен = contextd.pair(self.con, "телефон")

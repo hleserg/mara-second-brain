@@ -540,7 +540,8 @@ Gmail в той части, где не нужен его браузер. **Ге
   `tests/test_contextd.py::ТестВремяВUTC`, `tests/test_retention.py`
   (`источник_замолчал` по UTC).
   *Ход 2026-10-11, блокировка:* `mara_db_locked_total{where="http"|"worker"}`
-  в `/metrics` — сколько раз запрос (с правкой словами) или поток воркера
+  в `/metrics` — сколько раз запрос (с правкой словами, включая манифест
+  после неё — признак `manifest_busy` от `call_project`) или поток воркера
   (взять и закрыть работу) упёрся в занятую базу (`SQLITE_BUSY` и
   `SQLITE_BUSY_*`; прочие `OperationalError` — поломка, не состязание). Счётчик в памяти демона, как `mara_http_errors_total`:
   в момент события база занята, записать некуда, а для Prometheus-counter

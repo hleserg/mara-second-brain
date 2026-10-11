@@ -115,20 +115,9 @@ _заперто = {"http": 0, "worker": 0}     # где -> сколько раз
 _замок = threading.Lock()
 
 
-def база_занята(беда):
-    """`SQLITE_BUSY` («database is locked») — чужая транзакция держала базу
-    дольше `busy_timeout` (30 с, ADR-0005). Код берём младшим байтом:
-    расширенные `SQLITE_BUSY_*` — та же занятость (`BUSY_SNAPSHOT` бросается
-    сразу, без ожидания, но причина та же — чужой писатель). Прочие
-    `OperationalError` — нет таблицы, `SQLITE_LOCKED` внутри своего же
-    соединения — поломка, а не состязание, и сюда не идут. Текст — на случай
-    ошибки без кода."""
-    if not isinstance(беда, sqlite3.OperationalError):
-        return False
-    код = getattr(беда, "sqlite_errorcode", None)
-    if код is not None:
-        return код & 0xff == sqlite3.SQLITE_BUSY
-    return "database is locked" in str(беда)
+# Одна на демон и на `call_project`: правка словами ловит ошибки сама, и
+# признак занятости ей нужен там же, где и демону.
+база_занята = mi.база_занята
 
 
 def счесть_занятость(где):
@@ -1042,6 +1031,8 @@ class Handler(BaseHTTPRequestHandler):
                           flush=True)
                     applied = {"found": False,
                                "text": "не применил: %s" % type(e).__name__}
+                if applied.get("manifest_busy"):
+                    счесть_занятость("http")
                 ответ["applied"] = applied
                 if ключ:
                     con.execute("update ingest_attempts set outcome=? where device_id=? "

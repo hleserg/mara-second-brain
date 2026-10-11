@@ -1054,6 +1054,10 @@ def apply_correction(vault, event, con=None):
                 vault_manifest.записать(con, vault, когда)
             except (OSError, sqlite3.OperationalError) as e:
                 out["manifest_error"] = e.__class__.__name__
+                # демон считает занятость в `mara_db_locked_total` (Т2.1б), а
+                # исключение до него отсюда не доходит
+                if mi.база_занята(e):
+                    out["manifest_busy"] = True
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
     out["pack_sha256"] = context_pack.build_now(vault)
     return out
