@@ -16,7 +16,7 @@
     python3 scripts/call_digest.py --event call_<uuid>
     python3 scripts/call_digest.py --self-check
 """
-import os, sys, json, uuid, argparse, datetime, urllib.parse, urllib.request
+import os, re, sys, json, uuid, argparse, datetime, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -176,6 +176,14 @@ def deliver(text, token, chat_id):
         print("call_digest: адресат %s — не личный чат владельца, "
               "не отправляю (§8.3, #61)" % chat_id, file=sys.stderr)
         return "not-private"
+    if not re.fullmatch(r"[A-Za-z0-9:_-]+", str(token)):
+        # Пробел, хвостовой комментарий или перевод строки в значении: urllib
+        # бросил бы `InvalidURL` с адресом, а в адресе — токен целиком, и
+        # трейсбек лёг бы в журнал крона и в `outbox.error` (§15.1). Токена в
+        # тексте нет и здесь
+        print("call_digest: TELEGRAM_BOT_TOKEN не похож на токен бота "
+              "(пробел, комментарий в строке?) — не отправляю", file=sys.stderr)
+        return "no-transport"
     data = urllib.parse.urlencode({"chat_id": chat_id, "text": text,
                                    "disable_web_page_preview": "true"}).encode()
     req = urllib.request.Request(API % token, data=data, method="POST")

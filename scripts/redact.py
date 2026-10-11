@@ -26,6 +26,9 @@ SECRETS = [
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<AWS_KEY_ID>"),
     (re.compile(r"\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "<JWT>"),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}"), "Bearer <TOKEN>"),
+    # токен Telegram-бота: `123456789:AA…` — без префикса, `\b` не годится
+    # (в `/bot123:` между `t` и `1` границы слова нет)
+    (re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}"), "<TG_TOKEN>"),
     # key = "значение" / password: значение — общий случай, ловит r2-ключи и пароли
     (re.compile(r"(?i)\b((?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret(?:[_-]?access[_-]?key)?"
                 r"|auth[_-]?token|password|passwd|client[_-]?secret)\s*[:=]\s*)"

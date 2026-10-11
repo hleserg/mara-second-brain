@@ -1104,8 +1104,12 @@ class Handler(BaseHTTPRequestHandler):
                     # занятость не дойдёт — считаем на месте
                     if база_занята(e):
                         счесть_занятость("http")
-                    print("correction %s: %s: %s" % (eid, type(e).__name__, e),
-                          flush=True)
+                    # текст исключения не печатаем: `OSError` несёт путь
+                    # карточки, а в нём — пересказ обязательства (§15.1)
+                    print("correction %s: %s%s" % (
+                        eid, type(e).__name__,
+                        " errno=%s" % e.errno if isinstance(e, OSError) else ""),
+                        flush=True)
                     applied = {"found": False,
                                "text": "не применил: %s" % type(e).__name__}
                 if applied.get("manifest_busy"):
@@ -1653,7 +1657,9 @@ def run_step(kind, event_id):
     finally:
         if gpu:
             GPU.release()
-    return r.returncode == 0, (r.stderr or "")[-500:]
+    # хвост stderr уходит в `jobs.last_error`, оттуда — в сверку и Telegram:
+    # без путей карточек и секретов (§15.1)
+    return r.returncode == 0, mi.обезличить((r.stderr or "")[-500:])
 
 
 def worker(stop, root):

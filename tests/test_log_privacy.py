@@ -1,0 +1,158 @@
+"""ТЗ §15.1, Т9.1: в журналах нет содержимого, номеров и токенов.
+
+Пути карточек несут имя или номер собеседника (`slug(contact)`) и пересказ
+обязательства (`slug(action)`), токен бота едет в адресе запроса. Каждый
+тест — один канал, по которому это уходило в журнал, `jobs.last_error`,
+сверку или Telegram. Значения вымышленные.
+"""
+import contextlib, http.client, io, os, subprocess, sys, tempfile, types
+import unittest, unittest.mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import mara_ingest as mi
+import redact
+import call_digest as cd
+import contextd
+import contextd_reconcile as rc
+import tdlib_ingest as ti
+
+ТОКЕН = "123456789:AAFakeFakeFakeFakeFakeFakeFakeFake12"
+КАРТОЧКА = "kb/conversations/2026-10-11-1405-anna-petrova.md"
+ОБЕЩАНИЕ = "kb/commitments/2026-10-11-prislat-smetu-olegu.md"
+
+
+class Обезличить(unittest.TestCase):
+    def test_токен_бота_ловится_и_в_адресе(self):
+        """`\\b` тут не годится: в `/bot123:` между `t` и `1` нет границы."""
+        s = "InvalidURL: '/bot%s/sendMessage'" % ТОКЕН
+        for rx, repl in redact.SECRETS:
+            s = rx.sub(repl, s)
+        self.assertNotIn(ТОКЕН, s)
+        self.assertIn("<TG_TOKEN>", s)
+
+    def test_путь_карточки_до_каталога(self):
+        s = mi.обезличить("PermissionError: [Errno 13] Permission denied: '%s'\n"
+                          "спор: %s, %s" % (КАРТОЧКА, ОБЕЩАНИЕ, КАРТОЧКА))
+        self.assertNotIn("anna-petrova", s)
+        self.assertNotIn("smetu", s)
+        self.assertIn("kb/conversations/…", s)
+        self.assertIn("kb/commitments/…", s)
+        self.assertIn("Permission denied", s, "причина остаётся")
+
+    def test_обычный_текст_не_трогается(self):
+        for s in ("telegram 400: chat not found", "таймаут часа на шаге asr", ""):
+            self.assertEqual(mi.обезличить(s), s)
+        self.assertEqual(mi.обезличить(None), "")
+
+
+class ХвостШага(unittest.TestCase):
+    def test_last_error_без_пути_и_токена(self):
+        """`run_step` — единственное место, откуда хвост stderr шага уходит в
+        `jobs.last_error`, а оттуда — в сверку и Telegram."""
+        хвост = "Traceback …\nOSError: [Errno 30] Read-only file system: '%s' %s" % (
+            КАРТОЧКА, ТОКЕН)
+        готово = subprocess.CompletedProcess([], 1, "", хвост)
+        with unittest.mock.patch.object(contextd.subprocess, "run", return_value=готово):
+            ok, err = contextd.run_step("project", "call_x")
+        self.assertFalse(ok)
+        self.assertNotIn("anna-petrova", err)
+        self.assertNotIn(ТОКЕН, err)
+        self.assertIn("Read-only file system", err)
+
+
+class Сверка(unittest.TestCase):
+    def setUp(self):
+        self.con = mi.connect(tempfile.mkdtemp())
+
+    def test_dlq_называет_причину_без_пути(self):
+        """Строки, легшие в `last_error` до обезличивания в `run_step`, ещё
+        несут путь; в сводку уходит последняя строка, обезличенная."""
+        eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                         "source_id": "d", "payload": {}})
+        self.con.execute(
+            "insert into jobs(id,event_id,kind,state,attempts,last_error,created,"
+            "updated) values('j',?,'project','dlq',6,?,?,?)",
+            (eid, "Traceback (most recent call last):\n  File …\n"
+                  "PermissionError: [Errno 13] Permission denied: '%s'\n" % ОБЕЩАНИЕ,
+             mi.now_iso(), mi.now_iso()))
+        f = rc.dlq(self.con)
+        self.assertEqual(len(f), 1)
+        self.assertNotIn("smetu", f[0]["detail"])
+        self.assertIn("PermissionError", f[0]["detail"], "причина — последняя строка")
+        self.assertNotIn("Traceback", f[0]["detail"])
+
+    def test_доложить_не_печатает_адрес_с_токеном(self):
+        def deliver(*a):
+            raise http.client.InvalidURL(
+                "URL can't contain control characters. '/bot%s  # бот'" % ТОКЕН)
+        with unittest.mock.patch.object(cd, "deliver", deliver), \
+                unittest.mock.patch.object(cd, "env", lambda: {}):
+            исход = rc.доложить([rc.находка("x", "warn", "что-то")])
+        self.assertEqual(исход, "failed: InvalidURL")
+
+
+class Дайджест(unittest.TestCase):
+    def test_кривой_токен_не_уходит_в_адрес(self):
+        """Хвостовой комментарий в env: раньше `urlopen` бросал `InvalidURL`
+        с токеном внутри, теперь до сети не доходит."""
+        err = io.StringIO()
+        with unittest.mock.patch.object(cd.urllib.request, "urlopen",
+                                        side_effect=AssertionError("сеть")), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(cd.deliver("текст", ТОКЕН + "  # бот", "123456789"),
+                             "no-transport")
+        self.assertNotIn(ТОКЕН, err.getvalue())
+        self.assertIn("не похож на токен", err.getvalue())
+
+
+class Правка(unittest.TestCase):
+    def test_ошибка_правки_без_пути_карточки(self):
+        """`OSError` из `apply_correction` несёт путь карточки обязательства."""
+        import json, threading, urllib.request
+        import call_project
+        каталог = tempfile.mkdtemp()
+        mi.ROOT = каталог
+        vault = tempfile.mkdtemp()
+        for под in (".git", "kb/commitments"):
+            os.makedirs(os.path.join(vault, под))
+        srv = contextd.make_server(каталог, port=0, vault=vault)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        con = mi.connect(каталог)
+        _, токен = contextd.pair(con, "телефон")
+
+        def apply_correction(*a, **kw):
+            raise PermissionError(13, "Permission denied", os.path.join(vault, ОБЕЩАНИЕ))
+        out = io.StringIO()
+        запрос = urllib.request.Request(
+            "http://127.0.0.1:%d/v1/ingest/event" % srv.server_address[1],
+            data=json.dumps({"kind": "correction", "source": "mara", "source_id": "п",
+                             "payload": {"item": "смета", "status": "done"}}).encode(),
+            headers={"Authorization": "Bearer " + токен,
+                     "Content-Type": "application/json"})
+        with unittest.mock.patch.object(call_project, "apply_correction", apply_correction), \
+                contextlib.redirect_stdout(out):
+            with urllib.request.urlopen(запрос, timeout=10) as r:
+                self.assertEqual(r.status, 200)
+        строки = [l for l in out.getvalue().splitlines() if l.startswith("correction ")]
+        self.assertEqual(len(строки), 1, out.getvalue())
+        self.assertIn("PermissionError errno=13", строки[0])
+        self.assertNotIn("smetu", out.getvalue())
+
+
+class Телеграм(unittest.TestCase):
+    def test_журнал_приёма_без_id_собеседника(self):
+        """`chat_id` личного чата — id собеседника; строка — на каждое сообщение."""
+        журнал = []
+        демон = types.SimpleNamespace(post=lambda ev: {"duplicate": False},
+                                      log=журнал.append, sleep=lambda s: None,
+                                      beat=lambda: None)
+        ti.Демон.send(демон, {"source_id": "424242/17"})
+        self.assertEqual(len(журнал), 1)
+        self.assertNotIn("424242", журнал[0])
+        self.assertTrue(журнал[0].endswith(" ok"), журнал[0])
+
+
+if __name__ == "__main__":
+    unittest.main()
