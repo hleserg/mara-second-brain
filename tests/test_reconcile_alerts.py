@@ -207,13 +207,20 @@ class ДемонНеОтвечает(unittest.TestCase):
         self.assertEqual((f[0]["check"], f[0]["level"]), ("демон-не-отвечает", "error"))
         self.assertIn("/healthz", f[0]["detail"])
 
-    def отвечает(self, код):
+    def отвечает(self, код, тело=b"", куда=None):
         import http.server
 
         class Плохой(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                if куда and self.path == "/healthz":
+                    self.send_response(302)
+                    self.send_header("Location", куда)
+                    self.end_headers()
+                    return
                 self.send_response(код)
+                self.send_header("Content-Length", str(len(тело)))
                 self.end_headers()
+                self.wfile.write(тело)
 
             def log_message(self, *a):
                 pass
@@ -233,6 +240,18 @@ class ДемонНеОтвечает(unittest.TestCase):
         f = self.отвечает(204)
         self.assertEqual(f[0]["check"], "демон-не-отвечает")
         self.assertIn("код 204", f[0]["detail"])
+
+    def test_редирект_и_чужой_200_это_error(self):
+        """Прокси шлёт `/healthz` на страницу входа, та отвечает 200 —
+        `urlopen` идёт по редиректу сам (Codex по #153, круг 3). И чужой
+        слушатель с 200 без `ok: true` — тоже не `contextd`."""
+        f = self.отвечает(200, b"<html>login</html>", куда="/login")
+        self.assertEqual(f[0]["check"], "демон-не-отвечает")
+        self.assertIn("перенаправлен", f[0]["detail"])
+        for тело in (b"<html>ok</html>", b'{"ok": false}', b'"ok"', b""):
+            f = self.отвечает(200, тело)
+            self.assertEqual(f[0]["check"], "демон-не-отвечает", тело)
+            self.assertIn("ответ не от contextd", f[0]["detail"])
 
     def test_кривой_адрес_не_выдаётся_за_лежащий_демон(self):
         # `http://` urllib отвергает `URLError`, а не `ValueError` (Codex по #153)

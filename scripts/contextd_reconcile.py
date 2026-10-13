@@ -901,13 +901,24 @@ def демон_не_отвечает(адрес):
         части = urllib.parse.urlsplit(адрес)
         if части.scheme not in ("http", "https") or not части.hostname:
             raise ValueError("нет схемы или хоста")
-        # не-2xx `urlopen` бросает сам (`HTTPError` — подкласс `OSError`), а
-        # иной 2xx (прокси, чужой слушатель: 204) — нет; живой `contextd`
-        # отвечает ровно 200 (Codex по #153)
+        # Живым считается ровно ответ самого `contextd`: 200 на тот же адрес и
+        # JSON с `ok: true` (`contextd.health`). `urlopen` бросает только на
+        # не-2xx, а иной 2xx (204) и редирект на страницу прокси с 200
+        # пропускает молча — тело и адрес ответа отсекают и то и другое
+        # (Codex по #153, круги 1 и 3)
         with urllib.request.urlopen(url, timeout=5) as r:
-            if r.status == 200:
-                return []
-            беда = "код %d" % r.status
+            if r.status != 200:
+                беда = "код %d" % r.status
+            elif r.geturl() != url:
+                беда = "перенаправлен"
+            else:
+                try:
+                    ответ = json.loads(r.read(4096) or b"null")
+                except ValueError:
+                    ответ = None
+                if isinstance(ответ, dict) and ответ.get("ok") is True:
+                    return []
+                беда = "ответ не от contextd"
     except ValueError as e:
         return [находка("демон-адрес-кривой", "warn",
                         "MARA_CONTEXT_URL не разобрать (%s) — живость contextd "
