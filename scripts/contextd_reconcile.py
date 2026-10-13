@@ -871,9 +871,12 @@ def телефон_молчит(con, hours=None):
         "order by d.name")]
     out = []
     for имя in имена:
+        # ни разу не выходивший токен (`pair` заводит его с пустым
+        # `last_seen`) стареет от `created`: перевыпуск даёт отсрочку на
+        # порог, а не глушит тревогу навсегда (Codex по #153, круг 5)
         возрасты = [_возраст(r[0]) for r in con.execute(
-            "select last_seen from devices where name = ? and revoked_at is null",
-            (имя,))]
+            "select coalesce(last_seen, created) from devices "
+            "where name = ? and revoked_at is null", (имя,))]
         возрасты = [в for в in возрасты if в is not None]
         if not возрасты or min(возрасты) <= hours * 3600:
             continue          # отозваны все или кто-то на связи

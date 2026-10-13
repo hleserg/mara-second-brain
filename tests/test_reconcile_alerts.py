@@ -167,6 +167,23 @@ class ТелефонМолчит(База):
         self.устройство("dev_2", "телефон", назад(hours=1).isoformat(timespec="seconds"))
         self.assertEqual(rc.телефон_молчит(self.con), [])
 
+    def test_новый_токен_ни_разу_не_вышедший_стареет_от_выпуска(self):
+        """`pair` заводит устройство с пустым `last_seen`. Старый токен
+        отозван, новый так и не вышел на связь — тревога через порог от
+        выпуска, а не тишина навсегда."""
+        self.устройство("dev_1", "телефон", назад(days=10).isoformat(timespec="seconds"),
+                        revoked=True)
+        self.событие("з1", device="dev_1")
+        self.con.execute("insert into devices(id, name, token_sha256, created) "
+                         "values('dev_2', 'телефон', 'h2', ?)",
+                         (назад(hours=60).isoformat(timespec="seconds"),))
+        f = rc.телефон_молчит(self.con)
+        self.assertEqual([x["device"] for x in f], ["телефон"])
+        # свежий выпуск — ещё отсрочка
+        self.con.execute("update devices set created=? where id='dev_2'",
+                         (назад(hours=2).isoformat(timespec="seconds"),))
+        self.assertEqual(rc.телефон_молчит(self.con), [])
+
     def test_время_а_не_строка(self):
         """1 ч назад в −12:00 лексически меньше, чем 60 ч назад в +14:00."""
         self.устройство("dev_1", "телефон", назад(hours=60).astimezone(
