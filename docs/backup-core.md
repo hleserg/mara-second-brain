@@ -562,8 +562,11 @@ tar -xzf /var/tmp/core.tar.gz -C /srv/mara-blobs
 scripts/core-backup.py --verify /srv/mara-blobs
 rm /srv/mara-blobs/manifest.json /var/tmp/core.tar.gz
 # Аудио из зеркала. `pipefail` и `-e` — чтобы не расшифровавшаяся копия
-# или пропавший `calls/` дали код не 0, а не утонули в статусе `while`.
-( set -eo pipefail; cd /mnt/backup/mara && find calls -name '*.gpg' | while read -r f; do
+# дала код не 0, а не утонула в статусе `while`. Каталога `calls/` нет —
+# в реестре нет живых записей: шаг 2 на чистой машине уже покраснел бы,
+# будь у какой-то строки копия потеряна, так что здесь пропускать нечего.
+( set -eo pipefail; cd /mnt/backup/mara; [ -d calls ] || exit 0
+  find calls -name '*.gpg' | while read -r f; do
     out="/srv/mara-blobs/${f%.gpg}"; mkdir -p "$(dirname "$out")"
     gpg --batch --quiet --pinentry-mode loopback \
         --passphrase-file ~/.config/mara/backup-pass -o "$out" -d "$f"

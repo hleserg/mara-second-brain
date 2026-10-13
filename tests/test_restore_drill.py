@@ -604,6 +604,42 @@ class ЗеркалоПотеряно(Сценарий):
         self.assertIn("файлов на диске нет ни у одной строки", s["err"])
 
 
+class РасшифровкаКопий(unittest.TestCase):
+    """Команда шага 3 «аудио из зеркала» сама по себе, на песочнице: пустой
+    реестр не оставляет `calls/` — это не ошибка (Codex по #155); битая
+    копия — ошибка, а не статус `while`."""
+
+    def setUp(self):
+        self.песок = os.path.realpath(tempfile.mkdtemp(prefix="mara-copies."))
+        self.addCleanup(shutil.rmtree, self.песок, True)
+        self.носитель = self.песок + "/mnt/backup/mara"
+        os.makedirs(self.носитель)
+        os.makedirs(self.песок + "/home/.config/mara")
+        with open(self.песок + "/home/.config/mara/backup-pass", "w") as fh:
+            fh.write(ФРАЗА)
+        команда, = [к for ш, к in ранбук() if ш == "3" and "find calls" in к]
+        self.команда = подставить(команда, self.песок)
+        self.assertEqual(вне_песочницы(self.команда, self.песок), [])
+
+    def пуск(self):
+        env = dict(os.environ, HOME=self.песок + "/home",
+                   GNUPGHOME=self.песок + "/home/.gnupg")
+        return subprocess.run(["bash", "-c", self.команда], cwd=КОРЕНЬ, env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_пустое_зеркало_не_ошибка(self):
+        r = self.пуск()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    @unittest.skipUnless(shutil.which("gpg"), "нет gpg")
+    def test_битая_копия_ошибка(self):
+        os.makedirs(self.носитель + "/calls/2026/09")
+        with open(self.носитель + "/calls/2026/09/aa.wav.gpg", "wb") as fh:
+            fh.write(b"not a gpg packet")
+        r = self.пуск()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+
+
 class ЗеркалоБезФайлов(unittest.TestCase):
     """`проверить_аудио` с файлом не у всех строк: копия есть — сверяется
     (это шаг 2 на чистой машине, тест выше); нет ни файла, ни копии на
