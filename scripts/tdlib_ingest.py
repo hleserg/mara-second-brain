@@ -259,7 +259,11 @@ class Демон:
                     return None
                 err = "%d" % e.code
             except Exception as e:
-                err = "%s: %s" % (type(e).__name__, e)
+                # строка уходит в journald раз в минуту, пока contextd молчит:
+                # `ValueError` заголовка с `\r` в токене (CRLF в tdlib.env)
+                # несёт токен целиком — слой 1 `redact` до печати (§15.1)
+                from vault_common import scrub
+                err = scrub("%s: %s" % (type(e).__name__, e))[:300]
             else:
                 self.log("%s %s" % (_метка(ev["source_id"]),
                                     "dup" if r.get("duplicate") else "ok"))

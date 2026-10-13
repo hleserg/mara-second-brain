@@ -168,10 +168,11 @@ def summary(vault, day, key=None, model=None, raw=False):
         except Exception as e:
             # Сводка обязана прийти. Не вышло по-человечески — шлём механику
             # и говорим почему, чтобы поломка не выглядела нормой.
-            # уходит в Telegram: класс и код, а не текст — в нём бывает
-            # заголовок с ключом или эхо запроса (§15.1)
-            text = plain(git, ses) + "\n\n(сводку своими словами собрать не вышло: %s%s)" % (
-                type(e).__name__, " %s" % e.code if getattr(e, "code", None) else "")
+            # уходит в Telegram: текст без секретов (слой 1 `redact`) — ключ
+            # бывает в заголовке `ValueError`; причина нужна владельцу
+            # (нет Presidio, модели spacy, DNS) — как `queue-worker.причина`
+            text = plain(git, ses) + "\n\n(сводку своими словами собрать не вышло: %s)" % (
+                vault_common.scrub("%s: %s" % (type(e).__name__, e))[:300])
     elif git or ses:
         text = plain(git, ses)
 

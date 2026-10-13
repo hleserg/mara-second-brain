@@ -117,6 +117,19 @@ def _в_истории(text, history):
     return False
 
 
+def _причина(e):
+    """Почему не дошли до doctor — без текста исключения: `ValueError`
+    заголовка (`Bearer <токен>\\r` из CRLF-файла) несёт токен целиком, а
+    строка уходит и в журнал Hermes, и модели — результатом инструмента
+    (§15.1). Код HTTP и причина сокета токена не несут и нужны для починки:
+    401 — токен, 5xx — doctor, отказ соединения — сеть."""
+    if isinstance(e, urllib.error.HTTPError):
+        return "HTTP %s" % e.code
+    if isinstance(e, urllib.error.URLError) and isinstance(e.reason, OSError):
+        return "%s: %s" % (type(e.reason).__name__, e.reason.strerror or type(e.reason).__name__)
+    return type(e).__name__
+
+
 class Брокер:
     """Что отдать в ход и как отправить правку. Ничего не знает про Hermes —
     поэтому проверяем без него."""
@@ -165,8 +178,7 @@ class Брокер:
                 # сбое: иначе лежащий doctor стоит 2 с на каждой реплике Мары,
                 # а так — одна попытка в TTL.
                 self._свежесть = time.monotonic()
-                # класс: текст `ValueError` заголовка несёт токен (§15.1)
-                log.warning("mara-context: не забрал пакет (%s)", type(e).__name__)
+                log.warning("mara-context: не забрал пакет (%s)", _причина(e))
                 return self._пакет
             self._свежесть = time.monotonic()
             self._пакет = data.get("now")
@@ -210,7 +222,7 @@ class Брокер:
                 msg = None
             return "doctor не принял правку: %s" % (msg or e.code)
         except Exception as e:
-            return "не дозвонился до doctor: %s" % e
+            return "не дозвонился до doctor: %s" % _причина(e)
         with self._lock:
             self._свежесть = None     # список изменился — следующий ход идёт за свежим
         if data.get("duplicate"):

@@ -258,7 +258,60 @@ class Хвосты(unittest.TestCase):
         self.assertNotIn("sk-or", s)
         self.assertTrue(s.startswith("ValueError: "), s)
 
-    def test_сводка_дня_без_текста_исключения(self):
+    def test_tdlib_contextd_молчит_без_токена(self):
+        """`send` повторяет без конца и пишет причину раз в минуту."""
+        журнал, раз = [], []
+
+        def post(ev):
+            if not раз:
+                раз.append(1)
+                raise ValueError("Invalid header value b'Bearer %s\\r'" % ("x" * 43))
+            return {"duplicate": False}
+        демон = types.SimpleNamespace(post=post, log=журнал.append,
+                                      sleep=lambda s: None, beat=lambda: None)
+        ti.Демон.send(демон, {"source_id": "1/2"})
+        self.assertIn("contextd не отвечает (ValueError: Invalid header value", журнал[0])
+        self.assertNotIn("x" * 43, журнал[0])
+
+    def плагин(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mara_context_privacy", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                 "..", "install", "mara-context", "__init__.py"))
+        м = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(м)
+        return м
+
+    def test_плагин_не_отдаёт_токен_модели_и_в_журнал(self):
+        """Ответ инструмента уходит модели (и в облако), предупреждение — в
+        журнал Hermes: в обоих ни текста `ValueError` с токеном, а код HTTP
+        и причина сокета остаются."""
+        import urllib.error
+        м = self.плагин()
+        секрет = "z" * 43
+
+        def падает(беда):
+            def open_url(*a, **kw):
+                raise беда
+            return open_url
+        заголовок = ValueError("Invalid header value b'Bearer %s\\r'" % секрет)
+        ответ = м.Брокер(token="t", open_url=падает(заголовок)).правка(
+            {"item": "дело", "status": "done"})
+        self.assertNotIn(секрет, ответ)
+        self.assertIn("ValueError", ответ)
+        отказ = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        ответ = м.Брокер(token="t", open_url=падает(отказ)).правка({"item": "дело"})
+        self.assertIn("ConnectionRefusedError: Connection refused", ответ)
+        with self.assertLogs(м.log, "WARNING") as лог:
+            м.Брокер(token="t", open_url=падает(заголовок)).контекст()
+        self.assertNotIn(секрет, "\n".join(лог.output))
+        self.assertIn("ValueError", "\n".join(лог.output))
+        with self.assertLogs(м.log, "WARNING") as лог:
+            м.Брокер(token="t", open_url=падает(urllib.error.HTTPError(
+                "u", 401, "Unauthorized", {}, None))).контекст()
+        self.assertIn("HTTP 401", "\n".join(лог.output))
+
+    def test_сводка_дня_без_ключа(self):
         """Сводка уходит в Telegram; `ValueError` заголовка несёт ключ."""
         import importlib.util
         путь = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
@@ -278,7 +331,8 @@ class Хвосты(unittest.TestCase):
                 unittest.mock.patch.object(redact, "redact", lambda t: (t, {})):
             текст = ds.summary("/нет", "2026-10-13", key="k")
         self.assertNotIn("sk-or", текст)
-        self.assertIn("не вышло: ValueError", текст)
+        self.assertIn("не вышло: ValueError: Invalid header value", текст,
+                      "причина остаётся, без ключа")
 
 
 if __name__ == "__main__":
