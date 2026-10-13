@@ -29,16 +29,21 @@ class Корпус(unittest.TestCase):
                     self.assertIn(k, с["recorded"])
 
     def test_золото_из_расшифровки(self):
-        """Ключ золота звучит в разговоре: разметка о сказанном, а не о
-        том, что хотелось бы услышать."""
+        """Ключ золота и имя «кто» звучат в разговоре: разметка о сказанном,
+        а модели, кроме расшифровки, ничего не дают."""
         for _, с in ee.случаи():
-            текст = " ".join(s["text"] for s in с["segments"]).lower()
+            текст = ee._текст(" ".join(s["text"] for s in с["segments"]))
             золото = с["gold"]
             ключи = ([з["ключ"] for k in ee.СПИСКИ for з in золото.get(k) or []]
                      + list(золото.get("не_задача") or []))
             for ключ in ключи:
                 for к in ключ:
-                    self.assertIn(к.lower(), текст, (с["id"], к))
+                    self.assertTrue(ee._есть(к, текст), (с["id"], к))
+            for k in ee.СПИСКИ:
+                for з in золото.get(k) or []:
+                    кто = з.get(ee.КТО[k])
+                    if кто:
+                        self.assertIn(ee._текст(кто), текст, (с["id"], кто))
 
     def test_без_контактов(self):
         """Г7 и §7.3: в корпусе нет номеров и адресов."""
@@ -80,7 +85,7 @@ class Счёт(unittest.TestCase):
         return d
 
     def test_точность_по_задачам(self):
-        с = self.случай(requests=[{"ключ": ["смет"]}], commitments=[{"ключ": ["звон"]}])
+        с = self.случай(requests=[{"ключ": ["смет"]}], commitments=[{"ключ": ["перезвон"]}])
         счёт = ee.оценить(с, {"requests": [self.пункт("прислать смету"),
                                            self.пункт("перезвонить"),
                                            self.пункт("покрасить")]})
@@ -91,29 +96,96 @@ class Счёт(unittest.TestCase):
 
     def test_кто_по_началу_строки(self):
         self.assertTrue(ee.тот_же("Анна", "анна петрова"))
+        self.assertTrue(ee.тот_же("Алёна", "Алена"))
         self.assertFalse(ee.тот_же("Анна", "Олег"))
         self.assertTrue(ee.тот_же("", "кто угодно"))
 
+    def test_ключ_с_начала_слова_ё_и_варианты(self):
+        узнаёт = lambda ключ, action: ee.узнаёт({"ключ": ключ}, {"action": action})
+        self.assertTrue(узнаёт(["счёт"], "оплатить счет"))
+        self.assertTrue(узнаёт(["чертеж"], "посмотреть чертёж"))
+        self.assertFalse(узнаёт(["счёт"], "сделать расчёт"))
+        self.assertFalse(узнаёт(["олег", "ключ"], "попросить Олега"))
+        self.assertTrue(узнаёт([["перезвон", "позвон"], "плитк"], "позвонить по плитке"))
+
+    def test_дубль_не_верно(self):
+        с = self.случай(requests=[{"ключ": ["смет"]}])
+        счёт = ee.оценить(с, {"requests": [self.пункт("прислать смету"),
+                                           self.пункт("скинуть смету")]})
+        self.assertEqual((счёт["верно"], счёт["лишнее"]), (1, 1))
+
+    def test_на_ревью_только_пунктом_ревью(self):
+        с = self.случай(requests=[{"ключ": ["смет"]}, {"ключ": ["смет", "ремонт"]}])
+        счёт = ee.оценить(с, {"requests": [self.пункт("прислать смету по ремонту")]})
+        self.assertEqual((счёт["верно"], счёт["на_ревью"], счёт["пропущено"]), (1, 0, 1))
+        счёт = ee.оценить(с, {"requests": [self.пункт("прислать смету по ремонту",
+                                                      confidence=0.7)]})
+        self.assertEqual((счёт["на_ревью"], счёт["пропущено"]), (2, 0))
+
+    def test_срок_null_сверяется_а_без_срока_нет(self):
+        пункт = self.пункт("прислать смету", deadline_phrase="до пятницы")
+        счёт = ee.оценить(self.случай(requests=[{"ключ": ["смет"], "due_at": None}]),
+                          {"requests": [пункт]})
+        self.assertEqual(счёт["срок_не_тот"], 1)
+        счёт = ee.оценить(self.случай(requests=[{"ключ": ["смет"]}]), {"requests": [пункт]})
+        self.assertEqual(счёт["срок_не_тот"], 0)
+
+    def test_ответ_не_объект(self):
+        with self.assertRaises(ValueError):
+            ee.оценить(self.случай(), [])
+
 
 class Живой(unittest.TestCase):
-    """`--live` без модели: подмена `спросить` отвечает записанным, и
-    `--record` переписывает корпус тем же счётом и именем модели."""
+    """`--live` без модели: подмена `спросить` отвечает записанным. `--record`
+    кладёт ответ в `живой`, синтетику не трогает; при ошибке хоть на одном
+    случае не пишет ничего."""
 
-    def test_запись_корпуса(self):
+    def setUp(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        каталог = os.path.join(tmp, "corpus")
-        shutil.copytree(ee.КОРПУС, каталог)
-        ответы = {ce.transcript_text(с["segments"]): с["recorded"]["response"]
-                  for _, с in ee.случаи(каталог)}
+        self.каталог = os.path.join(tmp, "corpus")
+        shutil.copytree(ee.КОРПУС, self.каталог)
+        self.ответы = {ce.transcript_text(с["segments"]): с["recorded"]["response"]
+                       for _, с in ee.случаи(self.каталог)}
+
+    def снимок(self):
+        return {п: open(п, encoding="utf-8").read() for п, _ in ee.случаи(self.каталог)}
+
+    def test_запись_рядом_с_синтетикой(self):
+        было = self.снимок()
         with contextlib.redirect_stdout(io.StringIO()):
-            сумма = ee.live(каталог, записать=True, спросить=ответы.__getitem__)
-        было, _ = ee.replay()
-        self.assertEqual(сумма, было)
-        for _, с in ee.случаи(каталог):
-            self.assertEqual(с["recorded"]["model"], ce.MODEL)
-            self.assertEqual(с["recorded"]["prompt_version"], ce.PROMPT_VERSION)
-        self.assertEqual(ee.replay(каталог)[1], [])
+            сумма = ee.live(self.каталог, записать=True, спросить=self.ответы.__getitem__)
+        синтетика, _ = ee.replay()
+        self.assertEqual(сумма, dict(синтетика, ошибка=0))
+        for путь, с in ee.случаи(self.каталог):
+            self.assertEqual(с["живой"]["model"], ce.MODEL)
+            self.assertEqual(с["живой"]["prompt_version"], ce.PROMPT_VERSION)
+            исходный = json.loads(было[путь])
+            self.assertEqual(с["recorded"], исходный["recorded"], "синтетика тронута")
+        self.assertEqual(ee.replay(self.каталог)[1], [])
+        self.assertEqual(ee.replay(self.каталог, "живой")[1], [])
+
+    def test_без_record_не_пишет(self):
+        было = self.снимок()
+        with contextlib.redirect_stdout(io.StringIO()):
+            ee.live(self.каталог, записать=False, спросить=self.ответы.__getitem__)
+        self.assertEqual(self.снимок(), было)
+
+    def test_ошибка_на_случае_не_пишет_ничего(self):
+        было = self.снимок()
+        четвёртый = ce.transcript_text(ee.случаи(self.каталог)[3][1]["segments"])
+
+        def спросить(текст):
+            if текст == четвёртый:
+                raise OSError("модель недоступна")
+            return self.ответы[текст]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            сумма = ee.live(self.каталог, записать=True, спросить=спросить)
+        self.assertEqual(сумма["ошибка"], 1)
+        self.assertIn("ошибка: OSError", out.getvalue())
+        self.assertIn("корпус не записан", err.getvalue())
+        self.assertEqual(self.снимок(), было)
 
 
 class Команда(unittest.TestCase):
