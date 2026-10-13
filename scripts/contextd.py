@@ -79,7 +79,8 @@ MAX_JSON = 1 << 20
 ТИШИНА = 2.0
 NEXT = {"asr": "extract", "extract": "project", "project": "digest"}
 STEP = {"asr": "call_asr.py", "extract": "call_extract.py",
-        "project": "call_project.py", "digest": "call_digest.py"}
+        "project": "call_project.py", "digest": "call_digest.py",
+        "nudge": "message_nudge.py"}
 # ponytail: один семафор на все GPU-работы. На bigpc свободно меньше шести
 # гигабайт VRAM: параллельный ASR вытеснит whisper, и обе работы поедут
 # медленнее, чем одна. Появится вторая карта — станет Semaphore(2).
@@ -1097,6 +1098,8 @@ class Handler(BaseHTTPRequestHandler):
                         if ждать:
                             raise _ПравокМного(ждать)
                     eid, dup = mi.put_event(con, data)
+                    if kind == "message" and not dup:
+                        напомнить(con, eid, data)
                     need = need_blob(con, self.server.root, eid,
                                      (data.get("blob") or {}).get("sha256"))
                     ответ = {"event_id": eid, "duplicate": dup, "need_blob": need,
@@ -1611,6 +1614,19 @@ def bootstrap(con, vault=None):
             "queue": con.execute(
                 "select count(*) from jobs where state='ready'").fetchone()[0],
             "pipeline_version": mi.PIPELINE_VERSION}
+
+
+def напомнить(con, eid, data):
+    """Т-У.4: первое за день свежее сообщение человека ставит шаг `nudge`
+    (`message_nudge.завести`). Внутри транзакции приёма: два сообщения
+    одного отправителя разом не заведут два напоминания. Сбой здесь приём не
+    роняет — сообщение важнее напоминания о нём; в лог — только класс:
+    текст исключения может нести подпись отправителя (§15.1)."""
+    import message_nudge
+    try:
+        message_nudge.завести(con, eid, data)
+    except Exception as e:
+        print("напоминание %s: %s" % (eid, type(e).__name__), flush=True)
 
 
 def bind_default():
