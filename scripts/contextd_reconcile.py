@@ -695,7 +695,7 @@ def дайджест_не_доставлен(con):
     лежат до починки, и первая же суточная сводка после неё их назовёт."""
     rows = con.execute("select event_id, state from digests "
                        "where state in ('no-transport','not-private') "
-                       "order by sent_at").fetchall()
+                       "order by %s" % mi.секунды("sent_at")).fetchall()
     if not rows:
         return []
     без = sum(1 for r in rows if r["state"] == "no-transport")
@@ -735,7 +735,7 @@ def дайджест_догрузка(con, окно_ч=48):
     Это сообщение о событии («приехала догрузка»), а не о поломке."""
     rows = [r for r in con.execute(
         "select event_id, sent_at from digests where state='stale' "
-        "order by sent_at").fetchall()
+        "order by %s" % mi.секунды("sent_at")).fetchall()
         if (_возраст(r["sent_at"]) or 0) <= окно_ч * 3600]
     if not rows:
         return []
@@ -757,7 +757,7 @@ def dlq(con):
     if not n:
         return []
     row = con.execute("select kind, last_error from jobs where state='dlq' "
-                      "order by updated desc limit 1").fetchone()
+                      "order by %s desc limit 1" % mi.секунды("updated")).fetchone()
     # Причина — последняя строка хвоста (у трейсбека это само исключение), а
     # не срез из его середины, и обезличенная: строки, легшие до
     # `mi.обезличить` в `run_step`, ещё могут нести путь карточки (§15.1)

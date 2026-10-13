@@ -145,8 +145,8 @@ def записать_сегменты(con, event_id, blob_sha256, segs, движ
 def сегменты_события(con, event_id):
     """Сегменты последней расшифровки события: `(transcript_id, {seq: row})`.
     Нет расшифровки — `(None, {})`."""
-    t = con.execute("select id from transcripts where event_id=? order by created desc, "
-                    "id desc limit 1", (event_id,)).fetchone()
+    t = con.execute("select id from transcripts where event_id=? order by %s desc, "
+                    "id desc limit 1" % mi.секунды("created"), (event_id,)).fetchone()
     if not t:
         return None, {}
     rows = con.execute("select * from transcript_segments where transcript_id=? "

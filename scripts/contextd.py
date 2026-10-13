@@ -481,8 +481,9 @@ def metrics(con, root=None, vault=None):
     last = con.execute("select received from events "
                        "order by received_utc desc limit 1").fetchone()
     lag = age_of(last[0] if last else None, 0)
+    # и здесь по времени: `last_seen` пишет `now_iso()` со сдвигом пояса
     seen = con.execute("select last_seen from devices where revoked_at is null "
-                       "order by last_seen desc limit 1").fetchone()
+                       "order by %s desc limit 1" % mi.секунды("last_seen")).fetchone()
     mobile = age_of(seen[0] if seen else None)
     pack_age, pack_bytes = pack_stat(vault)
     # Снимок под замком: словарь правят рабочие потоки, а мы его обходим.
@@ -497,9 +498,12 @@ def metrics(con, root=None, vault=None):
     # строки с одинаковым набором меток это не шум, а сломанная экспозиция:
     # скрейп её либо отвергает, либо молча берёт одну из строк. Свежесть берём
     # самую новую: имя молчит ровно тогда, когда молчат все его устройства.
-    devices = [(n, age_of(t)) for n, t in con.execute(
-        "select name, max(last_seen) from devices where revoked_at is null "
-        "group by name order by name")]
+    # Самую новую по времени: `max()` по строке врёт после смены пояса, а
+    # голый `last_seen` рядом с `max()` SQLite берёт из той же строки, где
+    # максимум.
+    devices = [(n, age_of(t)) for n, t, _ in con.execute(
+        "select name, last_seen, max(%s) from devices where revoked_at is null "
+        "group by name order by name" % mi.секунды("last_seen"))]
     # Старейшая ждущая работа — по времени, а не по строке: `strftime('%s')`
     # сдвиг учитывает, `min()` по строкам `created` — нет
     старейшая = q("select min(cast(strftime('%s', created) as integer)) "
@@ -1574,8 +1578,8 @@ def bootstrap(con, vault=None):
     попыток в DLQ, о которой говорит `dlq()`. Обе находки — в сводке
     8:00."""
     row = con.execute("select id,event_id,text,items_json,sent_at from digests "
-                      "where state='sent' order by sent_at desc "
-                      "limit 1").fetchone()
+                      "where state='sent' order by %s desc "
+                      "limit 1" % mi.секунды("sent_at")).fetchone()
     return {"now": now_pack(vault),
             "last_digest": dict(row) if row else None,
             "queue": con.execute(

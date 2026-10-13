@@ -16,7 +16,7 @@
     python3 scripts/call_digest.py --event call_<uuid>
     python3 scripts/call_digest.py --self-check
 """
-import os, re, sys, json, uuid, argparse, datetime, urllib.parse, urllib.request
+import os, re, sys, json, time, uuid, argparse, datetime, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -284,9 +284,8 @@ def run(event_id, root=None, env_file=None):
         # аренду и пересоберёт.
         летит = con.execute(
             "select 1 from outbox where kind=? and object_id=? and state='sending' "
-            "and last_attempt >= ?", (ВИД, event_id, (
-                datetime.datetime.now(mi.TZ) - datetime.timedelta(
-                    seconds=mi.АРЕНДА_OUTBOX_С)).isoformat(timespec="seconds"))).fetchone()
+            "and %s >= ?" % mi.секунды("last_attempt"),
+            (ВИД, event_id, int(time.time()) - mi.АРЕНДА_OUTBOX_С)).fetchone()
         if летит:
             raise RuntimeError("дайджест %s сейчас шлёт другой процесс — ретрай после "
                                "аренды" % event_id)

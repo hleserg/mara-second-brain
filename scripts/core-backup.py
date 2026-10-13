@@ -36,7 +36,7 @@ denylisted из Git, R2 и бэкапов. Восстановление ядра
 """
 import os, sys, json, glob, time, shutil, hashlib, sqlite3, tarfile
 import argparse, tempfile, subprocess, io, contextlib, socket, fcntl
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 import mara_ingest as mi
@@ -620,9 +620,22 @@ def строки_блобов(db):
     try:
         return [{"sha256": r["sha256"], "path": r["path"], "created": r["created"] or ""}
                 for r in con.execute("select sha256, path, created from blobs "
-                                     "where purged_at is null order by created desc")]
+                                     "where purged_at is null order by %s desc"
+                                     % mi.секунды("created"))]
     finally:
         con.close()
+
+
+def _секунды(iso):
+    """Метка ISO в секундах эпохи, как `mi.секунды` в SQL: сдвиг учтён, без
+    сдвига — UTC, нечитаемая или пустая — 0 (в начало витка)."""
+    try:
+        t = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return 0
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return int(t.timestamp())
 
 
 def проверить_аудио(db, root, target, пароль, кроме=(), курсор=None, строки=None):
@@ -707,7 +720,11 @@ def проверить_аудио(db, root, target, пароль, кроме=(),
         raise RuntimeError("проверка: аудио %s нет в зеркале%s"
                            % (нет[0], ", и ещё %d" % (len(нет) - 1) if len(нет) > 1 else ""))
     свежие = строки[:ПРОБА]
-    ключ = lambda r: (r.get("created") or "", r["sha256"])
+    # Ключ витка — время, а не строка `created` (Т2.1б): после смены
+    # `MARA_TZ_HOURS` новая строка со старым сдвигом лексически встала бы
+    # перед курсором и ждала следующего витка. Курсор в файле — та же
+    # строка, разбирается тем же `_секунды`, так что старый файл читается.
+    ключ = lambda r: (_секунды(r.get("created")), r["sha256"])
     старые = sorted(строки[ПРОБА:], key=ключ)
     круг = []
     if старые:
@@ -727,15 +744,19 @@ def проверить_аудио(db, root, target, пароль, кроме=(),
             # битое значение — не словарь или не строки внутри — равно
             # отсутствующему: виток с начала, а не падение ночи (Codex, круг 5)
             if not isinstance(d, dict):
-                return ("", "")
-            return tuple(v if isinstance(v, str) else ""
-                         for v in (d.get("created"), d.get("sha256")))
-        последний, конец = как_ключ(посл.get("cursor")), как_ключ(посл.get("end"))
+                return (0, "")
+            created, sha = d.get("created"), d.get("sha256")
+            return (_секунды(created if isinstance(created, str) else None),
+                    sha if isinstance(sha, str) else "")
+        граница = посл.get("end")
+        последний, конец = как_ключ(посл.get("cursor")), как_ключ(граница)
         # очередь текущего витка: за курсором и не дальше границы; граница
-        # пройдена или не задана — новый виток с начала и с новой границей
+        # пройдена или не задана — новый виток с начала и с новой границей.
+        # В файл граница пишется исходной строкой, а не ключом: ключ —
+        # секунды, и строкой его не прочесть обратно.
         очередь = [r for r in старые if последний < ключ(r) <= конец]
         if not очередь:
-            конец = ключ(старые[-1])
+            граница = старые[-1]
             очередь = старые
         круг = очередь[:ПРОБА_СТАРЫХ]
     for r in свежие + круг:
@@ -756,7 +777,8 @@ def проверить_аудио(db, root, target, пароль, кроме=(),
         # оставляет курсор на месте, и та же тройка перечитывается снова.
         состояние[target] = {"cursor": {"created": круг[-1].get("created") or "",
                                         "sha256": круг[-1]["sha256"]},
-                             "end": {"created": конец[0], "sha256": конец[1]}}
+                             "end": {"created": граница.get("created") or "",
+                                     "sha256": граница.get("sha256") or ""}}
         mi.write_json(курсор, состояние)
     итог = {"аудио_сверено": len(свежие), "аудио_перечитано": len(круг),
             "зеркало_проверено": len(строки)}
