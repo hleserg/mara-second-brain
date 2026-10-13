@@ -610,7 +610,9 @@ MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --into /var/tmp/vaul
 # перенос не дошёл до конца, повторить его.
 MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_manifest.py --check --vault /srv/vault
 # Сверка приёма: манифесты ↔ блобы, расшифровки, извлечения, индекс, пакет.
-MARA_BLOBS=/srv/mara-blobs python3 scripts/contextd_reconcile.py
+# Живость демона — без неё: contextd остановлен с шага 1 до шага 9, и
+# `демон-не-отвечает` здесь ждана, а не поломка.
+MARA_BLOBS=/srv/mara-blobs python3 scripts/contextd_reconcile.py --daemon-url ""
 
 # 9. Безопасный возврат сервиса: заново войти в Telegram и Gmail (их
 #    состояние не бэкапится, см. выше), поднять демоны, вернуть crontab
