@@ -567,7 +567,7 @@ def _возраст(iso):
 def источник_замолчал(con, days=3, fresh_hours=24):
     """Источник с телефона раньше слал, три дня молчит, а телефон на связи —
     слушатель умер, разрешение сняли или Huawei вычистил фон. Телефон сам не
-    на связи — не находка: это mara_mobile_last_seen_seconds, чинится не тут.
+    на связи — не находка здесь: это `телефон_молчит`.
     Ни разу не слал — тоже не находка: источник ещё не подключали.
     Считается по каждому устройству отдельно: свежий экспорт через импортёр
     не должен прикрывать умерший слушатель на телефоне, а сам экспорт — не
@@ -765,6 +765,118 @@ def dlq(con):
     причина = mi.обезличить(строки[-1].strip() if строки else "")[:120]
     return [находка("работы-в-dlq", "warn", "в DLQ работ: %d, последняя %s — %s"
                     % (n, row["kind"], причина), count=n)]
+
+
+# Т9.1, тревоги. Числа в `/metrics` были, читателя у них не было:
+# `mara_whatsapp_lag_seconds` = −1 три недели заметили руками (§7 аудита).
+# Читатель — эта сверка: она уже ходит в Telegram, и состояние ей не нужно —
+# всё ниже спрашивается у базы или у демона в момент прогона. Пороги — из
+# окружения, умолчания с запасом: ложная тревога каждый час учит не читать.
+#
+# Очередь: лестница ретраев `RETRY` до DLQ — около 14,6 ч, ASR — до часа;
+# работа старше 16 ч в `ready` значит, что её никто не берёт.
+ОЧЕРЕДЬ_Ч = _порог("MARA_QUEUE_STUCK_HOURS", 16)
+# Телефон выходит на связь, когда ему есть что сдать (`SyncWorker` раз в
+# 15 мин, но запрос — только с событием), так что тихие сутки — не тревога
+ТЕЛЕФОН_Ч = _порог("MARA_PHONE_SILENT_HOURS", 48)
+# окно брошенных попыток — сутки: находка снимается сама, если не повторялось
+БРОШЕНО_Ч = 24
+ДЕМОН = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
+
+
+def очередь_стоит(con, hours=None):
+    """Работа ждёт в `ready` дольше порога — воркер её не берёт: демон лежит,
+    поток воркера встал, или шаг раз за разом падает и ждёт ретрая. Глубина
+    очереди этого не видит (десять свежих работ и одна суточная выглядят
+    одинаково), DLQ — тоже: до него без воркера не дойдёт никогда."""
+    hours = ОЧЕРЕДЬ_Ч if hours is None else hours
+    сейчас = int(time.time())
+    # время — по `strftime('%s')`: сдвиги в `created` бывают разные (Т2.1б)
+    rows = con.execute("select kind, count(*) as n, "
+                       "min(cast(strftime('%s', created) as integer)) as t "
+                       "from jobs where state='ready' group by kind "
+                       "order by kind").fetchall()
+    старые = [(r["kind"], r["n"], сейчас - r["t"]) for r in rows
+              if r["t"] is not None and сейчас - r["t"] > hours * 3600]
+    if not старые:
+        return []
+    return [находка("очередь-стоит", "warn",
+                    "работы ждут дольше %d ч: %s — воркер не берёт (демон, "
+                    "поток воркера) или шаг падает раз за разом; "
+                    "`journalctl -u contextd`, `/v1/jobs` с петли"
+                    % (hours, ", ".join("%s — %d, старейшей %d ч"
+                                        % (k, n, возраст // 3600)
+                                        for k, n, возраст in старые)),
+                    count=sum(n for _, n, _ in старые))]
+
+
+def шаги_брошены(con, hours=БРОШЕНО_Ч):
+    """Попытка шага закрыта `lease_expired` — итог не записан: воркер умер
+    посреди шага (рестарт демона, OOM) или упёрся в занятую базу, закрывая
+    работу. Работа при этом повторится сама, но час GPU ушёл впустую, и
+    повторяющееся — поломка, а не случай."""
+    с = int(time.time()) - int(hours * 3600)
+    rows = con.execute("select j.kind, count(*) as n from job_attempts a "
+                       "join jobs j on j.id = a.job_id "
+                       "where a.outcome = 'lease_expired' "
+                       "and cast(strftime('%s', a.started) as integer) >= ? "
+                       "group by j.kind order by j.kind", (с,)).fetchall()
+    if not rows:
+        return []
+    return [находка("шаги-брошены", "warn",
+                    "за %d ч брошено попыток: %s — воркер умирал посреди шага "
+                    "или база была занята при закрытии; `journalctl -u contextd`"
+                    % (hours, ", ".join("%s %d" % (r["kind"], r["n"]) for r in rows)),
+                    count=sum(r["n"] for r in rows))]
+
+
+def телефон_молчит(con, hours=None):
+    """Устройство, которое сдаёт звонки, SMS или WhatsApp, давно не выходило
+    на связь: разряжен, нет сети, приложение выгружено, токен отозван.
+    `источник_замолчал` такой телефон сознательно пропускает — молчит не
+    слушатель, а сам телефон, — и до этой проверки не говорил о нём никто.
+
+    Телефон — по тому, что он сдавал, а не по имени: имя устройства задаёт
+    человек. Импорт WhatsApp (`via: export`) телефоном не считается — он
+    приходит раз в месяц руками."""
+    hours = ТЕЛЕФОН_Ч if hours is None else hours
+    rows = con.execute(
+        "select d.name, max(d.last_seen) as last_seen from devices d "
+        "where d.revoked_at is null and exists (select 1 from events e "
+        "where e.device_id = d.id and e.source in ('phone', 'sms', 'whatsapp') "
+        "and coalesce(case when json_valid(e.payload_json) then "
+        "json_extract(e.payload_json, '$.via') end, '') <> 'export') "
+        "group by d.name order by d.name").fetchall()
+    out = []
+    for r in rows:
+        возраст = _возраст(r["last_seen"])
+        if возраст is None or возраст <= hours * 3600:
+            continue
+        out.append(находка("телефон-молчит", "warn",
+                           "%s не выходил на связь %d ч: разряжен, нет сети, "
+                           "приложение выгружено или токен отозван — звонки и "
+                           "сообщения копятся в его очереди" % (r["name"], возраст // 3600),
+                           device=r["name"]))
+    return out
+
+
+def демон_не_отвечает(адрес):
+    """`contextd` не отвечает на петле — телефон не может сдать ни событие, ни
+    запись, а очередь не движется. Зовётся из крона (`main`), а не из
+    `run()`: тестам и самопроверке демон не нужен. Без адреса — молчим."""
+    if not адрес:
+        return []
+    import urllib.request
+    try:
+        # не-2xx `urlopen` бросает сам (`HTTPError` — подкласс `OSError`)
+        urllib.request.urlopen(адрес.rstrip("/") + "/healthz", timeout=5).close()
+        return []
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        беда = type(e).__name__
+    return [находка("демон-не-отвечает", "error",
+                    "contextd не отвечает на %s/healthz (%s) — телефон не "
+                    "сдаёт записи; `systemctl status contextd`"
+                    % (адрес.rstrip("/"), беда))]
 
 
 # §5.1 ТЗ просит `quick_check` по расписанию и слежку за WAL. Порог WAL в
@@ -1039,6 +1151,9 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += _застава("дайджест", дайджест_не_доставлен, con)
     out += _застава("догрузка", дайджест_догрузка, con)
     out += _застава("dlq", dlq, con)
+    out += _застава("очередь", очередь_стоит, con)
+    out += _застава("попытки", шаги_брошены, con)
+    out += _застава("телефон", телефон_молчит, con)
     out += _застава("бэкап", бэкап_ядра, targets, root=root)
     out += _застава("снимок", снимок_реестра_устарел, root)
     return out
@@ -1162,6 +1277,8 @@ def main():
     ap.add_argument("--json", action="store_true", dest="as_json")
     ap.add_argument("--telegram", action="store_true",
                     help="доложить владельцу о реальных проблемах; нет их — молчать")
+    ap.add_argument("--daemon-url", default=ДЕМОН,
+                    help="адрес contextd для проверки живости; пустой — не проверять")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args()
     if a.self_check:
@@ -1170,6 +1287,8 @@ def main():
     con, находки = открыть_реестр(a.root)
     if con is not None:
         находки = run(con, a.root, a.vault, a.bm_db)
+    # и при нечитаемой базе: лежащий демон — первое, что стоит проверить
+    находки += _застава("демон", демон_не_отвечает, a.daemon_url)
     if a.as_json:
         print(json.dumps(находки, ensure_ascii=False, indent=2))
     elif not находки:
