@@ -125,6 +125,19 @@ class Очередь(_База):
         н, = cr.dlq(self.con)
         self.assertIn("последняя asr", н["detail"])
 
+    def test_outbox_без_метки_аренды_берётся(self):
+        """`sending` без `last_attempt` (правка руками, импорт) — истёкшая
+        аренда: выборка её берёт, и захват `last_attempt is ?` тоже (с `=`
+        NULL не равен ничему, и строка висела бы вечно; Codex по #156)."""
+        self.con.execute("insert into outbox(id,kind,payload_json,created,state) "
+                         "values('o_n','telegram','{\"id\": \"o_n\"}',?, 'sending')",
+                         (mi.now_iso(),))
+        отправлено = []
+        mi.из_outbox(self.con, lambda kind, p: отправлено.append(p["id"]) or "sent")
+        self.assertEqual(отправлено, ["o_n"])
+        self.assertEqual(self.con.execute("select state from outbox where id='o_n'")
+                         .fetchone()[0], "sent")
+
     def test_outbox_по_порядку_создания(self):
         рано, поздно = метки()
         for oid, когда in (("o_a", поздно), ("o_b", рано)):

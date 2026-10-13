@@ -1105,7 +1105,7 @@ def из_outbox(con, отправить, kind=None, object_id=None, ид=None, l
         когда = now_iso()
         взял = con.execute(
             "update outbox set state='sending', attempts=attempts+1, last_attempt=? "
-            "where id=? and (state='pending' or (state='sending' and last_attempt=?))",
+            "where id=? and (state='pending' or (state='sending' and last_attempt is ?))",
             (когда, r["id"], r["last_attempt"])).rowcount
         if not взял:
             continue
