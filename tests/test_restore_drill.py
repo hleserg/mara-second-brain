@@ -150,11 +150,20 @@ def звонок(root, vault, source_id, когда, кто, текст, пун�
 class Сценарий(unittest.TestCase):
     """Подготовка, бэкап, смерть диска и прогон ранбука; тестов своих нет."""
 
+    # Коды, которые ранбук называет сам; любая другая команда шагов 2–8
+    # обязана дать 0. Ключ — шаг и кусок текста команды. `[ -e … ] && mv` на
+    # чистой машине — 1: убирать нечего.
+    КОДЫ = {("3", "[ -e /srv/mara-blobs ]"): 1, ("3", "[ -e /srv/vault ]"): 1,
+            ("5–8", "vault_rebuild.py --check"): 1, ("5–8", "vault_rebuild.py --into"): 1}
+    ШАГИ = None          # какие шаги гонять; None — все 2–8
+
     @classmethod
     def setUpClass(cls):
         if cls is Сценарий:
             raise unittest.SkipTest("основа сценариев")
         cls.песок = os.path.realpath(tempfile.mkdtemp(prefix="mara-drill."))
+        # упавший посреди `setUpClass` до `tearDownClass` не доходит
+        cls.addClassCleanup(shutil.rmtree, cls.песок, True)
         п = cls.песок
         cls.root = п + "/srv/mara-blobs"
         cls.vault = п + "/srv/vault"
@@ -169,10 +178,6 @@ class Сценарий(unittest.TestCase):
         cls.бэкап()
         cls.смерть_диска()
         cls.шаги = cls.пройти_ранбук()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.песок, ignore_errors=True)
 
     # --- подготовка ---------------------------------------------------------
 
@@ -193,6 +198,8 @@ class Сценарий(unittest.TestCase):
             "HOME": cls.home, "MARA_BLOBS": cls.root, "VAULT": cls.vault,
             "MARA_VAULT": cls.vault, "MARA_CORE_TARGETS": cls.носитель,
             "MARA_BACKUP_ALLOW_SAME_DEV": "1",
+            # место на диске машины теста — не предмет учения (`база_цела`)
+            "MARA_FREE_MIN_GIB": "0",
             "MARA_ENV_FILE": "/nonexistent/mara-env",
             "MARA_CONTEXTD_ENV": "/nonexistent/mara-contextd-env",
             "GIT_CONFIG_NOSYSTEM": "1"})
@@ -279,6 +286,8 @@ class Сценарий(unittest.TestCase):
         for шаг, команда in ранбук():
             if шаг is None or шаг.split("–")[0].rstrip("а") in ПРОПУСК:
                 continue
+            if cls.ШАГИ is not None and шаг not in cls.ШАГИ:
+                continue
             своя = подставить(команда, cls.песок)
             чужие = вне_песочницы(своя, cls.песок)
             if чужие:
@@ -318,7 +327,25 @@ class Сценарий(unittest.TestCase):
                          % (проекций, проекций))
 
 
-class Учение(Сценарий):
+class КодыКоманд:
+    """Каждая команда — с кодом из `КОДЫ`, остальные — 0. Без этого новая
+    или поломанная команда, которую ни один тест не ищет, проходила бы
+    молча. Строка таблицы, которая ни к чему не подошла, — тоже ошибка:
+    таблица гниёт вместе с ранбуком."""
+
+    def test_код_каждой_команды(self):
+        for s in self.шаги:
+            ждём = [к for (шаг, кусок), к in self.КОДЫ.items()
+                    if шаг == s["шаг"] and кусок in s["команда"]]
+            self.assertLessEqual(len(ждём), 1, s["команда"])
+            self.код(s, ждём[0] if ждём else 0)
+        for шаг, кусок in self.КОДЫ:
+            self.assertTrue(any(s["шаг"] == шаг and кусок in s["команда"]
+                                for s in self.шаги),
+                            "в таблице кодов строка без команды: %s %r" % (шаг, кусок))
+
+
+class Учение(КодыКоманд, Сценарий):
     """Бандл свежее архива на правку рукой и карточку рукой: шаги 2–8
     ранбука проходят с теми кодами, что ранбук обещает."""
 
@@ -389,7 +416,9 @@ class Учение(Сценарий):
 
     def test_шаг3_аудио_из_зеркала(self):
         self.код(self.найти("3", "rm /srv/mara-blobs/manifest.json"), 0)
-        self.код(self.найти("3", "find calls"), 0)
+        аудио = self.найти("3", "find calls")
+        self.код(аудио, 0)
+        self.assertEqual(аудио["err"], "", "расшифровка копий жалуется")
         self.assertFalse(os.path.exists(os.path.join(self.root, "manifest.json")))
         self.assertFalse(os.path.exists(self.песок + "/var/tmp/core.tar.gz"))
         self.assertEqual(sha(self.blob), self.sha, "аудио расшифровалось не тем")
@@ -492,12 +521,15 @@ class Учение(Сценарий):
                         s["out"])
 
 
-class ПотерянныйЗвонок(Сценарий):
+class ПотерянныйЗвонок(КодыКоманд, Сценарий):
     """Бандл свежее архива на целый звонок: Олег позвонил после ночного
     архива ядра, карточки звонка легли в волт и уехали в бандл, а событие,
     расшифровка, извлечение и аудио — только в живой корень, умерший с
     диском. Это потеря в пределах RPO, и ранбук должен её назвать, а не
     выдать за поломку разворачивания."""
+
+    КОДЫ = {**Сценарий.КОДЫ, ("3а", "vault_manifest.py --check"): 1,
+            ("5–8", "restore_check.py"): 1}
 
     @classmethod
     def после_архива(cls):
@@ -552,27 +584,70 @@ class ПотерянныйЗвонок(Сценарий):
 
 
 
-class ЗеркалоБезФайлов(unittest.TestCase):
-    """`проверить_аудио` без файлов на диске: копия есть — сверяется (это
-    шаг 2 на чистой машине, тест выше); нет ни файла, ни копии — проверить
-    нечем, и строка называется в итоге, а не исчезает молча."""
+class ЗеркалоПотеряно(Сценарий):
+    """Ревью репетиции: зеркало аудио на носителе пропало целиком. На чистой
+    машине копия — единственный экземпляр записи, и шаг 2 обязан быть
+    красным, а не «зеркало проверено: 0». Дальше шага 2 не идём: ранбук
+    велит остановиться."""
 
-    def test_нет_ни_файла_ни_копии_названо(self):
+    ШАГИ = {"2"}
+
+    @classmethod
+    def смерть_диска(cls):
+        super().смерть_диска()
+        shutil.rmtree(os.path.join(cls.носитель, "calls"))
+
+    def test_шаг2_красный(self):
+        s = self.найти("2", "--drill-only")
+        self.assertNotEqual(s["код"], 0, s["out"])
+        self.assertIn("нет в зеркале", s["err"])
+        self.assertIn("файлов на диске нет ни у одной строки", s["err"])
+
+
+class ЗеркалоБезФайлов(unittest.TestCase):
+    """`проверить_аудио` с файлом не у всех строк: копия есть — сверяется
+    (это шаг 2 на чистой машине, тест выше); нет ни файла, ни копии на
+    живой машине — разрыв приёма, проверить нечем, строка называется в
+    итоге и в stderr, а не исчезает молча; нет ни одного файла — красное."""
+
+    def setUp(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "core_backup", os.path.join(КОРЕНЬ, "scripts", "core-backup.py"))
-        cb = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cb)
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        root, цель = os.path.join(tmp, "blobs"), os.path.join(tmp, "target")
-        os.makedirs(цель)
-        строки = [{"sha256": "a" * 64, "path": os.path.join(root, "calls", "aa", "a.wav"),
-                   "created": mi.now_iso()}]
-        итог = cb.проверить_аудио(None, root, цель, "/нет-фразы", строки=строки,
-                                  курсор=os.path.join(tmp, "курсор.json"))
+        self.cb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.cb)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = os.path.join(self.tmp, "blobs")
+        self.цель = os.path.join(self.tmp, "target")
+        os.makedirs(self.цель)
+
+    def строка(self, буква, файл):
+        path = os.path.join(self.root, "calls", буква * 2, буква + ".wav")
+        if файл:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(b"x")
+        return {"sha256": буква * 64, "path": path, "created": mi.now_iso()}
+
+    def проверить(self, строки):
+        return self.cb.проверить_аудио(None, self.root, self.цель, "/нет-фразы",
+                                       строки=строки, кроме={"b" * 64},
+                                       курсор=os.path.join(self.tmp, "курсор.json"))
+
+    def test_на_живой_машине_названо(self):
+        # «b» — с файлом, но в `кроме` (её копию ночь не сделала намеренно):
+        # машина живая, и строка без файла и копии — разрыв приёма
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            итог = self.проверить([self.строка("a", False), self.строка("b", True)])
         self.assertEqual(итог, {"аудио_сверено": 0, "аудио_перечитано": 0,
                                 "зеркало_проверено": 0, "без_файла_и_копии": 1})
+        self.assertIn("строк без файла и без копии: 1", err.getvalue())
+
+    def test_на_чистой_машине_красное(self):
+        with self.assertRaisesRegex(RuntimeError, "нет в зеркале.*файлов на диске нет"):
+            self.проверить([self.строка("a", False)])
 
 
 if __name__ == "__main__":
