@@ -10,28 +10,33 @@
 шаг воркера (`run`): кто это по волту, что перед ним открыто, отправка.
 
 Не повод:
-- исходящее (`outgoing`) — пишет сам владелец;
-- импорт истории (`via: export`) и правки/удаления (`revision_of`, без
-  отправителя) — это не «пришло сейчас»;
+- исходящее (`outgoing`, у SMS `direction`) — пишет сам владелец;
+- группа: «пишет Анна» в общем чате — не разговор с ней (`отправитель`);
+- импорт истории (`via: export`), правки и надгробия — это не «пришло
+  сейчас»; удалённое до шага сообщение тоже не напоминает;
 - старое (`occurred` старше часа): догон TDLib после простоя отдаёт сотни
   сообщений, и напоминание про вчерашнее — не напоминание. Этот же порог
   гасит ретраи шага: через час после сообщения напоминать поздно.
 
-«За день» — по дню владельца (`MARA_TZ_HOURS`) и по подписи отправителя как
-её прислал источник: шаг `nudge` на этого же отправителя сегодня уже стоял —
-второго нет, даже если первый ничего не нашёл. Узнавание — то же, что у
+«За день» — по дню владельца (`MARA_TZ_HOURS`) и по ключу отправителя (у
+SMS — номер, у мессенджеров — подпись как её прислал источник): шаг `nudge`
+на этого же отправителя сегодня уже стоял — второго нет, даже если первый
+ничего не нашёл. Шаг лёгкий, и воркер берёт его раньше тяжёлых
+(`contextd.такт`): за пачкой расшифровок он бы устарел. Узнавание — то же, что у
 дайджеста (`context_pack.про_человека`): без нечёткого сопоставления, две
 Анны в индексе — никого.
 
 Отправка — строкой outbox своего вида (`telegram_nudge`, §5.2), но в отличие
 от дайджеста не копится: нет транспорта — строка `skipped`, а не `pending`.
 Напоминание, доехавшее после починки токена через день, хуже, чем никакое.
-Что транспорта нет, и так скажет сверка по дайджестам.
+Своей находки у недоставленного напоминания нет: причина — в `outbox.error`,
+а что транспорта нет, сверка скажет по недоставленным дайджестам звонков.
+Доставка — не больше одного раза (`run`).
 
     python3 scripts/message_nudge.py --event msg_<uuid>
     python3 scripts/message_nudge.py --self-check
 """
-import argparse, datetime, os, sys, time
+import argparse, datetime, json, os, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -54,20 +59,49 @@ def _когда(s):
     return t.timestamp()
 
 
-def кто(payload):
-    """Подпись отправителя как её прислал источник, или пустая строка."""
-    s = (payload or {}).get("sender_name")
-    return s.strip() if isinstance(s, str) else ""
+ЛИЧНЫЕ = ("private", "secret")     # `chat_type` личного чата (TDLib, телефон)
 
 
-def повод(payload, occurred, now=None):
-    """Сообщение годится в повод: входящее, живое (не импорт и не правка),
-    с отправителем и не старше `СВЕЖЕСТЬ_С`. Нечитаемое время — не повод:
-    в отличие от дайджеста, здесь молчать дешевле, чем напомнить невпопад."""
+def отправитель(source, payload):
+    """`(подпись, имена, ключ)` отправителя или None.
+
+    - SMS (`source: sms`, телефон): имя из книги и номер — оба ключи
+      `про_человека`, номер сильнее имени; ключ дня — последние десять цифр
+      номера. В подписи номер не печатается — только хвост.
+    - Остальное — только личный чат (`chat_type` из `ЛИЧНЫЕ`): в группе
+      «пишет Анна» — это не разговор с ней, и напоминание вне контекста ещё
+      и съело бы дневной повод до её личного сообщения. Анонимный админ
+      группы в TDLib подписан названием чата — тоже отсекается здесь.
+      Ключ — подпись как её прислал источник."""
     p = payload or {}
-    if p.get("outgoing") or p.get("via") == "export" or p.get("revision_of"):
+    if source == "sms":
+        имя = p.get("contact_name") if isinstance(p.get("contact_name"), str) else ""
+        номер = p.get("number") if isinstance(p.get("number"), str) else ""
+        цифры = "".join(c for c in номер if c.isdigit())[-10:]
+        if not (имя.strip() or цифры):
+            return None
+        подпись = имя.strip() or "номер …%s" % цифры[-4:]
+        return подпись, [x for x in (имя.strip(), номер) if x], \
+            "tel:" + цифры if цифры else имя.strip()
+    if p.get("chat_type") not in ЛИЧНЫЕ:
+        return None
+    имя = p.get("sender_name")
+    if not (isinstance(имя, str) and имя.strip()):
+        return None
+    return имя.strip(), [имя.strip()], имя
+
+
+def повод(source, payload, occurred, now=None):
+    """Сообщение годится в повод: входящее, живое (не импорт, не правка, не
+    надгробие), из личного разговора с узнаваемым отправителем и не старше
+    `СВЕЖЕСТЬ_С`. Нечитаемое время — не повод: в отличие от дайджеста, здесь
+    молчать дешевле, чем напомнить невпопад."""
+    p = payload or {}
+    if p.get("outgoing") or p.get("direction") == "outgoing":
         return False
-    if not кто(p):
+    if p.get("via") == "export" or p.get("revision_of") or p.get("tombstone_of"):
+        return False
+    if отправитель(source, p) is None:
         return False
     t = _когда(occurred)
     now = time.time() if now is None else now
@@ -80,14 +114,19 @@ def начало_дня(now=None):
     return t.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
-def уже_сегодня(con, отправитель, now=None):
-    """Шаг напоминания на этого отправителя сегодня уже ставился."""
-    return con.execute(
-        "select 1 from jobs j join events e on e.id = j.event_id "
-        "where j.kind=? and e.kind='message' "
-        "and json_extract(e.payload_json, '$.sender_name') = ? "
-        "and %s >= ? limit 1" % mi.секунды("j.created"),
-        (ШАГ, отправитель, int(начало_дня(now)))).fetchone() is not None
+def уже_сегодня(con, ключ, now=None):
+    """Шаг напоминания на этого отправителя сегодня уже ставился. Ключ
+    считается в питоне (`отправитель`): у SMS это номер, у мессенджеров —
+    подпись; шагов за день — единицы, перебрать их дешевле, чем учить SQL
+    обоим правилам."""
+    for r in con.execute(
+            "select e.source, e.payload_json from jobs j join events e "
+            "on e.id = j.event_id where j.kind=? and %s >= ?" % mi.секунды("j.created"),
+            (ШАГ, int(начало_дня(now)))):
+        кто_там = отправитель(r["source"], json.loads(r["payload_json"] or "{}"))
+        if кто_там and кто_там[2] == ключ:
+            return True
+    return False
 
 
 def завести(con, event_id, data, now=None):
@@ -97,11 +136,9 @@ def завести(con, event_id, data, now=None):
     p = data.get("payload") or {}
     if data.get("kind") != "message":
         return None
-    if not повод(p, data.get("occurred_at"), now):
+    if not повод(data.get("source"), p, data.get("occurred_at"), now):
         return None
-    # отправителя сравниваем как он лёг в `payload_json`: без `.strip()`,
-    # иначе «Анна » и «Анна» были бы двумя людьми только для этой проверки
-    if уже_сегодня(con, p.get("sender_name"), now):
+    if уже_сегодня(con, отправитель(data.get("source"), p)[2], now):
         return None
     return mi.add_job(con, event_id, ШАГ)
 
@@ -118,53 +155,81 @@ def текст(отправитель, пункты):
     return "\n".join([шапка] + строки)
 
 
-def обещано(vault, отправитель):
+def обещано(vault, имена):
     """Открытое перед отправителем; любой сбой чтения волта — пусто."""
     import call_project as cp
     import context_pack
     try:
-        return context_pack.про_человека(vault, [отправитель], владелец=cp.OWNER)
+        return context_pack.про_человека(vault, имена, владелец=cp.OWNER)
     except Exception as e:
         print("message_nudge: обещания не прочитаны (%s)" % type(e).__name__,
               file=sys.stderr)
         return []
 
 
+def _погасить(con, event_id, почему):
+    """Ждущие строки этого события — в `skipped`: напоминание не копится."""
+    with mi.транзакция(con):
+        con.execute("update outbox set state='skipped', error=? where kind=? and "
+                    "object_id=? and state='pending'", (почему, ВИД, event_id))
+
+
 def run(event_id, root=None, env_file=None, vault=None, now=None):
     """Шаг воркера. Возвращает id строки outbox или None, если писать
-    нечего. Исключение — только когда телеграм отказал (`failed`): ретрай
-    имеет смысл, пока сообщение свежее."""
+    нечего.
+
+    Исключение — когда телеграм отказал (`failed`) или транспорт бросил:
+    ретрай имеет смысл, пока сообщение свежее. Устарело после сбоев — тоже
+    исключение, а не тихий нуль: иначе постоянная поломка шага не дошла бы
+    до DLQ и находки `dlq` в сверке.
+
+    Доставка — не больше одного раза: строка, брошенная посреди отправки
+    (`sending`, демон убит), могла и уйти — повтор её не шлёт, а закрывает."""
     import call_digest as cd
     root = root or mi.ROOT
     vault = vault or os.environ.get("VAULT", "/srv/vault")
     con = mi.connect(root)
     ev = mi.event_row(con, event_id)
     p = ev.get("payload") or {}
-    if ev.get("kind") != "message" or not повод(p, ev.get("occurred"), now):
+    if ev.get("kind") != "message" or not повод(ev.get("source"), p, ev.get("occurred"), now):
+        _погасить(con, event_id, "устарело")
+        сбои = con.execute("select max(attempts) from jobs where event_id=? and kind=? "
+                           "and state='ready'", (event_id, ШАГ)).fetchone()[0]
+        if сбои:
+            raise RuntimeError("напоминание устарело после сбоев шага: %d" % сбои)
         print("message_nudge: %s — не повод (не входящее или старше %d мин)"
               % (event_id, СВЕЖЕСТЬ_С // 60))
         return None
-    if con.execute("select 1 from outbox where kind=? and object_id=? and "
-                   "state in ('sent','sending')", (ВИД, event_id)).fetchone():
-        print("message_nudge: %s — уже отправлено" % event_id)
+    if mi.message_state(con, ev["source"], ev["source_id"]) is None:
+        print("message_nudge: %s — сообщение удалено" % event_id)
         return None
-    пункты = обещано(vault, кто(p))
+    было = con.execute("select id, state from outbox where kind=? and object_id=? and "
+                       "state in ('sent','sending')", (ВИД, event_id)).fetchone()
+    if было:
+        if было["state"] == "sending":
+            with mi.транзакция(con):
+                con.execute("update outbox set state='skipped', error=? where id=? and "
+                            "state='sending'",
+                            ("брошено посреди отправки — возможно, доставлено", было["id"]))
+        print("message_nudge: %s — уже отправлялось (%s)" % (event_id, было["state"]))
+        return None
+    подпись, имена, _ = отправитель(ev.get("source"), p)
+    пункты = обещано(vault, имена)
     if not пункты:
         print("message_nudge: %s — открытого нет" % event_id)
         return None
     with mi.транзакция(con):
         con.execute("update outbox set state='skipped', error='пересобран' "
                     "where kind=? and object_id=? and state='pending'", (ВИД, event_id))
-        oid = mi.в_outbox(con, ВИД, {"text": текст(кто(p), пункты)}, "event", event_id)
+        oid = mi.в_outbox(con, ВИД, {"text": текст(подпись, пункты)}, "event", event_id)
+    # `_отправитель` дайджеста: тот же транспорт и та же застава §8.3
     итоги = mi.из_outbox(con, cd._отправитель(cd.env(env_file)), kind=ВИД, ид=oid)
     исход = итоги[0][1] if итоги else None
     if исход == "failed":
         raise RuntimeError("телеграм не принял напоминание")
     if исход != "sent":
         # не копим: через день оно бессмысленно (см. шапку модуля)
-        with mi.транзакция(con):
-            con.execute("update outbox set state='skipped', error=? where id=? "
-                        "and state='pending'", (исход or "не отправлено", oid))
+        _погасить(con, event_id, исход or "не отправлено")
         print("message_nudge: %s — не доставлено (%s), не копится" % (event_id, исход),
               file=sys.stderr)
     print("message_nudge: %s — %s, пунктов %d" % (event_id, исход, len(пункты)))
@@ -173,15 +238,21 @@ def run(event_id, root=None, env_file=None, vault=None, now=None):
 
 def self_check():
     now = _когда("2026-09-02T14:05:00+03:00")
-    p = {"sender_name": "Анна Петрова", "text": "привет"}
-    assert повод(p, "2026-09-02T14:04:00+03:00", now)
-    assert повод(p, "2026-09-02T11:05:00+00:00", now), "сдвиг читается"
-    assert not повод(p, "2026-09-02T13:04:59+03:00", now), "старше часа"
-    assert not повод(p, "вчера", now) and not повод(p, None, now)
-    assert not повод(dict(p, outgoing=True), "2026-09-02T14:04:00+03:00", now)
-    assert not повод(dict(p, via="export"), "2026-09-02T14:04:00+03:00", now)
-    assert not повод(dict(p, revision_of="7/2"), "2026-09-02T14:04:00+03:00", now)
-    assert not повод({"sender_name": "  "}, "2026-09-02T14:04:00+03:00", now)
+    т = "2026-09-02T14:04:00+03:00"
+    p = {"sender_name": "Анна Петрова", "chat_type": "private", "text": "привет"}
+    assert повод("telegram", p, т, now)
+    assert повод("telegram", p, "2026-09-02T11:05:00+00:00", now), "сдвиг читается"
+    assert not повод("telegram", p, "2026-09-02T13:04:59+03:00", now), "старше часа"
+    assert not повод("telegram", p, "вчера", now) and not повод("telegram", p, None, now)
+    for лишнее in ({"outgoing": True}, {"via": "export"}, {"revision_of": "7/2"},
+                   {"chat_type": "group"}, {"chat_type": None}, {"sender_name": "  "}):
+        assert not повод("telegram", dict(p, **лишнее), т, now), лишнее
+    смс = {"number": "+7 999 000-00-01", "contact_name": "Анна", "direction": "incoming"}
+    assert отправитель("sms", смс) == ("Анна", ["Анна", "+7 999 000-00-01"],
+                                      "tel:9990000001")
+    assert отправитель("sms", {"number": "89990000001"})[0] == "номер …0001"
+    assert повод("sms", смс, т, now)
+    assert not повод("sms", dict(смс, direction="outgoing"), т, now)
     t = текст("Анна", [{"title": "прислать смету", "due": "2026-09-04",
                         "promised_to": "Анна", "id": None}] * 7)
     assert t.splitlines()[0] == "Пишет «Анна». Ты обещал:", t

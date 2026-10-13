@@ -1,5 +1,5 @@
 """Т-У.4, сообщения: `scripts/message_nudge.py` и его вход в приёме `contextd`."""
-import contextlib, io, json, os, subprocess, sys, tempfile, threading, time, unittest
+import contextlib, io, json, os, sqlite3, subprocess, sys, tempfile, threading, time, unittest
 import urllib.error, urllib.request
 from datetime import datetime, timedelta
 from unittest import mock
@@ -23,6 +23,15 @@ def сообщение(кто="Анна Петрова", sid=None, **payload):
     p.update(payload)
     return {"kind": "message", "source": "telegram",
             "source_id": sid or "m-%s" % time.monotonic_ns(),
+            "occurred_at": occurred, "payload": p}
+
+
+def смс(имя="Аня", номер="89990000001", **payload):
+    occurred = payload.pop("occurred_at", None) or когда()
+    p = {"number": номер, "contact_name": имя, "direction": "incoming",
+         "text": "привет", "outgoing": False, "via": "provider"}
+    p.update(payload)
+    return {"kind": "message", "source": "sms", "source_id": "s-%s" % time.monotonic_ns(),
             "occurred_at": occurred, "payload": p}
 
 
@@ -68,9 +77,18 @@ class Повод(_База):
         self.assertIsNotNone(другой)
         self.assertEqual(len(self.работы()), 2)
 
+    def test_смс_день_по_номеру(self):
+        """Ключ дня у SMS — номер: книгу правили, подпись сменилась, человек
+        тот же; другой номер — другой человек."""
+        self.assertIsNotNone(self.завести(смс("Аня", "+7 999 000-00-01"))[1])
+        self.assertIsNone(self.завести(смс("Анна Петрова", "89990000001"))[1])
+        self.assertIsNotNone(self.завести(смс("Аня", "89990000002"))[1])
+        self.assertIsNone(self.завести(смс(direction="outgoing", номер="89990000003"))[1])
+
     def test_не_повод(self):
         for ev in (сообщение(outgoing=True), сообщение(via="export"),
                    сообщение(revision_of="7/2"), сообщение(""),
+                   сообщение(chat_type="group"), сообщение(chat_type=None),
                    сообщение(occurred_at=когда(61))):
             with self.subTest(payload=ev["payload"]):
                 self.assertIsNone(self.завести(ev)[1])
@@ -165,7 +183,7 @@ class Шаг(_База):
             cd.outbox(self.dir, self.env)
         self.assertEqual(self.строки(eid), [("skipped", "no-transport")])
 
-    def test_отказ_телеграма_ретрай_без_дубля(self):
+    def test_отказ_телеграма_ретрай(self):
         карточка(self.vault, "a", "прислать смету", "Анна Петрова")
         eid, _ = self.завести(сообщение())
         self.ответ = "failed"
@@ -175,6 +193,56 @@ class Шаг(_База):
         self.шаг(eid)
         self.assertEqual([s for s, _ in self.строки(eid)], ["failed", "sent"])
         self.assertEqual(len(self.ушло), 2)
+
+    def test_исключение_транспорта_ретрай_и_не_копится(self):
+        """Транспорт бросил — строка `pending`, шаг — ретрай. Пришёл ретрай
+        уже устаревшим — строка гаснет, а не ждёт будущего `--outbox`; были
+        сбои — шаг падает, чтобы постоянная беда дошла до DLQ."""
+        карточка(self.vault, "a", "прислать смету", "Анна Петрова")
+        eid, jid = self.завести(сообщение())
+
+        def бросить(текст, token, chat):
+            raise OSError("сеть")
+        cd.deliver = бросить
+        with self.assertRaises(OSError):
+            self.шаг(eid)
+        self.assertEqual(self.строки(eid), [("pending", "OSError: сеть")])
+        self.con.execute("update jobs set attempts=1 where id=?", (jid,))
+        поздно = time.time() + mn.СВЕЖЕСТЬ_С + 120
+        with self.assertRaises(RuntimeError):
+            self.шаг(eid, now=поздно)
+        self.assertEqual(self.строки(eid), [("skipped", "устарело")])
+        self.con.execute("update jobs set attempts=0 where id=?", (jid,))
+        self.assertIsNone(self.шаг(eid, now=поздно))
+
+    def test_брошенная_посреди_отправки_не_повторяется(self):
+        """Не больше одного раза: `sending` от убитого шага могло уйти."""
+        карточка(self.vault, "a", "прислать смету", "Анна Петрова")
+        eid, _ = self.завести(сообщение())
+        with mi.транзакция(self.con):
+            oid = mi.в_outbox(self.con, mn.ВИД, {"text": "x"}, "event", eid)
+            self.con.execute("update outbox set state='sending', last_attempt=? "
+                             "where id=?", (когда(30), oid))
+        self.assertIsNone(self.шаг(eid))
+        self.assertEqual(self.ушло, [])
+        self.assertEqual(self.строки(eid)[0][0], "skipped")
+
+    def test_удалённое_не_напоминает(self):
+        карточка(self.vault, "a", "прислать смету", "Анна Петрова")
+        eid, _ = self.завести(сообщение(sid="7/1"))
+        mi.put_event(self.con, {"kind": "message", "source": "telegram",
+                                "source_id": "7/1/deleted", "occurred_at": когда(),
+                                "payload": {"tombstone_of": "7/1"}})
+        self.assertIsNone(self.шаг(eid))
+        self.assertEqual(self.ушло, [])
+
+    def test_смс_по_номеру(self):
+        """SMS: имя из книги и номер; номер узнаёт карточку, где имени нет,
+        а в шапку номер не едет."""
+        карточка(self.vault, "a", "вернуть дрель", "+7 (999) 000-00-01")
+        eid, _ = self.завести(смс())
+        self.assertIsNotNone(self.шаг(eid))
+        self.assertEqual(self.ушло, ["Пишет «Аня». Ты обещал:\n• «вернуть дрель» #0000000a"])
 
     def test_кривой_волт_молчит(self):
         eid, _ = self.завести(сообщение())
@@ -255,6 +323,29 @@ class Приём(unittest.TestCase):
         self.assertEqual(self.работа(r["event_id"]), [])
         self.assertIn("напоминание %s: RuntimeError" % r["event_id"], лог.getvalue())
         self.assertNotIn("Сбоева", лог.getvalue())
+
+    def test_откаченная_транзакция_не_глотается(self):
+        """SQLite сам откатил транзакцию приёма (диск полон): события уже нет,
+        и ответить «принято» с квитанцией на несуществующее нельзя."""
+        ev = сообщение("Анна Откатова", sid="откат")
+        ev.pop("kind")
+        # с ключом квитанция легла бы в autocommit на событие, которого нет;
+        # её держит и внешний ключ `ingest_attempts.event_id`, а
+        # `contextd.напомнить` не даёт до неё дойти
+        ev["idempotency_key"] = "ключ-отката"
+
+        def откат(con, *a):
+            con.execute("rollback")
+            raise sqlite3.OperationalError("database or disk is full")
+        with mock.patch.object(mn, "завести", side_effect=откат), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(Exception):
+                self.post(ev)
+        self.assertIsNone(self.con.execute(
+            "select 1 from events where source_id='откат'").fetchone())
+        self.assertIsNone(self.con.execute(
+            "select 1 from ingest_attempts where idempotency_key='ключ-отката'").fetchone())
 
 
 if __name__ == "__main__":

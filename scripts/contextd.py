@@ -1622,10 +1622,16 @@ def напомнить(con, eid, data):
     одного отправителя разом не заведут два напоминания. Сбой здесь приём не
     роняет — сообщение важнее напоминания о нём; в лог — только класс:
     текст исключения может нести подпись отправителя (§15.1)."""
-    import message_nudge
     try:
-        message_nudge.завести(con, eid, data)
+        import message_nudge
+        # savepoint: сбой решения откатывает только его, а не событие
+        with транзакция(con):
+            message_nudge.завести(con, eid, data)
     except Exception as e:
+        if not con.in_transaction:
+            # SQLite сам откатил всю транзакцию (диск полон, ввод-вывод):
+            # события уже нет, и молча идти к квитанции нельзя
+            raise
         print("напоминание %s: %s" % (eid, type(e).__name__), flush=True)
 
 
@@ -1902,7 +1908,10 @@ def такт(con, отмечено=None):
         отметить_узел(con, ВОРКЕР, "core")
         отмечено[:] = [сейчас, причины]
     ждут = {k for k, п in причины.items() if п}
-    job = mi.claim_job(con, kinds=[k for k in STEP if k not in ждут] if ждут else None)
+    # лёгкое напоминание — раньше всех: за пачкой расшифровок оно устареет
+    # (`message_nudge.СВЕЖЕСТЬ_С`) и пропадёт вместе с дневным поводом
+    job = mi.claim_job(con, kinds=[k for k in STEP if k not in ждут] if ждут else None,
+                       первыми=("nudge",))
     if not job:
         return None
     ok, err = run_step(job["kind"], job["event_id"],
