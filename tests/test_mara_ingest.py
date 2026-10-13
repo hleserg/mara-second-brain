@@ -818,6 +818,32 @@ class Сущности(unittest.TestCase):
         self.assertEqual(utc("e2")[0], "2026-10-10T14:00:00Z")
         con.close()
 
+    def test_миграция_8_причина_ожидания_и_путь_вниз(self):
+        """Т7.3, ADR-0010 решение 3: `jobs.queued_reason`. Работа взята —
+        причина снята; откат 8 → 7 безусловный."""
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "q1", "payload": {}})
+        asr = mi.add_job(con, eid, "asr")
+        proj = mi.add_job(con, eid, "project")
+        mi.отметить_ожидание(con, {"asr": "node_offline:bigpc", "project": None})
+        причина = lambda j: con.execute("select queued_reason from jobs where id=?",
+                                        (j,)).fetchone()[0]
+        self.assertEqual((причина(asr), причина(proj)), ("node_offline:bigpc", None))
+        mi.отметить_ожидание(con, {"asr": None})
+        self.assertIsNone(причина(asr), "узел ответил — причина снята")
+        mi.отметить_ожидание(con, {"asr": "node_offline:bigpc"})
+        взята = mi.claim_job(con, kinds=["asr"])
+        self.assertEqual(взята["id"], asr)
+        self.assertIsNone(причина(asr), "взятая работа не ждёт")
+        con.close()
+        con = mi.migrate(self.dir, 7)
+        self.assertNotIn("queued_reason", {r[1] for r in con.execute("pragma table_info(jobs)")})
+        self.assertEqual(self.версия(), 7)
+        con.close()
+        mi.migrate(self.dir).close()
+
     def test_состояние_сообщения_по_времени_а_не_по_строке(self):
         """Правка позже оригинала по времени, но раньше по строке: оригинал
         со сдвигом +14, правка в UTC. Порядок по строке `occurred` отдал бы

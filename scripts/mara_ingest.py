@@ -627,13 +627,29 @@ def в_utc(когда):
     return когда.astimezone(timezone.utc).strftime(UTC_ФОРМАТ)
 
 
+# Миграция 8 (Т7.3, ADR-0010 решение 3): `jobs.queued_reason` — почему
+# готовая работа не берётся. Выключенный bigpc был неотличим от поломки:
+# шаг падал, лестница ретраев сгорала за 14,5 часа, и звонок уезжал в DLQ.
+# Теперь тяжёлые работы для молчащего узла воркер не берёт вовсе — попытки
+# не тратятся, — а причина видна в строке: `node_offline:<узел>`. Колонка
+# только добавляется; откат — без условий: причина — сиюминутное состояние,
+# воркер выставит её заново.
+def _миграция_8(con):
+    con.execute("alter table jobs add column queued_reason text")
+
+
+def _откат_8(con):
+    con.execute("alter table jobs drop column queued_reason")
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
 МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3, _миграция_4, _миграция_5,
-            _миграция_6, _миграция_7)
+            _миграция_6, _миграция_7, _миграция_8)
 # Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
 # ниже него только пустая база.
-ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5, _откат_6, _откат_7)
+ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5, _откат_6, _откат_7,
+          _откат_8)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 
@@ -934,7 +950,7 @@ def claim_job(con, kinds=None, now=None):
     # база между ними оставляла взятую аренду без попытки (работа простаивала
     # `LEASE_SEC`, а брошенную потом нечем было и назвать).
     with транзакция(con):
-        if con.execute("update jobs set lease_until=?, updated=? "
+        if con.execute("update jobs set lease_until=?, updated=?, queued_reason=null "
                        "where id=? and lease_until<? and state='ready'",
                        (now + LEASE_SEC, now_iso(), row["id"], now)).rowcount != 1:
             return None
@@ -994,6 +1010,22 @@ def _закрыть_попытку(con, job_id, исход, попытка=None)
         q += " and attempt=?"
         args.append(попытка)
     con.execute(q, args)
+
+
+def отметить_ожидание(con, причины):
+    """Причина ожидания готовых работ по видам: `{kind: причина или None}`
+    (ADR-0010 решение 3). Причина есть — ставится у всех `ready` этого вида,
+    нет — снимается. Пишутся только строки, где причина меняется: воркер
+    зовёт это раз в интервал пробы, и пустые записи базе ни к чему."""
+    with транзакция(con):
+        for kind, причина in sorted(причины.items()):
+            if причина:
+                con.execute("update jobs set queued_reason=? where state='ready' "
+                            "and kind=? and queued_reason is not ?",
+                            (причина, kind, причина))
+            else:
+                con.execute("update jobs set queued_reason=null where state='ready' "
+                            "and kind=? and queued_reason is not null", (kind,))
 
 
 def finish_job(con, job_id, ok, error=None, попытка=None):

@@ -84,6 +84,18 @@ STEP = {"asr": "call_asr.py", "extract": "call_extract.py",
 # гигабайт VRAM: параллельный ASR вытеснит whisper, и обе работы поедут
 # медленнее, чем одна. Появится вторая карта — станет Semaphore(2).
 GPU = threading.Semaphore(1)
+# ADR-0010 решения 2–3 (Т7.3): тяжёлые шаги идут на bigpc, и только туда —
+# узел и переменная его адреса. Узел молчит — работы этого вида воркер не
+# берёт вовсе: попытки не тратятся, работа ждёт в `ready` с причиной
+# `node_offline:<узел>` и берётся сама, когда узел ответит. Лестница ретраев
+# и DLQ остаются для настоящих отказов: узел ответил ошибкой, шаг упал.
+ТЯЖЁЛЫЕ = {"asr": ("bigpc", "MARA_ASR_URL"), "extract": ("bigpc", "MARA_LLM_URL")}
+# Проба — переходная форма сердцебиения (решение 5): GET на адрес сервиса с
+# doctor, раз в минуту на адрес. Любой HTTP-ответ, даже 404, — узел жив:
+# STT-сервису на `/` отвечать нечего, Ollama отвечает строкой.
+ПРОБА_С = 60
+ПРОБА_ТАЙМАУТ = 3
+_пробы = {}                             # адрес → (monotonic, жив)
 OPEN_PATHS = ("/healthz",)              # мануал велит проверять его с телефона
 # /metrics без токена отдаётся только с петли, и /healthz из локалки отдаёт
 # один `ok` без счётчиков. Там не секреты, но имена устройств и время
@@ -501,6 +513,13 @@ def metrics(con, root=None, vault=None):
     # Самую новую по времени: `max()` по строке врёт после смены пояса, а
     # голый `last_seen` рядом с `max()` SQLite берёт из той же строки, где
     # максимум.
+    ждут = dict(con.execute(
+        "select substr(queued_reason, length('node_offline:') + 1), count(*) from jobs "
+        "where state='ready' and queued_reason like 'node_offline:%' group by 1"))
+    видели = dict(con.execute("select id, last_seen from compute_nodes"))
+    все_узлы = sorted({у for у, _ in ТЯЖЁЛЫЕ.values()} | set(ждут) | set(видели))
+    ждут_узел = [(у, ждут.get(у, 0)) for у in все_узлы]
+    узлы = [(у, age_of(видели.get(у))) for у in все_узлы]
     devices = [(n, age_of(t)) for n, t, _ in con.execute(
         "select name, last_seen, max(%s) from devices where revoked_at is null "
         "group by name order by name" % mi.секунды("last_seen"))]
@@ -584,6 +603,11 @@ def metrics(con, root=None, vault=None):
         ("mara_mobile_last_seen_seconds", mobile),
         *[('mara_device_last_seen_seconds{name="%s"}' % метка(n), a)
           for n, a in devices],
+        # ADR-0010 решение 8 (Т7.3): сколько готовых работ ждут молчащий узел
+        # и сколько он молчит (−1 — ни разу не отвечал). Узлы — из
+        # `ТЯЖЁЛЫЕ`, с нулём: пустая серия не отличалась бы от пропавшей
+        *[('mara_jobs_waiting_node{node="%s"}' % метка(у), n) for у, n in ждут_узел],
+        *[('mara_node_last_seen_seconds{node="%s"}' % метка(у), a) for у, a in узлы],
         # Семантика (хвост #39, Т3.1): «записей обещано, но тела ещё нет».
         # Считаются события в `new` с объявленным `blob_sha256` — телефон
         # прислал событие звонка и заявил хеш, а `/v1/ingest/audio` до
@@ -1667,18 +1691,83 @@ def run_step(kind, event_id):
     return r.returncode == 0, mi.обезличить(r.stderr or "")[-500:]
 
 
+def проба(адрес, сейчас=None):
+    """Жив ли сервис по адресу: `(жив, проба_свежая)`. Ответ кэшируется на
+    `ПРОБА_С`: воркер спрашивает каждые пять секунд, а стучать в выключенную
+    коробку так часто незачем."""
+    import urllib.request, urllib.error, http.client
+    сейчас = time.monotonic() if сейчас is None else сейчас
+    было = _пробы.get(адрес)
+    if было and сейчас - было[0] < ПРОБА_С:
+        return было[1], False
+    try:
+        urllib.request.urlopen(адрес, timeout=ПРОБА_ТАЙМАУТ).close()
+        жив = True
+    except urllib.error.HTTPError:
+        жив = True                      # ответил кодом — значит, жив
+    except (OSError, http.client.HTTPException, ValueError):
+        жив = False
+    _пробы[адрес] = (сейчас, жив)
+    return жив, True
+
+
+def недоступные(con):
+    """`{kind: причина или None}` по тяжёлым шагам. Адрес не задан — `None`:
+    шаг сам упадёт на `нужен_адрес`, и ошибка настройки останется видна, а
+    не спрячется в ожидание. Узел, у которого ответили все сервисы на свежей
+    пробе, получает `compute_nodes.last_seen` — по нему сверка судит, сколько
+    он молчит."""
+    причины, живые, свежие = {}, {}, set()
+    for kind, (узел, перем) in sorted(ТЯЖЁЛЫЕ.items()):
+        адрес = os.environ.get(перем)
+        if not адрес:
+            причины[kind] = None
+            continue
+        жив, свежая = проба(адрес)
+        причины[kind] = None if жив else "node_offline:" + узел
+        живые[узел] = живые.get(узел, True) and жив
+        if свежая:
+            свежие.add(узел)
+    for узел in sorted(свежие):
+        if живые.get(узел):
+            con.execute("insert into compute_nodes(id,name,role,last_seen,capabilities_json) "
+                        "values(?,?,?,?,?) on conflict(id) do update set "
+                        "last_seen=excluded.last_seen",
+                        (узел, узел, "heavy", mi.now_iso(),
+                         json.dumps({"источник": "проба"}, ensure_ascii=False)))
+    return причины
+
+
+def такт(con, отмечено=None):
+    """Один оборот воркера: пробы, причины ожидания, взять работу, шаг.
+    Возвращает работу или None. `отмечено` — `[monotonic, причины]`
+    прошлой отметки: причины пишутся при смене и раз в `ПРОБА_С`, чтобы
+    новые работы молчащего узла тоже получили причину."""
+    причины = недоступные(con)
+    отмечено = отмечено if отмечено is not None else [None, None]
+    сейчас = time.monotonic()
+    if (причины != отмечено[1] or отмечено[0] is None
+            or сейчас - отмечено[0] >= ПРОБА_С):
+        mi.отметить_ожидание(con, причины)
+        отмечено[:] = [сейчас, причины]
+    ждут = {k for k, п in причины.items() if п}
+    job = mi.claim_job(con, kinds=[k for k in STEP if k not in ждут] if ждут else None)
+    if not job:
+        return None
+    ok, err = run_step(job["kind"], job["event_id"])
+    закрыть_работу(con, job, ok, err)
+    print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
+                                  "ок" if ok else "сбой"), flush=True)
+    return job
+
+
 def worker(stop, root):
     con = mi.connect(root)
+    отмечено = [None, None]
     while not stop.is_set():
         try:
-            job = mi.claim_job(con)
-            if not job:
+            if not такт(con, отмечено):
                 stop.wait(5)
-                continue
-            ok, err = run_step(job["kind"], job["event_id"])
-            закрыть_работу(con, job, ok, err)
-            print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
-                                          "ок" if ok else "сбой"), flush=True)
         except sqlite3.OperationalError as e:
             # `database is locked` — чужая долгая транзакция, не конец
             # света: поток воркера у нас один и без перезапуска, и одна
