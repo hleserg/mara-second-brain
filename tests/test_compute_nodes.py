@@ -81,7 +81,7 @@ class Такт(unittest.TestCase):
         self.asr = mi.add_job(self.con, eid, "asr")
         self.шаги = []
         шаг = mock.patch.object(contextd, "run_step",
-                                lambda kind, event_id: self.шаги.append(kind) or (True, ""))
+                                lambda kind, event_id, *a: self.шаги.append(kind) or (True, ""))
         шаг.start()
         self.addCleanup(шаг.stop)
         self.env = mock.patch.dict(os.environ, dict(
@@ -194,7 +194,7 @@ class Такт(unittest.TestCase):
     def test_упавший_тяжёлый_шаг_сбрасывает_пробу(self):
         адрес = живой_адрес(self)
         os.environ["MARA_ASR_URL"] = адрес
-        with mock.patch.object(contextd, "run_step", lambda kind, event_id: (False, "сеть")):
+        with mock.patch.object(contextd, "run_step", lambda kind, event_id, *a: (False, "сеть")):
             self.такт()
         self.assertNotIn(адрес, contextd._пробы, "после сбоя — проба заново")
 

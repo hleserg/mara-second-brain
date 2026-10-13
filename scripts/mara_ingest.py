@@ -961,6 +961,15 @@ def claim_job(con, kinds=None, now=None):
     return job
 
 
+def продлить_аренду(con, job_id, now=None):
+    """Ещё `LEASE_SEC` аренды работе, которую воркер держит и считает
+    (ADR-0010 решение 7). Только живую: истёкшая аренда могла уйти другому
+    воркеру, и продлевать её — отнять. Возвращает, продлена ли."""
+    now = int(time.time()) if now is None else int(now)
+    return con.execute("update jobs set lease_until=? where id=? and state='ready' "
+                       "and lease_until>=?", (now + LEASE_SEC, job_id, now)).rowcount == 1
+
+
 def next_delay(attempts):
     """Задержка перед следующей попыткой, ТЗ §17, с джиттером ±20 %.
 

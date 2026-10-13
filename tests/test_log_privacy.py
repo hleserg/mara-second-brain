@@ -64,8 +64,7 @@ class ХвостШага(unittest.TestCase):
         `jobs.last_error`, а оттуда — в сверку и Telegram."""
         хвост = "Traceback …\nOSError: [Errno 30] Read-only file system: '%s' %s" % (
             КАРТОЧКА, ТОКЕН)
-        готово = subprocess.CompletedProcess([], 1, "", хвост)
-        with unittest.mock.patch.object(contextd.subprocess, "run", return_value=готово):
+        with unittest.mock.patch.object(contextd, "_запустить", return_value=(1, хвост)):
             ok, err = contextd.run_step("project", "call_x")
         self.assertFalse(ok)
         self.assertNotIn("anna-petrova", err)
@@ -76,8 +75,7 @@ class ХвостШага(unittest.TestCase):
         """Обезличивание до среза: срез `[-500:]` посреди пути оставил бы
         `b/conversations/…имя…` без `kb/`, и шаблон его бы не узнал."""
         хвост = "x" * 1000 + КАРТОЧКА + " " + "y" * (500 - len(КАРТОЧКА) + 3)
-        готово = subprocess.CompletedProcess([], 1, "", хвост)
-        with unittest.mock.patch.object(contextd.subprocess, "run", return_value=готово):
+        with unittest.mock.patch.object(contextd, "_запустить", return_value=(1, хвост)):
             _, err = contextd.run_step("project", "call_x")
         self.assertLessEqual(len(err), 500)
         self.assertNotIn("anna-petrova", err)

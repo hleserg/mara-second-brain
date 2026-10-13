@@ -1670,8 +1670,43 @@ def make_server(root, port=8788, vault=None, host="127.0.0.1"):
 
 # --- воркер -----------------------------------------------------------------
 
-def run_step(kind, event_id):
-    """Шаг пайплайна отдельным процессом. Возвращает (успех, хвост ошибки)."""
+ШАГ_ТАЙМАУТ = 3600
+
+
+def _запустить(argv, продлить=None):
+    """Процесс шага: `(код, stderr)`, таймаут — `(None, "")`.
+
+    ADR-0010 решение 7 (Т7.6, N9 аудита): аренда работы — `LEASE_SEC`, а шаг
+    живёт до часа; пока дочерний процесс жив, аренда продлевается раз в
+    `LEASE_SEC / 2` (`продлить`). Без этого второй воркер или вторая
+    коробка взяли бы просроченную аренду часового ASR. `communicate` с
+    таймаутом, а не `wait`: дочерний пишет в трубы, и `wait` при полной трубе
+    встал бы навсегда; повторный `communicate` вывода не теряет. Сбой
+    продления (база занята) шаг не роняет — процесс, брошенный посреди
+    часовой расшифровки, хуже одной пропущенной отметки."""
+    период = max(1, mi.LEASE_SEC // 2)
+    начало = time.monotonic()
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    while True:
+        осталось = ШАГ_ТАЙМАУТ - (time.monotonic() - начало)
+        if осталось <= 0:
+            p.kill()
+            p.communicate()
+            return None, ""
+        try:
+            _, err = p.communicate(timeout=min(период, осталось))
+            return p.returncode, err
+        except subprocess.TimeoutExpired:
+            if продлить:
+                try:
+                    продлить()
+                except sqlite3.Error as e:
+                    print("%s аренда не продлена: %s" % (mi.now_iso(), e), flush=True)
+
+
+def run_step(kind, event_id, продлить=None):
+    """Шаг пайплайна отдельным процессом. Возвращает (успех, хвост ошибки).
+    `продлить` — продление аренды работы, пока шаг идёт (`_запустить`)."""
     script = STEP.get(kind)
     if not script:
         return False, "неизвестный шаг %s" % kind
@@ -1679,18 +1714,17 @@ def run_step(kind, event_id):
     if gpu:
         GPU.acquire()
     try:
-        r = subprocess.run([sys.executable, os.path.join(HERE, script),
-                            "--event", event_id],
-                           capture_output=True, text=True, timeout=3600)
-    except subprocess.TimeoutExpired:
-        return False, "таймаут часа на шаге %s" % kind
+        код, err = _запустить([sys.executable, os.path.join(HERE, script),
+                               "--event", event_id], продлить)
     finally:
         if gpu:
             GPU.release()
+    if код is None:
+        return False, "таймаут часа на шаге %s" % kind
     # хвост stderr уходит в `jobs.last_error`, оттуда — в сверку и Telegram:
     # без путей карточек и секретов (§15.1). Обезличиваем до среза: срез
     # посреди пути или токена оставил бы обрубок, который шаблон не узнает
-    return r.returncode == 0, mi.обезличить(r.stderr or "")[-500:]
+    return код == 0, mi.обезличить(err or "")[-500:]
 
 
 def проба(адрес, сейчас=None):
@@ -1796,7 +1830,8 @@ def такт(con, отмечено=None):
     job = mi.claim_job(con, kinds=[k for k in STEP if k not in ждут] if ждут else None)
     if not job:
         return None
-    ok, err = run_step(job["kind"], job["event_id"])
+    ok, err = run_step(job["kind"], job["event_id"],
+                       lambda: mi.продлить_аренду(con, job["id"]))
     if not ok and job["kind"] in ТЯЖЁЛЫЕ:
         # коробка могла лечь посреди шага: следующая проба — сразу, а не по
         # кэшу «жив», иначе ретрай через минуту сжёг бы ещё одну попытку
