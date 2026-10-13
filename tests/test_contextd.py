@@ -1300,6 +1300,7 @@ class ТестМетрикиСтадий(unittest.TestCase):
             'mara_job_attempts_abandoned_total{kind="asr"}': "0",
             'mara_job_attempts_abandoned_total{kind="digest"}': "0",
             'mara_job_attempts_abandoned_total{kind="extract"}': "1",
+            'mara_job_attempts_abandoned_total{kind="nudge"}': "0",
             'mara_job_attempts_abandoned_total{kind="project"}': "0"})
 
     def test_закрыть_работу_закрывает_свою_попытку(self):
