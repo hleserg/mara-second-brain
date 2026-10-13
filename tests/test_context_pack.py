@@ -5,7 +5,7 @@
 список меняется. Значит наружу едет whitelist из пяти полей, и всё остальное —
 тело, цитаты, дословные фразы о сроке, номера — обязано остаться в волте.
 """
-import os, sys, glob, tempfile, unittest
+import json, os, sys, glob, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -416,23 +416,42 @@ class Отмена(unittest.TestCase):
         self.assertIn("…и ещё", с)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ПоЧеловеку(unittest.TestCase):
     """Т6.2, начало: чем человек узнаётся в `promised_to` (Т-У.4)."""
 
+    def индекс(self, v, записи):
+        os.makedirs(os.path.join(v, "_system"), exist_ok=True)
+        with open(os.path.join(v, "_system/entity-index.json"), "w", encoding="utf-8") as fh:
+            json.dump(записи, fh, ensure_ascii=False)
+
     def test_ключи(self):
-        canon = {"анна петрова": "anna-petrova", "аня": "anna-petrova"}
-        self.assertEqual(cp.ключи_человека("[[anna-petrova|Анна Петрова]]", canon),
-                         {"анна петрова", "canon:anna-petrova"})
-        self.assertEqual(cp.ключи_человека("Аня", canon), {"аня", "canon:anna-petrova"})
+        карта = {"анна петрова": "anna-petrova", "аня": "anna-petrova"}
+        self.assertEqual(cp.ключи_человека("[[anna-petrova|Анюта]]", карта),
+                         {"анюта", "canon:anna-petrova"})
+        self.assertEqual(cp.ключи_человека("Аня", карта), {"аня", "canon:anna-petrova"})
         # номер — по последним десяти цифрам: `+7…` журнала и `8…` книги
         self.assertIn("tel:9990000000", cp.ключи_человека("+7 (999) 000-00-00", {}))
         self.assertIn("tel:9990000000", cp.ключи_человека("89990000000", {}))
+        # короче семи цифр — только строкой целиком
+        self.assertEqual(cp.ключи_человека("112", {}), {"112"})
+        self.assertIn("tel:1234567", cp.ключи_человека("123-45-67", {}))
         self.assertEqual(cp.ключи_человека("", {}), set())
         self.assertEqual(cp.ключи_человека(None, {}), set())
+
+    def test_карта_неоднозначность_номера_и_мусор(self):
+        v = волт(пусто=True)
+        self.индекс(v, [
+            {"canonical": "anna-petrova", "title": "Анна Петрова",
+             "aliases": ["Аня", "+7 999 000-00-00", 7]},
+            {"canonical": "anya-sidorova", "title": "Аня Сидорова", "aliases": ["Аня"]},
+            {"title": "без канона"}, "не словарь"])
+        карта = cp.карта_людей(v)
+        self.assertEqual(карта["анна петрова"], "anna-petrova")
+        self.assertIsNone(карта["аня"], "алиас двух людей не узнаёт никого")
+        self.assertEqual(карта["tel:9990000000"], "anna-petrova")
+        self.индекс(v, {"не": "список"})
+        self.assertEqual(cp.карта_людей(v), {})
 
     def test_только_открытые_и_не_из_того_же_источника(self):
         v = волт(пусто=True)
@@ -440,7 +459,43 @@ class ПоЧеловеку(unittest.TestCase):
         карточка(v, "b.md", title="договор", status="done")
         карточка(v, "c.md", title="звонок", status="proposed", origin="call/c2")
         карточка(v, "d.md", title="чужое", promised_to="Олег")
-        names = [it["title"] for it in cp.про_человека(v, ["Анна"], canon={},
+        names = [it["title"] for it in cp.про_человека(v, ["Анна"], карта={},
                                                        кроме_origin="call/c2")]
         self.assertEqual(names, ["смета"])
-        self.assertEqual(cp.про_человека(v, [], canon={}), [])
+        self.assertEqual(cp.про_человека(v, [], карта={}), [])
+
+    def test_владельцу_не_напоминаем(self):
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="себе", promised_to="Хозяин")
+        карточка(v, "b.md", title="ей", promised_to="Анна")
+        карта = {"хозяин": "owner-slug", "анна": "anna"}
+        names = [it["title"] for it in cp.про_человека(
+            v, ["Хозяин", "Анна"], карта=карта, владелец="owner-slug")]
+        self.assertEqual(names, ["ей"])
+
+    def test_номер_решает_за_имя(self):
+        """Две Анны в книге — два номера: карточка той Анны, что звонила с
+        другого номера, этой не напоминается; карточка про третьего человека
+        номером не судится."""
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="той Анне", origin="call/c1")
+        карточка(v, "b.md", title="этой Анне", origin="call/c2")
+        карточка(v, "c.md", title="Анне из звонка с Олегом", origin="call/c3")
+        там = {"call/c1": ["Анна", "+7 999 000-00-01"],
+               "call/c2": ["Анна", "+7 999 000-00-02"],
+               "call/c3": ["Олег", "+7 999 000-00-03"]}
+        names = [it["title"] for it in cp.про_человека(
+            v, ["Анна", "89990000002"], карта={}, собеседник=там.get)]
+        self.assertEqual(sorted(names), ["Анне из звонка с Олегом", "этой Анне"])
+
+    def test_кривая_карточка_пропущена(self):
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="смета")
+        with open(os.path.join(v, "kb/commitments/b.md"), "wb") as fh:
+            fh.write(b"---\ntitle: \xff\xfe\n---\n")
+        self.assertEqual([it["title"] for it in cp.про_человека(v, ["Анна"], карта={})],
+                         ["смета"])
+
+
+if __name__ == "__main__":
+    unittest.main()

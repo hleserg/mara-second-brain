@@ -192,18 +192,11 @@ def собрать(vault, отменяет=None):
     return оформить(body, отменяет), items[:взято]
 
 
-def ключи_человека(имя, canon):
-    """Чем человек узнаётся в карточке: имя в нижнем регистре без вики-ссылки,
-    его каноническое имя по индексу сущностей (`canon_map`) и номер — по
-    последним десяти цифрам, если это номер (`контакт()`): журнал звонков
-    пишет `+7…`, книга — `8…`. Пустое имя — пустое множество."""
-    from vault_common import unlink
-    s = unlink(str(имя or "")).strip().lower()
-    if not s:
-        return set()
+def _ключи_строки(s):
+    """Строка без регистра и, если это номер (`контакт()`, от семи цифр), —
+    `tel:` с последними десятью цифрами: журнал звонков пишет `+7…`, книга —
+    `8…`. Короче семи цифр номер узнаётся только строкой целиком."""
     out = {s}
-    if (canon or {}).get(s):
-        out.add("canon:" + canon[s])
     if mb.контакт(s):
         цифры = re.sub(r"\D", "", s)
         if len(цифры) >= 7:
@@ -211,31 +204,108 @@ def ключи_человека(имя, canon):
     return out
 
 
-def про_человека(vault, кто, canon=None, кроме_origin=None):
+def карта_людей(vault):
+    """Индекс сущностей → `{ключ: канон}` для узнавания человека (Т-У.4).
+
+    Не `vault_common.canon_map`: тот для ссылок, где «последний выиграл»
+    безвреден, а здесь ошибка — напоминание не тому. Поэтому ключ, ведущий к
+    двум сущностям, — `None`: неоднозначный алиас не узнаёт никого. Номера в
+    алиасах — ещё и по `tel:` (`_ключи_строки`), иначе исходящий звонок на
+    `8…` не узнал бы карточку с `+7…`. Кривые записи индекса пропускаются, а
+    не роняют; индекса нет или он не читается — пустая карта."""
+    try:
+        with open(os.path.join(vault or "", "_system/entity-index.json"),
+                  encoding="utf-8") as fh:
+            idx = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    карта = {}
+    for e in idx if isinstance(idx, list) else []:
+        if not isinstance(e, dict) or not isinstance(e.get("canonical"), str):
+            continue
+        канон = e["canonical"].strip().lower()
+        алиасы = e.get("aliases") if isinstance(e.get("aliases"), list) else []
+        for n in [e["canonical"], e.get("title")] + алиасы:
+            if not isinstance(n, str) or not n.strip():
+                continue
+            for k in _ключи_строки(n.strip().lower()):
+                карта[k] = канон if карта.get(k, канон) == канон else None
+    return карта
+
+
+def ключи_человека(имя, карта):
+    """Чем человек узнаётся: имя без вики-ссылки и регистра, номер (`tel:`),
+    его канон по `карта_людей` и цель ссылки `[[канон|как назвали]]`.
+    Пустое имя — пустое множество."""
+    from vault_common import unlink
+    сырое = str(имя or "").strip()
+    цель = None
+    if сырое.startswith("[[") and сырое.endswith("]]"):
+        цель = сырое[2:-2].split("|")[0].strip().lower() or None
+    s = unlink(сырое).strip().lower()
+    if not s:
+        return set()
+    out = _ключи_строки(s)
+    for k in list(out):
+        if (карта or {}).get(k):
+            out.add("canon:" + карта[k])
+    if цель:
+        out.add("canon:" + цель)
+    return out
+
+
+def про_человека(vault, кто, карта=None, кроме_origin=None, владелец=None,
+                 собеседник=None):
     """Пакет по человеку (Т6.2, начало; Т-У.4): открытые карточки
     `kb/commitments`, где `promised_to` — этот человек. `кто` — его имена
-    (имя из книги, номер). Сравнение по `ключи_человека` — без нечёткого
+    (имя из книги, номер). Узнавание по `ключи_человека`, без нечёткого
     сопоставления: лучше не напомнить, чем напомнить не тому.
-    `кроме_origin` — карточки этого источника (`call/<event>`) не берутся:
-    они только что пришли в том же дайджесте. Сопоставляется сырое
-    `promised_to`, а не очищенное `поля()`: номер, который в пакет модели
-    не едет, здесь — ключ. Возвращает пункты в форме `поля()`, по сроку."""
-    if canon is None:
-        from vault_common import canon_map
-        canon = canon_map(vault)
-    искомое = set().union(*[ключи_человека(k, canon) for k in кто]) if кто else set()
+
+    - `кроме_origin` — карточки этого источника (`call/<event>`) не берутся:
+      они только что пришли в том же дайджесте;
+    - `владелец` — канон владельца: карточка «кому» которой он сам
+      (модель так иногда пишет), не напоминается никому;
+    - `собеседник(origin)` — имена собеседника того разговора, откуда
+      карточка (имя из книги, номер). Если карточка — про него (её
+      `promised_to` узнаёт его) и номер есть и там, и у того, кто звонит
+      сейчас, — решает номер, а не имя: две разные Анны в книге — это два
+      номера. Карточка про третьего человека этим правилом не судится.
+
+    Сопоставляется сырое `promised_to`, а не очищенное `поля()`: номер,
+    который в пакет модели не едет, здесь — ключ. Нечитаемая карточка
+    пропускается. Возвращает пункты в форме `поля()`, по сроку."""
+    карта = карта_людей(vault) if карта is None else карта
+    искомое = set().union(*[ключи_человека(k, карта) for k in кто]) if кто else set()
     if not искомое:
         return []
+    свой_тел = {k for k in искомое if k.startswith("tel:")}
+    сам = (ключи_человека(владелец, карта) | {"canon:" + владелец.lower()}
+           if владелец else set())
     items = []
     for p in sorted(glob.glob(os.path.join(vault or "", "kb/commitments", "*.md"))):
-        with open(p, encoding="utf-8") as fh:
-            fm, _ = mb.frontmatter(fh.read())
+        try:
+            with open(p, encoding="utf-8") as fh:
+                fm, _ = mb.frontmatter(fh.read())
+        except (OSError, ValueError):
+            continue                       # и UnicodeDecodeError: одна кривая карточка
         if str(fm.get("status", "")).lower() not in OPEN:
             continue
         if кроме_origin and fm.get("origin") == кроме_origin:
             continue
         кому = fm.get("promised_to")
-        if not isinstance(кому, str) or not (ключи_человека(кому, canon) & искомое):
+        if not isinstance(кому, str):
+            continue
+        ключи = ключи_человека(кому, карта)
+        if not ключи or ключи & сам:
+            continue
+        тот = set().union(*[ключи_человека(k, карта)
+                            for k in (собеседник(fm.get("origin")) or [])]) \
+            if собеседник else set()
+        тел_ключи = {k for k in тот if k.startswith("tel:")} if ключи & тот else set()
+        if свой_тел and тел_ключи:
+            if not (тел_ключи & свой_тел):
+                continue
+        elif not (ключи & искомое):
             continue
         it = поля(fm)
         if данные(it["title"], MAX_TITLE):

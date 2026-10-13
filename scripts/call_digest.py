@@ -127,7 +127,7 @@ def line_of(item):
 ОБЕЩАНО_МАКС = 5
 
 
-def обещано_раньше(event, vault):
+def обещано_раньше(event, vault, con=None):
     """Т-У.4: что ещё открыто перед этим человеком — карточки прошлых
     разговоров, где он в `promised_to` (`context_pack.про_человека`). Свои
     карточки этого звонка не берутся: они в дайджесте выше. Строки — как в
@@ -137,10 +137,24 @@ def обещано_раньше(event, vault):
     import context_pack
     p = event.get("payload") or {}
     кто = [p.get("contact_name"), p.get("number")]
+
+    def собеседник(origin):
+        # карточка звонка: кто был на том конце — из реестра, по событию
+        if not (con and isinstance(origin, str) and origin.startswith("call/")):
+            return None
+        try:
+            там = mi.event_row(con, origin[len("call/"):]).get("payload") or {}
+        except KeyError:
+            return None
+        return [x for x in (там.get("contact_name"), там.get("number")) if x]
+
     try:
         пункты = context_pack.про_человека(vault, [k for k in кто if k],
-                                           кроме_origin="call/" + event["id"])
-    except (OSError, ValueError) as e:
+                                           кроме_origin="call/" + event["id"],
+                                           владелец=cp.OWNER, собеседник=собеседник)
+    except Exception as e:
+        # раздел необязательный: кривой индекс сущностей или карточка не
+        # должны держать дайджест звонка в ретраях
         print("call_digest: обещания раньше не прочитаны (%s)" % type(e).__name__,
               file=sys.stderr)
         return []
@@ -285,7 +299,7 @@ def run(event_id, root=None, env_file=None, vault=None):
     # #122, круг 2); аудит отказов пишет проектор, здесь — только фильтр
     extraction = cp._сверить_с_реестром(con, event_id, extraction)
     created = len(cp.commitment_cards(ev, extraction, {}))
-    text, items = render(ev, extraction, created, обещано_раньше(ev, vault))
+    text, items = render(ev, extraction, created, обещано_раньше(ev, vault, con))
     e = env(env_file)
     свеж = свежий(ev["occurred"])
     did = str(uuid.uuid4())

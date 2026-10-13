@@ -755,6 +755,41 @@ class ОбещаноРаньше(_СтендДоставки):
         self.карточка("d", "чужое", "Олег")
         self.assertNotIn(cd.ОБЕЩАНО, self.текст())
 
+    def test_кривой_индекс_не_держит_дайджест(self):
+        os.makedirs(os.path.join(self.vault, "_system"))
+        with open(os.path.join(self.vault, "_system/entity-index.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump([{"title": "без канона"}, {"canonical": "x", "aliases": [7]}], fh)
+        self.карточка("a", "прислать смету", "Анна")
+        self.assertIn("• «прислать смету»", self.текст())
+
+    def test_сбой_раздела_не_держит_дайджест(self):
+        import context_pack
+        with mock.patch.object(context_pack, "про_человека",
+                               side_effect=RuntimeError("что угодно")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                текст = self.текст()
+        self.assertNotIn(cd.ОБЕЩАНО, текст)
+        self.assertIn("обещания раньше не прочитаны (RuntimeError)", err.getvalue())
+
+    def test_две_анны_по_номеру(self):
+        """Карточка звонка другой Анны (другой номер в реестре) этой Анне
+        не напоминается; карточка звонка с её номера — напоминается."""
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"contact_name": "Анна", "number": "+79990000002"}),
+                          self.eid))
+        for sid, номер in (("та", "+79990000001"), ("эта", "+79990000002")):
+            mi.put_event(self.con, {"kind": "call", "source": "phone", "source_id": sid,
+                                    "payload": {"contact_name": "Анна", "number": номер}})
+        ids = {r["source_id"]: r["id"] for r in
+               self.con.execute("select id, source_id from events where source_id in ('та','эта')")}
+        self.карточка("a", "той Анне", "Анна", origin="call/" + ids["та"])
+        self.карточка("b", "этой Анне", "Анна", origin="call/" + ids["эта"])
+        текст = self.текст()
+        self.assertIn("• «этой Анне»", текст)
+        self.assertNotIn("«той Анне»", текст)
+
     def test_длинный_список_обрезан(self):
         for i in range(cd.ОБЕЩАНО_МАКС + 2):
             self.карточка("n%d" % i, "дело %d" % i, "Анна")
