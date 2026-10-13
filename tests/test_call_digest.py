@@ -15,6 +15,24 @@ EVENT = {"id": "call_1", "occurred": "2026-09-02T14:05:00+03:00",
          "changed_instructions": [], "constraints": [], "followups": []}
 
 
+_VAULT = []
+
+
+def setUpModule():
+    """Раздел «Обещано раньше» читает волт из `VAULT`; общий каталог тестов
+    может нести чужие карточки на «Анну» — у модуля свой пустой волт."""
+    _VAULT.append(os.environ.get("VAULT"))
+    os.environ["VAULT"] = tempfile.mkdtemp()
+
+
+def tearDownModule():
+    было = _VAULT.pop()
+    if было is None:
+        os.environ.pop("VAULT", None)
+    else:
+        os.environ["VAULT"] = было
+
+
 def с(**kw):
     d = dict(ПУСТО)
     d.update(kw)
@@ -203,6 +221,9 @@ class _СтендДоставки(unittest.TestCase):
         свежесть.start()
         self.addCleanup(свежесть.stop)
         self.dir = tempfile.mkdtemp()
+        # свой пустой волт: раздел «Обещано раньше» читает `VAULT`
+        self.vault = os.path.join(self.dir, "vault")
+        os.environ["VAULT"] = self.vault
         self.con = mi.connect(self.dir)
         self.eid, _ = mi.put_event(self.con, {
             "kind": "call", "source": "phone", "source_id": "d1",
@@ -674,6 +695,72 @@ class Outbox(_СтендДоставки):
                             "--root", self.dir, "--env-file", self.env(), "--outbox"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class ОбещаноРаньше(_СтендДоставки):
+    """Т-У.4: позвонил человек, перед которым открыты обещания прошлых
+    разговоров, — дайджест их называет. Только открытые, только этого
+    человека, без карточек этого же звонка."""
+
+    def карточка(self, имя, title, кому, status="open", due=None, origin="call/старый",
+                 id_="0190f2a1-7b3c-7d4e-8f00-00000000000a"):
+        d = os.path.join(self.vault, "kb/commitments")
+        os.makedirs(d, exist_ok=True)
+        строки = ["---", "title: %s" % title, "status: %s" % status,
+                  "promised_to: %s" % кому, "origin: %s" % origin, "id: %s" % id_]
+        if due:
+            строки.append("due: %s" % due)
+        with open(os.path.join(d, имя + ".md"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(строки + ["---", "", "тело не едет"]) + "\n")
+
+    def текст(self):
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cd.run(self.eid, root=self.dir, env_file=пусто)
+        return self.con.execute("select text from digests where event_id=?",
+                                (self.eid,)).fetchone()["text"]
+
+    def test_открытые_этого_человека_по_сроку(self):
+        self.карточка("a", "прислать смету", "Анна", due="2026-09-20",
+                      id_="0190f2a1-7b3c-7d4e-8f00-0000000000aa")
+        self.карточка("b", "позвонить про договор", "анна", status="proposed")
+        self.карточка("c", "уже сделано", "Анна", status="done")
+        self.карточка("d", "чужое", "Олег")
+        self.карточка("e", "из этого же звонка", "Анна", origin="call/" + self.eid)
+        текст = self.текст()
+        хвост = текст.split("\n\n" + cd.ОБЕЩАНО + "\n", 1)[1].split("\n")
+        self.assertEqual(хвост, ["• «прислать смету» — до 2026-09-20 #000000aa",
+                                 "• «позвонить про договор» #0000000a"])
+        self.assertNotIn("тело не едет", текст)
+
+    def test_по_номеру_и_по_индексу_сущностей(self):
+        self.con.execute("update events set payload_json=? where id=?",
+                         (json.dumps({"contact_name": "Аня", "number": "89990000000"}),
+                          self.eid))
+        os.makedirs(os.path.join(self.vault, "_system"))
+        with open(os.path.join(self.vault, "_system/entity-index.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump([{"canonical": "anna-petrova", "title": "Анна Петрова",
+                        "aliases": ["Аня"], "type": "person"}], fh, ensure_ascii=False)
+        self.карточка("a", "по номеру", "+7 (999) 000-00-00")
+        self.карточка("b", "по канону", "[[anna-petrova|Анна Петрова]]")
+        self.карточка("c", "другой номер", "+7 999 000-00-01")
+        текст = self.текст()
+        self.assertIn("• «по номеру»", текст)
+        self.assertIn("• «по канону»", текст)
+        self.assertNotIn("другой номер", текст)
+        self.assertNotIn("+7", текст.split(cd.ОБЕЩАНО, 1)[1], "номер в раздел не едет")
+
+    def test_нет_обещаний_нет_раздела(self):
+        self.карточка("d", "чужое", "Олег")
+        self.assertNotIn(cd.ОБЕЩАНО, self.текст())
+
+    def test_длинный_список_обрезан(self):
+        for i in range(cd.ОБЕЩАНО_МАКС + 2):
+            self.карточка("n%d" % i, "дело %d" % i, "Анна")
+        хвост = self.текст().split(cd.ОБЕЩАНО + "\n", 1)[1].split("\n")
+        self.assertEqual(len(хвост), cd.ОБЕЩАНО_МАКС + 1)
+        self.assertEqual(хвост[-1], "• …и ещё 2")
 
 
 class СверкаСРеестром(_СтендДоставки):

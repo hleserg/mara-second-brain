@@ -418,3 +418,29 @@ class Отмена(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ПоЧеловеку(unittest.TestCase):
+    """Т6.2, начало: чем человек узнаётся в `promised_to` (Т-У.4)."""
+
+    def test_ключи(self):
+        canon = {"анна петрова": "anna-petrova", "аня": "anna-petrova"}
+        self.assertEqual(cp.ключи_человека("[[anna-petrova|Анна Петрова]]", canon),
+                         {"анна петрова", "canon:anna-petrova"})
+        self.assertEqual(cp.ключи_человека("Аня", canon), {"аня", "canon:anna-petrova"})
+        # номер — по последним десяти цифрам: `+7…` журнала и `8…` книги
+        self.assertIn("tel:9990000000", cp.ключи_человека("+7 (999) 000-00-00", {}))
+        self.assertIn("tel:9990000000", cp.ключи_человека("89990000000", {}))
+        self.assertEqual(cp.ключи_человека("", {}), set())
+        self.assertEqual(cp.ключи_человека(None, {}), set())
+
+    def test_только_открытые_и_не_из_того_же_источника(self):
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="смета", status="open")
+        карточка(v, "b.md", title="договор", status="done")
+        карточка(v, "c.md", title="звонок", status="proposed", origin="call/c2")
+        карточка(v, "d.md", title="чужое", promised_to="Олег")
+        names = [it["title"] for it in cp.про_человека(v, ["Анна"], canon={},
+                                                       кроме_origin="call/c2")]
+        self.assertEqual(names, ["смета"])
+        self.assertEqual(cp.про_человека(v, [], canon={}), [])

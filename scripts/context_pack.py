@@ -192,6 +192,59 @@ def собрать(vault, отменяет=None):
     return оформить(body, отменяет), items[:взято]
 
 
+def ключи_человека(имя, canon):
+    """Чем человек узнаётся в карточке: имя в нижнем регистре без вики-ссылки,
+    его каноническое имя по индексу сущностей (`canon_map`) и номер — по
+    последним десяти цифрам, если это номер (`контакт()`): журнал звонков
+    пишет `+7…`, книга — `8…`. Пустое имя — пустое множество."""
+    from vault_common import unlink
+    s = unlink(str(имя or "")).strip().lower()
+    if not s:
+        return set()
+    out = {s}
+    if (canon or {}).get(s):
+        out.add("canon:" + canon[s])
+    if mb.контакт(s):
+        цифры = re.sub(r"\D", "", s)
+        if len(цифры) >= 7:
+            out.add("tel:" + цифры[-10:])
+    return out
+
+
+def про_человека(vault, кто, canon=None, кроме_origin=None):
+    """Пакет по человеку (Т6.2, начало; Т-У.4): открытые карточки
+    `kb/commitments`, где `promised_to` — этот человек. `кто` — его имена
+    (имя из книги, номер). Сравнение по `ключи_человека` — без нечёткого
+    сопоставления: лучше не напомнить, чем напомнить не тому.
+    `кроме_origin` — карточки этого источника (`call/<event>`) не берутся:
+    они только что пришли в том же дайджесте. Сопоставляется сырое
+    `promised_to`, а не очищенное `поля()`: номер, который в пакет модели
+    не едет, здесь — ключ. Возвращает пункты в форме `поля()`, по сроку."""
+    if canon is None:
+        from vault_common import canon_map
+        canon = canon_map(vault)
+    искомое = set().union(*[ключи_человека(k, canon) for k in кто]) if кто else set()
+    if not искомое:
+        return []
+    items = []
+    for p in sorted(glob.glob(os.path.join(vault or "", "kb/commitments", "*.md"))):
+        with open(p, encoding="utf-8") as fh:
+            fm, _ = mb.frontmatter(fh.read())
+        if str(fm.get("status", "")).lower() not in OPEN:
+            continue
+        if кроме_origin and fm.get("origin") == кроме_origin:
+            continue
+        кому = fm.get("promised_to")
+        if not isinstance(кому, str) or not (ключи_человека(кому, canon) & искомое):
+            continue
+        it = поля(fm)
+        if данные(it["title"], MAX_TITLE):
+            items.append(it)
+    items.sort(key=lambda it: (срок(it) is None, срок(it) or "",
+                               данные(it["title"], MAX_TITLE)))
+    return items
+
+
 def выделить(text):
     """Наш кусок из файла, который правит не только этот скрипт.
 
