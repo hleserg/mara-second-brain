@@ -95,6 +95,7 @@ GPU = threading.Semaphore(1)
 # STT-сервису на `/` отвечать нечего, Ollama отвечает строкой.
 ПРОБА_С = 60
 ПРОБА_ТАЙМАУТ = 3
+ВОРКЕР = "doctor"                       # строка сердцебиения воркера в `compute_nodes`
 _пробы = {}                             # адрес → (monotonic, жив)
 OPEN_PATHS = ("/healthz",)              # мануал велит проверять его с телефона
 # /metrics без токена отдаётся только с петли, и /healthz из локалки отдаёт
@@ -517,9 +518,10 @@ def metrics(con, root=None, vault=None):
         "select substr(queued_reason, length('node_offline:') + 1), count(*) from jobs "
         "where state='ready' and queued_reason like 'node_offline:%' group by 1"))
     видели = dict(con.execute("select id, last_seen from compute_nodes"))
-    все_узлы = sorted({у for у, _ in ТЯЖЁЛЫЕ.values()} | set(ждут) | set(видели))
-    ждут_узел = [(у, ждут.get(у, 0)) for у in все_узлы]
-    узлы = [(у, age_of(видели.get(у))) for у in все_узлы]
+    тяжёлые = sorted({у for у, _ in ТЯЖЁЛЫЕ.values()} | set(ждут))
+    ждут_узел = [(у, ждут.get(у, 0)) for у in тяжёлые]
+    # свежесть — и у воркера (`ВОРКЕР`): его сердцебиение пишет `такт`
+    узлы = [(у, age_of(видели.get(у))) for у in sorted(set(тяжёлые) | set(видели))]
     devices = [(n, age_of(t)) for n, t, _ in con.execute(
         "select name, last_seen, max(%s) from devices where revoked_at is null "
         "group by name order by name" % mi.секунды("last_seen"))]
@@ -1692,50 +1694,82 @@ def run_step(kind, event_id):
 
 
 def проба(адрес, сейчас=None):
-    """Жив ли сервис по адресу: `(жив, проба_свежая)`. Ответ кэшируется на
-    `ПРОБА_С`: воркер спрашивает каждые пять секунд, а стучать в выключенную
-    коробку так часто незачем."""
+    """Жив ли сервис по адресу: `(жив, проба_свежая)`; `жив` — `None`, если
+    адрес не разбирается. Ответ кэшируется на `ПРОБА_С`: воркер спрашивает
+    каждые пять секунд, а стучать в выключенную коробку так часто незачем."""
     import urllib.request, urllib.error, http.client
     сейчас = time.monotonic() if сейчас is None else сейчас
     было = _пробы.get(адрес)
     if было and сейчас - было[0] < ПРОБА_С:
         return было[1], False
     try:
+        части = urllib.parse.urlsplit(адрес)
+        if части.scheme not in ("http", "https") or not части.hostname:
+            raise ValueError("не http-адрес")
+        части.port                      # кривой порт — тоже ValueError
         urllib.request.urlopen(адрес, timeout=ПРОБА_ТАЙМАУТ).close()
         жив = True
     except urllib.error.HTTPError:
         жив = True                      # ответил кодом — значит, жив
-    except (OSError, http.client.HTTPException, ValueError):
+    except ValueError:
+        # кривой адрес (`bigpc:8770` без схемы) — поломка настройки, а не
+        # выключенная коробка: `None`, и шаг упадёт на нём видно
+        жив = None
+    except (OSError, http.client.HTTPException):
         жив = False
     _пробы[адрес] = (сейчас, жив)
     return жив, True
 
 
+def адрес_шага(перем):
+    """Адрес сервиса так же, как его найдёт сам шаг: окружение, а за ним
+    `~/.config/mara/env` (`call_asr` и `call_extract` зовут
+    `vault_common.load_env`). Без файла демон не видел бы адреса, которые
+    живут только там, и молча брал бы работы, как до Т7.3. Файл читается,
+    но в окружение демона не впитывается."""
+    import vault_common
+    return os.environ.get(перем) or vault_common.прочитать_env().get(перем)
+
+
 def недоступные(con):
-    """`{kind: причина или None}` по тяжёлым шагам. Адрес не задан — `None`:
-    шаг сам упадёт на `нужен_адрес`, и ошибка настройки останется видна, а
-    не спрячется в ожидание. Узел, у которого ответили все сервисы на свежей
-    пробе, получает `compute_nodes.last_seen` — по нему сверка судит, сколько
-    он молчит."""
+    """`{kind: причина или None}` по тяжёлым шагам. Адрес не задан или не
+    разбирается — `None`: шаг сам упадёт на нём, и ошибка настройки
+    останется видна, а не спрячется в ожидание. Узел, у которого ответили
+    все сервисы на свежей пробе, получает `compute_nodes.last_seen` — по
+    нему сверка судит, сколько он молчит."""
     причины, живые, свежие = {}, {}, set()
     for kind, (узел, перем) in sorted(ТЯЖЁЛЫЕ.items()):
-        адрес = os.environ.get(перем)
+        адрес = адрес_шага(перем)
         if not адрес:
             причины[kind] = None
             continue
         жив, свежая = проба(адрес)
+        if жив is None:
+            причины[kind] = None
+            continue
         причины[kind] = None if жив else "node_offline:" + узел
         живые[узел] = живые.get(узел, True) and жив
         if свежая:
             свежие.add(узел)
     for узел in sorted(свежие):
         if живые.get(узел):
-            con.execute("insert into compute_nodes(id,name,role,last_seen,capabilities_json) "
-                        "values(?,?,?,?,?) on conflict(id) do update set "
-                        "last_seen=excluded.last_seen",
-                        (узел, узел, "heavy", mi.now_iso(),
-                         json.dumps({"источник": "проба"}, ensure_ascii=False)))
+            отметить_узел(con, узел, "heavy")
     return причины
+
+
+def отметить_узел(con, узел, роль):
+    """`compute_nodes.last_seen` узла — сейчас. Строка с тем же `name`, но
+    другим `id` (её может завести будущее сердцебиение, Т7.2) — не повод
+    ронять воркер: отметка пропускается, а сверка увидит старый `last_seen`."""
+    try:
+        con.execute("insert into compute_nodes(id,name,role,last_seen,capabilities_json) "
+                    "values(?,?,?,?,?) on conflict(id) do update set "
+                    "last_seen=excluded.last_seen",
+                    (узел, узел, роль, mi.now_iso(),
+                     json.dumps({"источник": "проба" if роль == "heavy" else "воркер"},
+                                ensure_ascii=False)))
+    except sqlite3.IntegrityError as e:
+        print("%s узел %s не отмечен: %s" % (mi.now_iso(), узел, e), flush=True)
 
 
 def такт(con, отмечено=None):
@@ -1749,12 +1783,19 @@ def такт(con, отмечено=None):
     if (причины != отмечено[1] or отмечено[0] is None
             or сейчас - отмечено[0] >= ПРОБА_С):
         mi.отметить_ожидание(con, причины)
+        # сердцебиение самого воркера: по нему сверка отличает «работы ждут
+        # узел» от «воркер встал, а причина осталась от прошлого»
+        отметить_узел(con, ВОРКЕР, "core")
         отмечено[:] = [сейчас, причины]
     ждут = {k for k, п in причины.items() if п}
     job = mi.claim_job(con, kinds=[k for k in STEP if k not in ждут] if ждут else None)
     if not job:
         return None
     ok, err = run_step(job["kind"], job["event_id"])
+    if not ok and job["kind"] in ТЯЖЁЛЫЕ:
+        # коробка могла лечь посреди шага: следующая проба — сразу, а не по
+        # кэшу «жив», иначе ретрай через минуту сжёг бы ещё одну попытку
+        _пробы.pop(адрес_шага(ТЯЖЁЛЫЕ[job["kind"]][1]), None)
     закрыть_работу(con, job, ok, err)
     print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
                                   "ок" if ok else "сбой"), flush=True)
@@ -1776,6 +1817,14 @@ def worker(stop, root):
             if база_занята(e):
                 счесть_занятость("worker")
             print("%s воркер: %s — подожду" % (mi.now_iso(), e), flush=True)
+            stop.wait(5)
+        except Exception as e:
+            # Любая другая беда в обороте не должна молча убить единственный
+            # поток воркера: он без перезапуска, а `/healthz` его не видит.
+            # Сердцебиение (`ВОРКЕР` в `compute_nodes`) при этом продолжится —
+            # залипший шаг виден по попыткам, а не по молчанию.
+            print("%s воркер: %s: %s — подожду" % (mi.now_iso(), type(e).__name__,
+                                                  mi.обезличить(str(e))[:200]), flush=True)
             stop.wait(5)
 
 

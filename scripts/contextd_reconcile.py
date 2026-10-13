@@ -804,11 +804,13 @@ def очередь_стоит(con, hours=None, сейчас=None):
     сейчас = int(time.time()) if сейчас is None else int(сейчас)
     граница = сейчас - int(hours * 3600)
     # ждущие молчащий узел — не «никто не берёт»: воркер их не берёт
-    # нарочно, о них говорит `узел_молчит`
+    # нарочно, о них говорит `узел_молчит`. Но только пока воркер жив: у
+    # вставшего причина осталась от прошлого, и прятать её работы нельзя
+    ждут = ("and (queued_reason is null or queued_reason not like 'node_offline:%') "
+            if воркер_жив(con, сейчас) else "")
     rows = con.execute("select kind, count(*) as n, min(next_at) as t from jobs "
                        "where state='ready' and next_at < ? and lease_until < ? "
-                       "and (queued_reason is null or queued_reason not like 'node_offline:%') "
-                       "group by kind order by kind", (граница, сейчас)).fetchall()
+                       + ждут + "group by kind order by kind", (граница, сейчас)).fetchall()
     if not rows:
         return []
     # воркер жив, если начинал попытки за то же окно — значит, очередь просто
@@ -828,6 +830,21 @@ def очередь_стоит(con, hours=None, сейчас=None):
                     count=sum(r["n"] for r in rows))]
 
 
+# Воркер отмечает себя в `compute_nodes` (`contextd.ВОРКЕР`) раз в минуту;
+# десять минут тишины — он встал или демон лежит
+ВОРКЕР_ТИШИНА_С = 600
+
+
+def воркер_жив(con, сейчас=None):
+    """Сердцебиение воркера свежее `ВОРКЕР_ТИШИНА_С`. Строки нет (код до
+    Т7.3 или воркер ни разу не прошёл оборот) — не жив: причины ожидания
+    тогда не доказаны свежими."""
+    сейчас = int(time.time()) if сейчас is None else int(сейчас)
+    r = con.execute("select cast(strftime('%s', last_seen) as integer) from compute_nodes "
+                    "where id='doctor'").fetchone()
+    return bool(r and r[0] is not None and сейчас - r[0] <= ВОРКЕР_ТИШИНА_С)
+
+
 def узел_молчит(con, hours=None, сейчас=None):
     """Готовые работы ждут узел (`queued_reason = node_offline:<узел>`,
     ADR-0010 решение 3), а он молчит дольше порога. Сколько молчит — по
@@ -836,6 +853,8 @@ def узел_молчит(con, hours=None, сейчас=None):
     не уходят: включится коробка — возьмутся сами."""
     hours = УЗЕЛ_Ч if hours is None else hours
     сейчас = int(time.time()) if сейчас is None else int(сейчас)
+    if not воркер_жив(con, сейчас):
+        return []                       # причины не свежие — это `очередь-стоит`
     out = []
     for узел, n, kinds, старейшая in con.execute(
             "select substr(queued_reason, length('node_offline:') + 1) as узел, "
@@ -845,17 +864,24 @@ def узел_молчит(con, hours=None, сейчас=None):
             "group by узел order by узел").fetchall():
         видел = con.execute("select cast(strftime('%s', last_seen) as integer) "
                             "from compute_nodes where id=?", (узел,)).fetchone()
-        с = видел[0] if видел and видел[0] is not None else старейшая
+        # молчание — с последнего ответа, но не раньше самой старой ждущей
+        # работы: узел, забытый неделю назад и включённый час назад, не
+        # тревога (ADR-0010 решение 3 мерит ожидание работы)
+        видел = видел[0] if видел and видел[0] is not None else None
+        с = max(видел, старейшая) if видел is not None and старейшая is not None \
+            else (видел if видел is not None else старейшая)
         if с is None or сейчас - с <= hours * 3600:
             continue
-        когда = ("не отвечает %d ч" % ((сейчас - с) // 3600) if видел and видел[0]
-                 else "ни разу не отвечал, работы ждут %d ч" % ((сейчас - с) // 3600))
+        шаги = ", ".join(sorted((kinds or "").split(",")))
+        когда = ("не отвечает по шагам %s %d ч" % (шаги, (сейчас - с) // 3600)
+                 if видел is not None
+                 else "ни разу не отвечал по шагам %s, работы ждут %d ч"
+                 % (шаги, (сейчас - с) // 3600))
         out.append(находка(
             "узел-молчит", "warn",
-            "узел %s %s; ждут работ: %d (%s) — включить коробку или проверить "
+            "узел %s %s; ждут работ: %d — включить коробку или проверить "
             "сервис; в DLQ они не уйдут и возьмутся сами, когда узел ответит"
-            % (узел, когда, n, ", ".join(sorted((kinds or "").split(",")))),
-            count=n, node=узел))
+            % (узел, когда, n), count=n, node=узел))
     return out
 
 

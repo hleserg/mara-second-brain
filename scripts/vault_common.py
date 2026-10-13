@@ -109,18 +109,25 @@ def load_env(path=None):
     окружение при этом остаётся — приоритет systemd и крона над файлом другой
     природы, чем приоритет строк внутри файла.
     """
+    for k, v in прочитать_env(path).items():
+        os.environ.setdefault(k, v)
+
+
+def прочитать_env(path=None):
+    """Тот же файл, что у `load_env`, но словарём и без записи в окружение:
+    демону, которому нужен один ключ, незачем впитывать все. Файла нет —
+    пустой словарь."""
     try:
         with open(os.path.expanduser(path or env_file()), errors="replace") as fh:
             lines = fh.read().splitlines()
     except OSError:
-        return
+        return {}
     из_файла = {}
     for l in lines:
         пара = _строка(l)
         if пара:
             из_файла[пара[0]] = пара[1]   # последнее вхождение, как в шелле
-    for k, v in из_файла.items():
-        os.environ.setdefault(k, v)
+    return из_файла
 
 
 def _строка(l):
