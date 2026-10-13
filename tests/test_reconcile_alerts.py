@@ -97,10 +97,15 @@ class ОчередьСтоит(База):
 
 
 class ШагиБрошены(База):
-    def попытка(self, sid, kind, outcome, started):
+    def попытка(self, sid, kind, outcome, started, следующая=None):
+        """Брошенную помечает повторная выдача, заводя попытку 2 — её старт и
+        есть время пометки; по умолчанию — сразу же."""
         jid = mi.add_job(self.con, self.событие(sid), kind)
         self.con.execute("insert into job_attempts(job_id, attempt, started, outcome) "
                          "values(?, 1, ?, ?)", (jid, started, outcome))
+        if outcome == "lease_expired":
+            self.con.execute("insert into job_attempts(job_id, attempt, started) "
+                             "values(?, 2, ?)", (jid, следующая or started))
 
     def test_брошенные_за_сутки_по_виду(self):
         self.попытка("a", "asr", "lease_expired", назад(hours=3).isoformat())
@@ -114,6 +119,15 @@ class ШагиБрошены(База):
         self.assertEqual((f[0]["check"], f[0]["count"]), ("шаги-брошены", 2))
         self.assertIn("asr 2", f[0]["detail"])
         self.assertNotIn("extract", f[0]["detail"])
+
+    def test_окно_от_пометки_а_не_от_старта(self):
+        """Воркер лежал трое суток: попытку начали 80 ч назад, брошенной её
+        признали час назад — находка должна дожить до сводки."""
+        self.попытка("a", "asr", "lease_expired", назад(hours=80).isoformat(),
+                     следующая=назад(hours=1).isoformat())
+        f = rc.шаги_брошены(self.con)
+        self.assertEqual(len(f), 1)
+        self.assertIn("asr 1", f[0]["detail"])
 
     def test_нет_брошенных_нет_находки(self):
         self.попытка("a", "asr", "ok", назад(hours=1).isoformat())
@@ -221,7 +235,9 @@ class ДемонНеОтвечает(unittest.TestCase):
         self.assertIn("код 204", f[0]["detail"])
 
     def test_кривой_адрес_не_выдаётся_за_лежащий_демон(self):
-        for адрес in ("не-адрес", "http://[::1"):
+        # `http://` urllib отвергает `URLError`, а не `ValueError` (Codex по #153)
+        for адрес in ("не-адрес", "http://[::1", "http://", "127.0.0.1:8788",
+                      "ftp://127.0.0.1"):
             f = rc.демон_не_отвечает(адрес)
             self.assertEqual((f[0]["check"], f[0]["level"]),
                              ("демон-адрес-кривой", "warn"), адрес)
@@ -274,7 +290,10 @@ class Сверка(База):
         self.con.execute("update jobs set next_at=? where id=?",
                          (int(time.time()) - 10 * 3600, jid))
         self.con.execute("insert into job_attempts(job_id, attempt, started, outcome) "
-                         "values(?, 1, ?, 'lease_expired')", (jid, назад(hours=20).isoformat()))
+                         "values(?, 1, ?, 'lease_expired')", (jid, назад(hours=30).isoformat()))
+        # повторная выдача 20 ч назад: брошенная в окне, а воркер с тех пор молчит
+        self.con.execute("insert into job_attempts(job_id, attempt, started) "
+                         "values(?, 2, ?)", (jid, назад(hours=20).isoformat()))
         self.устройство("dev_тел", "телефон", назад(hours=60).isoformat(timespec="seconds"))
         виды = {x["check"] for x in rc.run(self.con, self.root, vault=None)}
         self.assertLessEqual({"очередь-стоит", "шаги-брошены", "телефон-молчит"}, виды)

@@ -828,10 +828,16 @@ def шаги_брошены(con, hours=БРОШЕНО_Ч):
     закрывая работу. Работа при этом повторится сама, но час GPU ушёл
     впустую; после выката это ждано, повторяющееся без выката — поломка."""
     с = int(time.time()) - int(hours * 3600)
+    # Когда попытку признали брошенной — это старт следующей: `lease_expired`
+    # ставит повторная выдача той же транзакцией, что заводит новую попытку.
+    # По старту самой брошенной окно съедал бы простой воркера: после двух
+    # суток простоя находка исчезала бы, не успев родиться (Codex по #153)
     rows = con.execute("select j.kind, count(*) as n from job_attempts a "
                        "join jobs j on j.id = a.job_id "
+                       "join job_attempts b on b.job_id = a.job_id "
+                       "and b.attempt = a.attempt + 1 "
                        "where a.outcome = 'lease_expired' "
-                       "and cast(strftime('%s', a.started) as integer) >= ? "
+                       "and cast(strftime('%s', b.started) as integer) >= ? "
                        "group by j.kind order by j.kind", (с,)).fetchall()
     if not rows:
         return []
@@ -886,9 +892,15 @@ def демон_не_отвечает(адрес):
     кривой адрес — своя находка, а не «демон лежит»."""
     if not адрес:
         return []
-    import urllib.request
+    import urllib.request, urllib.parse
     url = адрес.rstrip("/") + "/healthz"
     try:
+        # `http://` или адрес без схемы `urlopen` отвергает по-разному
+        # (`URLError` — подкласс `OSError`), и он ушёл бы в «демон лежит»;
+        # кривую настройку называем до запроса (Codex по #153)
+        части = urllib.parse.urlsplit(адрес)
+        if части.scheme not in ("http", "https") or not части.hostname:
+            raise ValueError("нет схемы или хоста")
         # не-2xx `urlopen` бросает сам (`HTTPError` — подкласс `OSError`), а
         # иной 2xx (прокси, чужой слушатель: 204) — нет; живой `contextd`
         # отвечает ровно 200 (Codex по #153)
