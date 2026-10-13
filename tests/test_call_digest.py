@@ -790,6 +790,21 @@ class ОбещаноРаньше(_СтендДоставки):
         self.assertIn("• «этой Анне»", текст)
         self.assertNotIn("«той Анне»", текст)
 
+    def test_раздел_не_раздувает_сообщение(self):
+        """Дайджест у предела Bot API (4096 знаков): раздел входит, сколько
+        влезет, или не входит вовсе — но сообщение остаётся отправляемым."""
+        база = cd.render(EVENT, ПУСТО, 0)[0]
+        строка = "• «" + "д" * 60 + "»"
+        запас = cd.ТЕЛЕГРАМ_МАКС - len(база) - len("\n\n" + cd.ОБЕЩАНО) - 1
+        ev = dict(EVENT, payload=dict(EVENT["payload"], contact_name="х" * (запас - len(строка))))
+        текст = cd.render(ev, ПУСТО, 0, [строка] * 3)[0]
+        self.assertLessEqual(len(текст), cd.ТЕЛЕГРАМ_МАКС)
+        self.assertEqual(текст.count(строка), 1, "влезла одна строка из трёх")
+        ev = dict(EVENT, payload=dict(EVENT["payload"], contact_name="х" * запас))
+        текст = cd.render(ev, ПУСТО, 0, [строка])[0]
+        self.assertNotIn(cd.ОБЕЩАНО, текст)
+        self.assertLessEqual(len(текст), cd.ТЕЛЕГРАМ_МАКС)
+
     def test_длинный_список_обрезан(self):
         for i in range(cd.ОБЕЩАНО_МАКС + 2):
             self.карточка("n%d" % i, "дело %d" % i, "Анна")
