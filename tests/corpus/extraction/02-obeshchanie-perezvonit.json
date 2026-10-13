@@ -1,0 +1,69 @@
+{
+ "id": "02-obeshchanie-perezvonit",
+ "about": "Обещание владельца телефона: перезвонить в понедельник.",
+ "occurred": "2026-09-02T14:05:00+03:00",
+ "segments": [
+  {
+   "segment_id": "s0001",
+   "start_ms": 0,
+   "end_ms": 12000,
+   "text": "Слушай, по плитке я пока не знаю, что ответить."
+  },
+  {
+   "segment_id": "s0002",
+   "start_ms": 12000,
+   "end_ms": 22000,
+   "text": "Давай так: я тебе перезвоню в понедельник и скажу по плитке."
+  }
+ ],
+ "gold": {
+  "requests": [],
+  "commitments": [
+   {
+    "ключ": [
+     "перезвон"
+    ],
+    "promised_to": "Олег",
+    "due_at": "2026-09-07"
+   }
+  ]
+ },
+ "recorded": {
+  "model": "synthetic",
+  "prompt_version": 2,
+  "rules_version": 3,
+  "response": {
+   "requests": [],
+   "commitments": [
+    {
+     "action": "перезвонить и сказать по плитке",
+     "explicit": true,
+     "deadline_phrase": "в понедельник",
+     "confidence": 0.93,
+     "evidence": [
+      {
+       "segment": "s0002"
+      }
+     ],
+     "promised_to": "Олег"
+    }
+   ],
+   "decisions": [],
+   "constraints": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "followups": [],
+   "people_mentioned": [],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 1,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
+ }
+}

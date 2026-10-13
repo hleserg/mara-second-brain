@@ -1,0 +1,71 @@
+{
+ "id": "01-prosba-so-srokom",
+ "about": "Явная просьба собеседника со сроком «до пятницы»; согласие без своего обещания.",
+ "occurred": "2026-09-02T14:05:00+03:00",
+ "segments": [
+  {
+   "segment_id": "s0001",
+   "start_ms": 0,
+   "end_ms": 14000,
+   "text": "Привет, это Анна. Пришли мне, пожалуйста, смету по ремонту до пятницы, иначе бригада не выйдет."
+  },
+  {
+   "segment_id": "s0002",
+   "start_ms": 14000,
+   "end_ms": 20000,
+   "text": "Хорошо, понял."
+  }
+ ],
+ "gold": {
+  "requests": [
+   {
+    "ключ": [
+     "смет"
+    ],
+    "requester": "Анна",
+    "due_at": "2026-09-04"
+   }
+  ],
+  "commitments": []
+ },
+ "recorded": {
+  "model": "synthetic",
+  "prompt_version": 2,
+  "rules_version": 3,
+  "response": {
+   "requests": [
+    {
+     "action": "прислать смету по ремонту",
+     "explicit": true,
+     "deadline_phrase": "до пятницы",
+     "confidence": 0.93,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ],
+     "requester": "Анна"
+    }
+   ],
+   "commitments": [],
+   "decisions": [],
+   "constraints": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "followups": [],
+   "people_mentioned": [
+    "Анна"
+   ],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 1,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
+ }
+}

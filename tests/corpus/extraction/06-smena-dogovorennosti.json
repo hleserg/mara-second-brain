@@ -1,0 +1,61 @@
+{
+ "id": "06-smena-dogovorennosti",
+ "about": "Встреча переносится с пятницы на среду — это смена договорённости, а не новая задача.",
+ "occurred": "2026-09-02T14:05:00+03:00",
+ "segments": [
+  {
+   "segment_id": "s0001",
+   "start_ms": 0,
+   "end_ms": 14000,
+   "text": "Слушай, давай встретимся не в пятницу, а в среду, в пятницу я не успеваю."
+  }
+ ],
+ "gold": {
+  "requests": [],
+  "commitments": [],
+  "не_задача": [
+   [
+    "встрет"
+   ]
+  ]
+ },
+ "recorded": {
+  "model": "synthetic",
+  "prompt_version": 2,
+  "rules_version": 3,
+  "response": {
+   "requests": [],
+   "commitments": [],
+   "decisions": [],
+   "constraints": [],
+   "open_questions": [],
+   "changed_instructions": [
+    {
+     "action": "встреча в среду",
+     "explicit": true,
+     "deadline_phrase": "в среду",
+     "confidence": 0.93,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ],
+     "supersedes": "встреча в пятницу",
+     "new_state": "встреча в среду"
+    }
+   ],
+   "followups": [],
+   "people_mentioned": [],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 0,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
+ }
+}

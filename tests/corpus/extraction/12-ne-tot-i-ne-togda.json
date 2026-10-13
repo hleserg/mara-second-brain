@@ -1,0 +1,66 @@
+{
+ "id": "12-ne-tot-i-ne-togda",
+ "about": "Просьба узнана, но записанный ответ путает, кто просил (Олег вместо Анны), и срок («до пятницы» вместо «в субботу»).",
+ "occurred": "2026-09-02T14:05:00+03:00",
+ "segments": [
+  {
+   "segment_id": "s0001",
+   "start_ms": 0,
+   "end_ms": 14000,
+   "text": "Это Анна. Олег говорил, что ты занят, но мне очень нужно: отвези документы в субботу."
+  }
+ ],
+ "gold": {
+  "requests": [
+   {
+    "ключ": [
+     "документ"
+    ],
+    "requester": "Анна",
+    "due_at": "2026-09-05"
+   }
+  ],
+  "commitments": []
+ },
+ "recorded": {
+  "model": "synthetic",
+  "prompt_version": 2,
+  "rules_version": 3,
+  "response": {
+   "requests": [
+    {
+     "action": "отвезти документы",
+     "explicit": true,
+     "deadline_phrase": "до пятницы",
+     "confidence": 0.93,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ],
+     "requester": "Олег"
+    }
+   ],
+   "commitments": [],
+   "decisions": [],
+   "constraints": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "followups": [],
+   "people_mentioned": [
+    "Анна",
+    "Олег"
+   ],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 1,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 1,
+   "срок_не_тот": 1
+  }
+ }
+}
