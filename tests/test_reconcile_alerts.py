@@ -256,7 +256,8 @@ class ДемонНеОтвечает(unittest.TestCase):
     def test_кривой_адрес_не_выдаётся_за_лежащий_демон(self):
         # `http://` urllib отвергает `URLError`, а не `ValueError` (Codex по #153)
         for адрес in ("не-адрес", "http://[::1", "http://", "127.0.0.1:8788",
-                      "ftp://127.0.0.1"):
+                      "ftp://127.0.0.1", "http://127.0.0.1:notaport",
+                      "http://127.0.0.1:99999"):
             f = rc.демон_не_отвечает(адрес)
             self.assertEqual((f[0]["check"], f[0]["level"]),
                              ("демон-адрес-кривой", "warn"), адрес)
