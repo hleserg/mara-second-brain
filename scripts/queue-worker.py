@@ -141,6 +141,13 @@ def rewrite_card(path, out, canon=None):
     os.replace(tmp, path)     # атомарно: рядом крутятся автокоммит и bisync
     return True
 
+def причина(e):
+    """Текст ошибки для `last_error` работы. Работа лежит JSON в волте, а он в
+    git и в зеркале: ключ в тексте исключения (`ValueError` заголовка с
+    `Bearer …\\r`) уехал бы туда (§15.1) — слой 1 `redact` до записи."""
+    return vault_common.scrub("%s: %s" % (type(e).__name__, e))[:300]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
@@ -209,7 +216,7 @@ def main():
             out = call_llm(prompt_for(kind), text, model, key)
         except Exception as e:
             job["attempts"] = job.get("attempts", 0) + 1
-            job["last_error"] = "%s: %s" % (type(e).__name__, e)
+            job["last_error"] = причина(e)
             with open(jp, "w", encoding="utf-8") as fh: json.dump(job, fh, ensure_ascii=False, indent=2)
             print("queue-worker: %s — %s (попытка %d)" % (name, job["last_error"], job["attempts"]))
             continue

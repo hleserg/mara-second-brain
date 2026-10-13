@@ -328,7 +328,9 @@ class Демон:
                 try:
                     self.catch_up()
                 except Exception as e:
-                    self.log("догон не удался: %s: %s" % (type(e).__name__, e))
+                    # класс, а не текст: исключение TDLib может нести
+                    # название чата или текст сообщения (§15.1)
+                    self.log("догон не удался: %s" % type(e).__name__)
                 last = time.time()
             if self.connected:
                 self.beat()

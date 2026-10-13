@@ -206,5 +206,80 @@ class Телеграм(unittest.TestCase):
         self.assertEqual(логгер.level, logging.INFO)
 
 
+
+class Хвосты(unittest.TestCase):
+    """Каналы, которые #152 оставил: `outbox.error`, догон TDLib, работа
+    `queue-worker` в волте, сводка дня в Telegram. Чужой адресат дайджеста
+    печатается целиком сознательно (#61, `test_call_digest`): это id канала
+    из env владельца, и без него отказ не узнать."""
+
+    def test_outbox_error_обезличен(self):
+        con = mi.connect(tempfile.mkdtemp())
+        self.addCleanup(con.close)
+        mi.в_outbox(con, "digest", {"text": "x"})
+
+        def отправить(kind, payload):
+            raise http.client.InvalidURL("'/bot%s/sendMessage' %s" % (ТОКЕН, ОБЕЩАНИЕ))
+        mi.из_outbox(con, отправить, продолжать=True)
+        err = con.execute("select error from outbox").fetchone()[0]
+        self.assertNotIn(ТОКЕН, err)
+        self.assertNotIn("smetu", err)
+        self.assertIn("InvalidURL", err)
+
+    def test_догон_tdlib_без_текста_исключения(self):
+        журнал = []
+
+        def catch_up():
+            raise RuntimeError("чат «Анна Петрова»: привет")
+
+        class Раз:
+            n = 0
+
+            def is_set(self):
+                self.n += 1
+                return self.n > 1
+
+            def wait(self, t):
+                pass
+        демон = types.SimpleNamespace(catch_up=catch_up, log=журнал.append,
+                                      connected=False, beat=lambda: None)
+        ti.Демон.run(демон, Раз())
+        self.assertEqual(журнал, ["догон не удался: RuntimeError"])
+
+    def test_ошибка_работы_в_волте_без_ключа(self):
+        import importlib.util
+        путь = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                            "scripts", "queue-worker.py")
+        spec = importlib.util.spec_from_file_location("queue_worker", путь)
+        qw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(qw)
+        s = qw.причина(ValueError("Invalid header value b'Bearer sk-or-v1-%s\\r'"
+                                  % ("f" * 40)))
+        self.assertNotIn("sk-or", s)
+        self.assertTrue(s.startswith("ValueError: "), s)
+
+    def test_сводка_дня_без_текста_исключения(self):
+        """Сводка уходит в Telegram; `ValueError` заголовка несёт ключ."""
+        import importlib.util
+        путь = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                            "scripts", "daily-summary.py")
+        spec = importlib.util.spec_from_file_location("daily_summary", путь)
+        ds = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ds)
+
+        def ask(*a, **kw):
+            raise ValueError("Invalid header value b'Bearer sk-or-v1-%s\\r'" % ("f" * 40))
+        with unittest.mock.patch.object(ds, "cards", lambda *a: [("заметка", "текст")]), \
+                unittest.mock.patch.object(ds, "diary", lambda *a: ""), \
+                unittest.mock.patch.object(ds, "plain", lambda *a: "механика"), \
+                unittest.mock.patch.object(ds, "material", lambda *a: "м"), \
+                unittest.mock.patch.object(ds, "ask", ask), \
+                unittest.mock.patch.object(redact, "require_chain", lambda: None), \
+                unittest.mock.patch.object(redact, "redact", lambda t: (t, {})):
+            текст = ds.summary("/нет", "2026-10-13", key="k")
+        self.assertNotIn("sk-or", текст)
+        self.assertIn("не вышло: ValueError", текст)
+
+
 if __name__ == "__main__":
     unittest.main()

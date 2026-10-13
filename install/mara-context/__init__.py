@@ -165,7 +165,8 @@ class Брокер:
                 # сбое: иначе лежащий doctor стоит 2 с на каждой реплике Мары,
                 # а так — одна попытка в TTL.
                 self._свежесть = time.monotonic()
-                log.warning("mara-context: не забрал пакет (%s)", e)
+                # класс: текст `ValueError` заголовка несёт токен (§15.1)
+                log.warning("mara-context: не забрал пакет (%s)", type(e).__name__)
                 return self._пакет
             self._свежесть = time.monotonic()
             self._пакет = data.get("now")

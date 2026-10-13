@@ -168,7 +168,10 @@ def summary(vault, day, key=None, model=None, raw=False):
         except Exception as e:
             # Сводка обязана прийти. Не вышло по-человечески — шлём механику
             # и говорим почему, чтобы поломка не выглядела нормой.
-            text = plain(git, ses) + "\n\n(сводку своими словами собрать не вышло: %s)" % e
+            # уходит в Telegram: класс и код, а не текст — в нём бывает
+            # заголовок с ключом или эхо запроса (§15.1)
+            text = plain(git, ses) + "\n\n(сводку своими словами собрать не вышло: %s%s)" % (
+                type(e).__name__, " %s" % e.code if getattr(e, "code", None) else "")
     elif git or ses:
         text = plain(git, ses)
 
