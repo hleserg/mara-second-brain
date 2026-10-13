@@ -166,6 +166,11 @@ class Счёт(unittest.TestCase):
                                                       confidence=0.7)]})
         self.assertEqual((счёт["на_ревью"], счёт["пропущено"]), (1, 1))
 
+    def test_ревью_в_чужом_списке_не_пропало(self):
+        с = self.случай(requests=[{"ключ": ["смет"]}])
+        счёт = ee.оценить(с, {"commitments": [self.пункт("прислать смету", confidence=0.7)]})
+        self.assertEqual((счёт["на_ревью"], счёт["пропущено"]), (1, 0))
+
     def test_срок_null_сверяется_а_без_срока_нет(self):
         пункт = self.пункт("прислать смету", deadline_phrase="до пятницы")
         счёт = ee.оценить(self.случай(requests=[{"ключ": ["смет"], "due_at": None}]),
