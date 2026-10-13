@@ -5,7 +5,7 @@
 список меняется. Значит наружу едет whitelist из пяти полей, и всё остальное —
 тело, цитаты, дословные фразы о сроке, номера — обязано остаться в волте.
 """
-import os, sys, glob, tempfile, unittest
+import json, os, sys, glob, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -414,6 +414,141 @@ class Отмена(unittest.TestCase):
         self.assertLessEqual(len(с.encode()), cp.MAX_BYTES)
         self.assertLessEqual(len(без.encode()), cp.MAX_BYTES)
         self.assertIn("…и ещё", с)
+
+
+
+class ПоЧеловеку(unittest.TestCase):
+    """Т6.2, начало: чем человек узнаётся в `promised_to` (Т-У.4)."""
+
+    def индекс(self, v, записи):
+        os.makedirs(os.path.join(v, "_system"), exist_ok=True)
+        with open(os.path.join(v, "_system/entity-index.json"), "w", encoding="utf-8") as fh:
+            json.dump(записи, fh, ensure_ascii=False)
+
+    def test_ключи(self):
+        карта = {"анна петрова": "anna-petrova", "аня": "anna-petrova"}
+        self.assertEqual(cp.ключи_человека("[[anna-petrova|Анюта]]", карта),
+                         {"анюта", "canon:anna-petrova"})
+        self.assertEqual(cp.ключи_человека("Аня", карта), {"аня", "canon:anna-petrova"})
+        # номер — по последним десяти цифрам: `+7…` журнала и `8…` книги
+        self.assertIn("tel:9990000000", cp.ключи_человека("+7 (999) 000-00-00", {}))
+        self.assertIn("tel:9990000000", cp.ключи_человека("89990000000", {}))
+        # короче семи цифр — только строкой целиком
+        self.assertEqual(cp.ключи_человека("112", {}), {"112"})
+        self.assertIn("tel:1234567", cp.ключи_человека("123-45-67", {}))
+        self.assertEqual(cp.ключи_человека("", {}), set())
+        self.assertEqual(cp.ключи_человека(None, {}), set())
+
+    def test_карта_неоднозначность_номера_и_мусор(self):
+        v = волт(пусто=True)
+        self.индекс(v, [
+            {"canonical": "anna-petrova", "title": "Анна Петрова", "type": "person",
+             "aliases": ["Аня", "+7 999 000-00-00", 7]},
+            {"canonical": "anya-sidorova", "title": "Аня Сидорова", "type": "people",
+             "aliases": ["Аня"]},
+            {"canonical": "remont", "title": "Ремонт", "type": "project",
+             "aliases": ["Анна Петрова"]},
+            {"title": "без канона", "type": "person"}, "не словарь"])
+        карта = cp.карта_людей(v)
+        self.assertEqual(карта["анна петрова"], "anna-petrova", "проект в карту людей не идёт")
+        self.assertNotIn("ремонт", карта)
+        self.assertIsNone(карта["аня"], "алиас двух людей не узнаёт никого")
+        self.assertEqual(карта["tel:9990000000"], "anna-petrova")
+        # и сырой строкой тоже: две «Ани» не узнают друг друга по слову
+        self.assertEqual(cp.ключи_человека("Аня", карта), set())
+        self.assertEqual(cp.ключи_человека("Олег", карта), {"олег"}, "незнакомое остаётся")
+        # общий номер у двоих в разной записи: `tel:` неоднозначен — и
+        # строка в формате одного из них никого не узнаёт
+        self.индекс(v, [
+            {"canonical": "anna", "type": "person", "aliases": ["+7 999 111-22-33"]},
+            {"canonical": "oleg", "type": "person", "aliases": ["8 999 111-22-33"]}])
+        карта = cp.карта_людей(v)
+        self.assertIsNone(карта["tel:9991112233"])
+        self.assertEqual(cp.ключи_человека("+7 999 111-22-33", карта), set())
+        self.индекс(v, {"не": "список"})
+        self.assertEqual(cp.карта_людей(v), {})
+
+    def test_только_открытые_и_не_из_того_же_источника(self):
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="смета", status="open")
+        карточка(v, "b.md", title="договор", status="done")
+        карточка(v, "c.md", title="звонок", status="proposed", origin="call/c2")
+        карточка(v, "d.md", title="чужое", promised_to="Олег")
+        names = [it["title"] for it in cp.про_человека(v, ["Анна"], карта={},
+                                                       кроме_origin="call/c2")]
+        self.assertEqual(names, ["смета"])
+        self.assertEqual(cp.про_человека(v, [], карта={}), [])
+
+    def test_владельцу_не_напоминаем(self):
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="себе", promised_to="Хозяин")
+        карточка(v, "b.md", title="ей", promised_to="Анна")
+        карта = {"хозяин": "owner-slug", "анна": "anna"}
+        # звонящий узнаётся как владелец (так бывает с общим номером) — его
+        # карточки «себе» не напоминаются; без правила напомнились бы
+        self.assertEqual(cp.про_человека(v, ["Хозяин"], карта=карта,
+                                         владелец="owner-slug"), [])
+        self.assertEqual([it["title"] for it in cp.про_человека(v, ["Хозяин"], карта=карта)],
+                         ["себе"])
+        self.assertEqual([it["title"] for it in cp.про_человека(
+            v, ["Анна"], карта=карта, владелец="owner-slug")], ["ей"])
+
+    def test_номер_решает_за_имя(self):
+        """Две Анны в книге — два номера: карточка той Анны, что звонила с
+        другого номера, этой не напоминается; карточка про третьего человека
+        номером не судится."""
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="той Анне", origin="call/c1")
+        карточка(v, "b.md", title="этой Анне", origin="call/c2")
+        карточка(v, "c.md", title="Анне из звонка с Олегом", origin="call/c3")
+        там = {"call/c1": ["Анна", "+7 999 000-00-01"],
+               "call/c2": ["Анна", "+7 999 000-00-02"],
+               "call/c3": ["Олег", "+7 999 000-00-03"]}
+        names = [it["title"] for it in cp.про_человека(
+            v, ["Анна", "89990000002"], карта={}, собеседник=там.get)]
+        self.assertEqual(sorted(names), ["Анне из звонка с Олегом", "этой Анне"])
+
+    def test_имя_и_номер_звонящего_ведут_к_разным(self):
+        """Номер в индексе у Олега, а в книге под этим номером — Анна:
+        звонящий неоднозначен, напоминаний нет."""
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="ей", promised_to="Анна")
+        карта = {"анна": "anna", "tel:9990000002": "oleg"}
+        self.assertEqual(cp.про_человека(v, ["Анна", "89990000002"], карта=карта), [])
+        self.assertEqual(len(cp.про_человека(v, ["Анна"], карта=карта)), 1)
+
+    def test_явный_канон_сильнее_номера_звонка(self):
+        """`[[anna-two|Анна]]` в звонке с другой Анной (тот же номер, что у
+        звонящего сейчас): карточка не про собеседника того звонка, и
+        номер её не приводит."""
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="второй Анне", promised_to="[[anna-two|Анна]]",
+                 origin="call/c1")
+        там = {"call/c1": ["[[anna-one|Анна]]", "+7 999 000-00-01"]}
+        self.assertEqual(cp.про_человека(v, ["Анна", "89990000001"], карта={},
+                                         собеседник=там.get), [])
+
+    def test_неоднозначную_подпись_решает_номер_звонка(self):
+        """Две «Анны» в индексе: подпись «Анна» никого не узнаёт, но номер
+        звонка, где карточка родилась, — узнаёт свою."""
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="первой", origin="call/c1")
+        карточка(v, "b.md", title="второй", origin="call/c2")
+        карта = {"анна": None, "tel:9990000001": "anna-one", "tel:9990000002": "anna-two"}
+        там = {"call/c1": ["Анна", "+7 999 000-00-01"], "call/c2": ["Анна", "+7 999 000-00-02"]}
+        names = [it["title"] for it in cp.про_человека(
+            v, ["Анна", "89990000002"], карта=карта, собеседник=там.get)]
+        self.assertEqual(names, ["второй"])
+        self.assertEqual(cp.про_человека(v, ["Анна"], карта=карта, собеседник=там.get), [],
+                         "без номера неоднозначная подпись не узнаёт никого")
+
+    def test_кривая_карточка_пропущена(self):
+        v = волт(пусто=True)
+        карточка(v, "a.md", title="смета")
+        with open(os.path.join(v, "kb/commitments/b.md"), "wb") as fh:
+            fh.write(b"---\ntitle: \xff\xfe\n---\n")
+        self.assertEqual([it["title"] for it in cp.про_человека(v, ["Анна"], карта={})],
+                         ["смета"])
 
 
 if __name__ == "__main__":

@@ -123,8 +123,55 @@ def line_of(item):
     return "• %s%s%s" % (text, due, cp.метка(item))
 
 
-def render(event, extraction, created_count):
-    """(текст дайджеста, пункты для таблицы digests)."""
+ОБЕЩАНО = "Обещано раньше"
+ОБЕЩАНО_МАКС = 5
+# Bot API `sendMessage`: от 1 до 4096 знаков. Раздел «Обещано раньше» —
+# необязательный и не должен сделать дайджест неотправляемым (Codex по #157)
+ТЕЛЕГРАМ_МАКС = 4096
+
+
+def обещано_раньше(event, vault, con=None):
+    """Т-У.4: что ещё открыто перед этим человеком — карточки прошлых
+    разговоров, где он в `promised_to` (`context_pack.про_человека`). Свои
+    карточки этого звонка не берутся: они в дайджесте выше. Строки — как в
+    пакете (`context_pack.строка`, без имени: оно в шапке дайджеста), не
+    больше `ОБЕЩАНО_МАКС`, остальное — числом. Волта нет или он не читается —
+    раздела нет: напоминание не стоит упавшего дайджеста."""
+    import context_pack
+    p = event.get("payload") or {}
+    кто = [p.get("contact_name"), p.get("number")]
+
+    def собеседник(origin):
+        # карточка звонка: кто был на том конце — из реестра, по событию
+        if not (con and isinstance(origin, str) and origin.startswith("call/")):
+            return None
+        try:
+            там = mi.event_row(con, origin[len("call/"):]).get("payload") or {}
+        except KeyError:
+            return None
+        return [x for x in (там.get("contact_name"), там.get("number")) if x]
+
+    try:
+        пункты = context_pack.про_человека(vault, [k for k in кто if k],
+                                           кроме_origin="call/" + event["id"],
+                                           владелец=cp.OWNER, собеседник=собеседник)
+    except Exception as e:
+        # раздел необязательный: кривой индекс сущностей или карточка не
+        # должны держать дайджест звонка в ретраях
+        print("call_digest: обещания раньше не прочитаны (%s)" % type(e).__name__,
+              file=sys.stderr)
+        return []
+    строки = ["• " + context_pack.строка(dict(it, promised_to=None))[2:]
+              for it in пункты[:ОБЕЩАНО_МАКС]]
+    if len(пункты) > ОБЕЩАНО_МАКС:
+        строки.append("• …и ещё %d" % (len(пункты) - ОБЕЩАНО_МАКС))
+    return строки
+
+
+def render(event, extraction, created_count, обещано=None):
+    """(текст дайджеста, пункты для таблицы digests). `обещано` — строки
+    раздела «Обещано раньше» (`обещано_раньше`); в `digests.items_json` они
+    не едут: это не пункты этого звонка."""
     day, _, human = cp.when(event)
     end = (event.get("ended") or "")[11:16]
     head = "%s · %s · %s%s" % (cp.заголовок(event, extraction), cp.contact(event), human,
@@ -147,6 +194,14 @@ def render(event, extraction, created_count):
         out += ["", "Создано", "• " + задач(created_count)]
     if maybe:
         out += ["", "Возможно задача"] + maybe
+    if обещано:
+        # раздел входит, сколько влезет в одно сообщение, с конца не страшно
+        # терять: строки по сроку, срочное вверху
+        строки = list(обещано)
+        while строки and len("\n".join(out + ["", ОБЕЩАНО] + строки)) > ТЕЛЕГРАМ_МАКС:
+            строки.pop()
+        if строки:
+            out += ["", ОБЕЩАНО] + строки
     return "\n".join(out), items
 
 
@@ -237,8 +292,9 @@ def _разослать(con, e, ид=None, продолжать=False):
     return итоги
 
 
-def run(event_id, root=None, env_file=None):
+def run(event_id, root=None, env_file=None, vault=None):
     root = root or mi.ROOT
+    vault = vault or os.environ.get("VAULT", "/srv/vault")
     con = mi.connect(root)
     ev = mi.event_row(con, event_id)
     # из реестра (ревизия, миграция 6), файл — у извлечений до неё; тот же
@@ -252,7 +308,7 @@ def run(event_id, root=None, env_file=None):
     # #122, круг 2); аудит отказов пишет проектор, здесь — только фильтр
     extraction = cp._сверить_с_реестром(con, event_id, extraction)
     created = len(cp.commitment_cards(ev, extraction, {}))
-    text, items = render(ev, extraction, created)
+    text, items = render(ev, extraction, created, обещано_раньше(ev, vault, con))
     e = env(env_file)
     свеж = свежий(ev["occurred"])
     did = str(uuid.uuid4())
@@ -418,6 +474,8 @@ def main():
     ap.add_argument("--event")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--env-file", default=ENV_FILE)
+    ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"),
+                    help="волт: откуда раздел «Обещано раньше»")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     ap.add_argument("--outbox", action="store_true",
                     help="разослать все ждущие дайджесты из outbox")
@@ -430,7 +488,7 @@ def main():
         return 0
     if not a.event:
         ap.error("нужен --event или --outbox")
-    run(a.event, a.root, a.env_file)
+    run(a.event, a.root, a.env_file, a.vault)
     return 0
 
 
