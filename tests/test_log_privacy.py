@@ -206,5 +206,134 @@ class Телеграм(unittest.TestCase):
         self.assertEqual(логгер.level, logging.INFO)
 
 
+
+class Хвосты(unittest.TestCase):
+    """Каналы, которые #152 оставил: `outbox.error`, догон TDLib, работа
+    `queue-worker` в волте, сводка дня в Telegram. Чужой адресат дайджеста
+    печатается целиком сознательно (#61, `test_call_digest`): это id канала
+    из env владельца, и без него отказ не узнать."""
+
+    def test_outbox_error_обезличен(self):
+        con = mi.connect(tempfile.mkdtemp())
+        self.addCleanup(con.close)
+        mi.в_outbox(con, "digest", {"text": "x"})
+
+        def отправить(kind, payload):
+            raise http.client.InvalidURL("'/bot%s/sendMessage' %s" % (ТОКЕН, ОБЕЩАНИЕ))
+        mi.из_outbox(con, отправить, продолжать=True)
+        err = con.execute("select error from outbox").fetchone()[0]
+        self.assertNotIn(ТОКЕН, err)
+        self.assertNotIn("smetu", err)
+        self.assertIn("InvalidURL", err)
+
+    def test_догон_tdlib_без_текста_исключения(self):
+        журнал = []
+
+        def catch_up():
+            raise RuntimeError("чат «Анна Петрова»: привет")
+
+        class Раз:
+            n = 0
+
+            def is_set(self):
+                self.n += 1
+                return self.n > 1
+
+            def wait(self, t):
+                pass
+        демон = types.SimpleNamespace(catch_up=catch_up, log=журнал.append,
+                                      connected=False, beat=lambda: None)
+        ti.Демон.run(демон, Раз())
+        self.assertEqual(журнал, ["догон не удался: RuntimeError"])
+
+    def test_ошибка_работы_в_волте_без_ключа(self):
+        import importlib.util
+        путь = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                            "scripts", "queue-worker.py")
+        spec = importlib.util.spec_from_file_location("queue_worker", путь)
+        qw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(qw)
+        s = qw.причина(ValueError("Invalid header value b'Bearer sk-or-v1-%s\\r'"
+                                  % ("f" * 40)))
+        self.assertNotIn("sk-or", s)
+        self.assertTrue(s.startswith("ValueError: "), s)
+
+    def test_tdlib_contextd_молчит_без_токена(self):
+        """`send` повторяет без конца и пишет причину раз в минуту."""
+        журнал, раз = [], []
+
+        def post(ev):
+            if not раз:
+                раз.append(1)
+                raise ValueError("Invalid header value b'Bearer %s\\r'" % ("x" * 43))
+            return {"duplicate": False}
+        демон = types.SimpleNamespace(post=post, log=журнал.append,
+                                      sleep=lambda s: None, beat=lambda: None)
+        ti.Демон.send(демон, {"source_id": "1/2"})
+        self.assertIn("contextd не отвечает (ValueError: Invalid header value", журнал[0])
+        self.assertNotIn("x" * 43, журнал[0])
+
+    def плагин(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mara_context_privacy", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                 "..", "install", "mara-context", "__init__.py"))
+        м = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(м)
+        return м
+
+    def test_плагин_не_отдаёт_токен_модели_и_в_журнал(self):
+        """Ответ инструмента уходит модели (и в облако), предупреждение — в
+        журнал Hermes: в обоих ни текста `ValueError` с токеном, а код HTTP
+        и причина сокета остаются."""
+        import urllib.error
+        м = self.плагин()
+        секрет = "z" * 43
+
+        def падает(беда):
+            def open_url(*a, **kw):
+                raise беда
+            return open_url
+        заголовок = ValueError("Invalid header value b'Bearer %s\\r'" % секрет)
+        ответ = м.Брокер(token="t", open_url=падает(заголовок)).правка(
+            {"item": "дело", "status": "done"})
+        self.assertNotIn(секрет, ответ)
+        self.assertIn("ValueError", ответ)
+        отказ = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        ответ = м.Брокер(token="t", open_url=падает(отказ)).правка({"item": "дело"})
+        self.assertIn("ConnectionRefusedError: Connection refused", ответ)
+        with self.assertLogs(м.log, "WARNING") as лог:
+            м.Брокер(token="t", open_url=падает(заголовок)).контекст()
+        self.assertNotIn(секрет, "\n".join(лог.output))
+        self.assertIn("ValueError", "\n".join(лог.output))
+        with self.assertLogs(м.log, "WARNING") as лог:
+            м.Брокер(token="t", open_url=падает(urllib.error.HTTPError(
+                "u", 401, "Unauthorized", {}, None))).контекст()
+        self.assertIn("HTTP 401", "\n".join(лог.output))
+
+    def test_сводка_дня_без_ключа(self):
+        """Сводка уходит в Telegram; `ValueError` заголовка несёт ключ."""
+        import importlib.util
+        путь = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                            "scripts", "daily-summary.py")
+        spec = importlib.util.spec_from_file_location("daily_summary", путь)
+        ds = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ds)
+
+        def ask(*a, **kw):
+            raise ValueError("Invalid header value b'Bearer sk-or-v1-%s\\r'" % ("f" * 40))
+        with unittest.mock.patch.object(ds, "cards", lambda *a: [("заметка", "текст")]), \
+                unittest.mock.patch.object(ds, "diary", lambda *a: ""), \
+                unittest.mock.patch.object(ds, "plain", lambda *a: "механика"), \
+                unittest.mock.patch.object(ds, "material", lambda *a: "м"), \
+                unittest.mock.patch.object(ds, "ask", ask), \
+                unittest.mock.patch.object(redact, "require_chain", lambda: None), \
+                unittest.mock.patch.object(redact, "redact", lambda t: (t, {})):
+            текст = ds.summary("/нет", "2026-10-13", key="k")
+        self.assertNotIn("sk-or", текст)
+        self.assertIn("не вышло: ValueError: Invalid header value", текст,
+                      "причина остаётся, без ключа")
+
+
 if __name__ == "__main__":
     unittest.main()

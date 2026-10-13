@@ -1096,8 +1096,10 @@ def из_outbox(con, отправить, kind=None, object_id=None, ид=None, l
         try:
             исход = отправить(r["kind"], json.loads(r["payload_json"]))
         except Exception as e:
+            # `outbox.error` живёт в базе и в бэкапах ядра: без пути и секрета
+            # (§15.1, токен бота в адресе — #152)
             con.execute("update outbox set state='pending', error=? where id=?",
-                        ("%s: %s" % (type(e).__name__, e), r["id"]))
+                        (обезличить("%s: %s" % (type(e).__name__, e)), r["id"]))
             if not продолжать:
                 raise
             итоги.append((r["id"], "error"))
