@@ -442,14 +442,21 @@ class ПоЧеловеку(unittest.TestCase):
     def test_карта_неоднозначность_номера_и_мусор(self):
         v = волт(пусто=True)
         self.индекс(v, [
-            {"canonical": "anna-petrova", "title": "Анна Петрова",
+            {"canonical": "anna-petrova", "title": "Анна Петрова", "type": "person",
              "aliases": ["Аня", "+7 999 000-00-00", 7]},
-            {"canonical": "anya-sidorova", "title": "Аня Сидорова", "aliases": ["Аня"]},
-            {"title": "без канона"}, "не словарь"])
+            {"canonical": "anya-sidorova", "title": "Аня Сидорова", "type": "people",
+             "aliases": ["Аня"]},
+            {"canonical": "remont", "title": "Ремонт", "type": "project",
+             "aliases": ["Анна Петрова"]},
+            {"title": "без канона", "type": "person"}, "не словарь"])
         карта = cp.карта_людей(v)
-        self.assertEqual(карта["анна петрова"], "anna-petrova")
+        self.assertEqual(карта["анна петрова"], "anna-petrova", "проект в карту людей не идёт")
+        self.assertNotIn("ремонт", карта)
         self.assertIsNone(карта["аня"], "алиас двух людей не узнаёт никого")
         self.assertEqual(карта["tel:9990000000"], "anna-petrova")
+        # и сырой строкой тоже: две «Ани» не узнают друг друга по слову
+        self.assertEqual(cp.ключи_человека("Аня", карта), set())
+        self.assertEqual(cp.ключи_человека("Олег", карта), {"олег"}, "незнакомое остаётся")
         self.индекс(v, {"не": "список"})
         self.assertEqual(cp.карта_людей(v), {})
 
