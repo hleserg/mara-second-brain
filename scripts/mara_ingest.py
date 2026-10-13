@@ -1097,7 +1097,8 @@ def из_outbox(con, отправить, kind=None, object_id=None, ид=None, l
         sql, args = sql + " and object_id=?", args + [object_id]
     if ид:
         sql, args = sql + " and id=?", args + [ид]
-    rows = con.execute(sql + " order by %s, created limit ?" % секунды("created"),
+    # внутри секунды — по id: он `uuid7()`, то есть порядок вставки
+    rows = con.execute(sql + " order by %s, id limit ?" % секунды("created"),
                        args + [limit]).fetchall()
     итоги = []
     for r in rows:

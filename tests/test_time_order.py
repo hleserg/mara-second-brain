@@ -150,6 +150,54 @@ class БлобыДляУчения(_База):
         self.assertEqual([r["sha256"][0] for r in строки], ["a", "b"])
 
 
+class ВитокПеречитки(unittest.TestCase):
+    """Курсор перечитки старых копий (`проверить_аудио`) идёт по времени:
+    после смены пояса строка со старым сдвигом не встаёт перед курсором."""
+
+    def test_виток_по_времени(self):
+        import json
+        cb = _модуль("core-backup.py")
+        tmp = tempfile.mkdtemp()
+        root, цель = os.path.join(tmp, "blobs"), os.path.join(tmp, "target")
+        def строка(имя, когда):
+            sha = (имя * 64)[:64]
+            p = os.path.join(root, "calls", имя + ".wav")
+            for путь in (p, os.path.join(цель, "calls", имя + ".wav.gpg")):
+                os.makedirs(os.path.dirname(путь), exist_ok=True)
+                open(путь, "wb").close()
+            return {"sha256": sha, "path": p, "created": когда}
+        свежие = [строка(x, "2026-10-13T20:00:00+00:00") for x in "xyz"][:cb.ПРОБА]
+        # по времени: a (09:00Z) < b (10:00Z) < c (11:00Z) < d (12:30Z);
+        # по строке a (+03:00) стоит третьей
+        старые = [строка("a", "2026-10-12T12:00:00+03:00"),
+                  строка("b", "2026-10-12T10:00:00+00:00"),
+                  строка("c", "2026-10-12T11:00:00+00:00"),
+                  строка("d", "2026-10-12T12:30:00+00:00")]
+        хеши = {os.path.join(цель, os.path.relpath(r["path"], root) + ".gpg"): r["sha256"]
+                for r in свежие + старые}
+        курсор = os.path.join(tmp, "курсор.json")
+        было = cb.sha_шифра
+        cb.sha_шифра = lambda путь, пароль: хеши[путь]
+        self.addCleanup(setattr, cb, "sha_шифра", было)
+        def ночь():
+            итог = cb.проверить_аудио(None, root, цель, "/нет-фразы",
+                                      строки=свежие + старые, курсор=курсор)
+            with open(курсор, encoding="utf-8") as fh:
+                return итог, json.load(fh)[цель]
+        итог, сост = ночь()
+        self.assertEqual(итог["аудио_перечитано"], cb.ПРОБА_СТАРЫХ)
+        self.assertEqual(сост["cursor"]["created"],
+                         старые[cb.ПРОБА_СТАРЫХ - 1]["created"])
+        self.assertEqual(сост["end"]["created"], старые[-1]["created"])
+        # следующая ночь читает курсор из файла и доходит виток, а не
+        # начинает его заново
+        итог, сост = ночь()
+        self.assertEqual(итог["аудио_перечитано"], len(старые) - cb.ПРОБА_СТАРЫХ)
+        self.assertEqual(сост["cursor"]["created"], старые[-1]["created"])
+        self.assertEqual(cb._секунды("2026-10-13T23:00:00+03:00"), 1791921600)
+        self.assertEqual(cb._секунды("мусор"), 0)
+
+
 class Выражение(unittest.TestCase):
     def test_сдвиг_учтён_и_мусор_это_null(self):
         con = mi.connect(tempfile.mkdtemp())
