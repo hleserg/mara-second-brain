@@ -1,0 +1,63 @@
+{
+ "id": "05-pobystree",
+ "about": "«Побыстрее» — не срок: даты быть не должно.",
+ "occurred": "2026-09-02T14:05:00+03:00",
+ "segments": [
+  {
+   "segment_id": "s0001",
+   "start_ms": 0,
+   "end_ms": 12000,
+   "text": "Это Олег. Посмотри, пожалуйста, чертежи побыстрее, мы ждём только тебя."
+  }
+ ],
+ "gold": {
+  "requests": [
+   {
+    "ключ": [
+     "чертеж"
+    ],
+    "requester": "Олег",
+    "due_at": null
+   }
+  ],
+  "commitments": []
+ },
+ "recorded": {
+  "model": "synthetic",
+  "prompt_version": 2,
+  "rules_version": 3,
+  "response": {
+   "requests": [
+    {
+     "action": "посмотреть чертежи",
+     "explicit": true,
+     "deadline_phrase": "побыстрее",
+     "confidence": 0.93,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ],
+     "requester": "Олег"
+    }
+   ],
+   "commitments": [],
+   "decisions": [],
+   "constraints": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "followups": [],
+   "people_mentioned": [],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 1,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
+ }
+}

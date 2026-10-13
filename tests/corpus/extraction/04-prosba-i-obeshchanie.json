@@ -1,0 +1,90 @@
+{
+ "id": "04-prosba-i-obeshchanie",
+ "about": "В одном звонке просьба собеседника и отдельное обещание владельца.",
+ "occurred": "2026-09-02T14:05:00+03:00",
+ "segments": [
+  {
+   "segment_id": "s0001",
+   "start_ms": 0,
+   "end_ms": 10000,
+   "text": "Это Анна. Скинь мне завтра договор, хочу его вечером прочитать."
+  },
+  {
+   "segment_id": "s0002",
+   "start_ms": 10000,
+   "end_ms": 24000,
+   "text": "И ещё я узнаю у бухгалтера про счёт до пятницы."
+  }
+ ],
+ "gold": {
+  "requests": [
+   {
+    "ключ": [
+     "договор"
+    ],
+    "requester": "Анна",
+    "due_at": "2026-09-03"
+   }
+  ],
+  "commitments": [
+   {
+    "ключ": [
+     "бухгалтер"
+    ],
+    "promised_to": "Анна",
+    "due_at": "2026-09-04"
+   }
+  ]
+ },
+ "recorded": {
+  "model": "synthetic",
+  "prompt_version": 2,
+  "rules_version": 3,
+  "response": {
+   "requests": [
+    {
+     "action": "прислать договор",
+     "explicit": true,
+     "deadline_phrase": "завтра",
+     "confidence": 0.93,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ],
+     "requester": "Анна"
+    }
+   ],
+   "commitments": [
+    {
+     "action": "узнать у бухгалтера про счёт",
+     "explicit": true,
+     "deadline_phrase": "до пятницы",
+     "confidence": 0.93,
+     "evidence": [
+      {
+       "segment": "s0002"
+      }
+     ],
+     "promised_to": "Анна"
+    }
+   ],
+   "decisions": [],
+   "constraints": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "followups": [],
+   "people_mentioned": [],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 2,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
+ }
+}

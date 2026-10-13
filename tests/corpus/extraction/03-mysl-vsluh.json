@@ -1,0 +1,60 @@
+{
+ "id": "03-mysl-vsluh",
+ "about": "Мысль вслух «может, потом покрасим» — не задача. Записанный ответ ошибается: делает из неё просьбу.",
+ "occurred": "2026-09-02T14:05:00+03:00",
+ "segments": [
+  {
+   "segment_id": "s0001",
+   "start_ms": 0,
+   "end_ms": 15000,
+   "text": "И может быть, потом покрасим стены в коридоре, но это не сейчас, посмотрим."
+  }
+ ],
+ "gold": {
+  "requests": [],
+  "commitments": [],
+  "не_задача": [
+   [
+    "покрас"
+   ]
+  ]
+ },
+ "recorded": {
+  "model": "synthetic",
+  "prompt_version": 2,
+  "rules_version": 3,
+  "response": {
+   "requests": [
+    {
+     "action": "покрасить стены в коридоре",
+     "explicit": true,
+     "deadline_phrase": "",
+     "confidence": 0.9,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ],
+     "requester": "Анна"
+    }
+   ],
+   "commitments": [],
+   "decisions": [],
+   "constraints": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "followups": [],
+   "people_mentioned": [],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 0,
+   "перепутано": 0,
+   "лишнее": 1,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
+ }
+}
