@@ -147,6 +147,19 @@ def now_iso():
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
+def секунды(поле):
+    """SQL-выражение: метка `поле` в секундах эпохи, сдвиг учтён (Т2.1б).
+
+    Метки `now_iso()` несут сдвиг `MARA_TZ_HOURS`, и строковый порядок по ним
+    — порядок времени только при одном сдвиге: после смены пояса `order by`,
+    `max()` и `<` по строке врут, а «последняя расшифровка» становится
+    предпоследней. `strftime('%s')` читает сдвиг. У `events` для того же
+    есть вычисляемые `*_utc` (миграция 7) — там нужен индекс; здесь таблицы
+    малы, и выражения хватает без миграции. Строка без даты — NULL: в
+    `order by … desc` она уходит в конец, как и раньше пустая строка."""
+    return "cast(strftime('%%s', %s) as integer)" % поле
+
+
 _ПОСЛЕДНИЙ = [0, 0]        # миллисекунда и хвост предыдущего id
 _ЗАМОК = threading.Lock()  # contextd принимает загрузки в несколько потоков
 
@@ -1070,20 +1083,22 @@ def из_outbox(con, отправить, kind=None, object_id=None, ид=None, l
     возможен (at-least-once), но виден по `attempts`. Строк, которые
     забрал другой, в итогах нет.
     """
-    # порог аренды в том же формате и поясе, что `now_iso`: сравнение
-    # строк, а не времени, но формат фиксированный, и пояс один
-    просрочено = (datetime.now(TZ) - timedelta(seconds=АРЕНДА_OUTBOX_С)
-                  ).isoformat(timespec="seconds")
+    # Порог аренды — во времени, а не в строке: после смены `MARA_TZ_HOURS`
+    # строка `last_attempt` со старым сдвигом сравнивалась бы лексически, и
+    # живая аренда казалась бы истёкшей (два отправителя) или мёртвая —
+    # живой на часы. Нечитаемая метка — истёкшая: строка `sending` без
+    # срока не должна висеть вечно.
     sql = ("select * from outbox where (state='pending' or "
-           "(state='sending' and last_attempt < ?))")
-    args = [просрочено]
+           "(state='sending' and coalesce(%s, 0) < ?))" % секунды("last_attempt"))
+    args = [int(time.time()) - АРЕНДА_OUTBOX_С]
     if kind:
         sql, args = sql + " and kind=?", args + [kind]
     if object_id:
         sql, args = sql + " and object_id=?", args + [object_id]
     if ид:
         sql, args = sql + " and id=?", args + [ид]
-    rows = con.execute(sql + " order by created limit ?", args + [limit]).fetchall()
+    rows = con.execute(sql + " order by %s, created limit ?" % секунды("created"),
+                       args + [limit]).fetchall()
     итоги = []
     for r in rows:
         когда = now_iso()

@@ -620,7 +620,8 @@ def строки_блобов(db):
     try:
         return [{"sha256": r["sha256"], "path": r["path"], "created": r["created"] or ""}
                 for r in con.execute("select sha256, path, created from blobs "
-                                     "where purged_at is null order by created desc")]
+                                     "where purged_at is null order by %s desc"
+                                     % mi.секунды("created"))]
     finally:
         con.close()
 

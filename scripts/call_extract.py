@@ -354,7 +354,8 @@ def извлечение_события(con, event_id):
     """Последняя ревизия извлечения события из реестра — `(extraction_id,
     data)`; строки нет (извлечение до миграции 6) — `(None, None)`."""
     r = con.execute("select id, data_json from extractions where event_id=? "
-                    "order by created desc, id desc limit 1", (event_id,)).fetchone()
+                    "order by %s desc, id desc limit 1" % mi.секунды("created"),
+                    (event_id,)).fetchone()
     if not r:
         return None, None
     return r["id"], json.loads(r["data_json"])

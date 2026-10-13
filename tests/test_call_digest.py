@@ -565,6 +565,31 @@ class Outbox(_СтендДоставки):
         self.assertEqual((r["state"], r["attempts"]), ("sent", 2), "повтор виден по счётчику")
         self.assertEqual(self.состояние(), "done")
 
+    def test_аренда_по_времени_а_не_по_строке(self):
+        """Т2.1б: `last_attempt` со сдвигом другого пояса (смена
+        `MARA_TZ_HOURS`). Живая аренда в −12:00 лексически «старше» порога в
+        поясе демона, истёкшая в +14:00 — «моложе»: по строке живую взяли
+        бы второй раз (два сообщения), а мёртвая висела бы до суток."""
+        пусто = os.path.join(self.dir, "нет-такого.env")
+        cd.run(self.eid, root=self.dir, env_file=пусто)
+        сейчас = datetime.datetime.now(datetime.timezone.utc)
+        пояс = lambda h: datetime.timezone(datetime.timedelta(hours=h))
+        живая = (сейчас - datetime.timedelta(seconds=5)).astimezone(
+            пояс(-12)).isoformat(timespec="seconds")
+        self.con.execute("update outbox set state='sending', last_attempt=?", (живая,))
+        звали = self.доставка("sent")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 0, "аренда жива")
+        self.assertEqual(звали, [])
+        with self.assertRaises(RuntimeError, msg="шаг видит, что строку шлют"):
+            cd.run(self.eid, root=self.dir, env_file=self.env())
+        мёртвая = (сейчас - datetime.timedelta(seconds=mi.АРЕНДА_OUTBOX_С + 5)).astimezone(
+            пояс(14)).isoformat(timespec="seconds")
+        self.con.execute("update outbox set last_attempt=?", (мёртвая,))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cd.outbox(self.dir, self.env()), 1, "аренда истекла")
+        self.assertEqual(len(звали), 1)
+
     def test_шаг_не_дублирует_строку_которую_сейчас_шлют(self):
         """Ретрай шага, пока строку события держит другой процесс: второго
         намерения не кладём, дайджест не пересобираем — и не выходим нулём
