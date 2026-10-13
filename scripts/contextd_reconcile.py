@@ -567,7 +567,7 @@ def _возраст(iso):
 def источник_замолчал(con, days=3, fresh_hours=24):
     """Источник с телефона раньше слал, три дня молчит, а телефон на связи —
     слушатель умер, разрешение сняли или Huawei вычистил фон. Телефон сам не
-    на связи — не находка: это mara_mobile_last_seen_seconds, чинится не тут.
+    на связи — не находка здесь: это `телефон_молчит`.
     Ни разу не слал — тоже не находка: источник ещё не подключали.
     Считается по каждому устройству отдельно: свежий экспорт через импортёр
     не должен прикрывать умерший слушатель на телефоне, а сам экспорт — не
@@ -765,6 +765,175 @@ def dlq(con):
     причина = mi.обезличить(строки[-1].strip() if строки else "")[:120]
     return [находка("работы-в-dlq", "warn", "в DLQ работ: %d, последняя %s — %s"
                     % (n, row["kind"], причина), count=n)]
+
+
+# Т9.1, тревоги. Числа в `/metrics` были, читателя у них не было:
+# `mara_whatsapp_lag_seconds` = −1 три недели заметили руками (§7 аудита).
+# Читатель — эта сверка: её находки уходят владельцу утренней сводкой
+# (`--telegram` в 8:00, `install/mara.cron`), а раз в час — в
+# `reconcile.log`. Состояние ей не нужно: всё ниже спрашивается у базы или
+# у демона в момент прогона, находка снимается сама, когда причина ушла.
+# Пороги — из окружения крона, умолчания с запасом: ложная тревога каждое
+# утро учит не читать.
+#
+# Очередь: «никто не берёт» — работа, чей срок (`next_at`) прошёл, а воркер
+# не начал ни одной попытки за то же время. Шаг длится не дольше часа
+# (`run_step`), так что живой воркер начинает новую попытку хотя бы раз в
+# час с небольшим, пока есть что брать. Ретраи сюда не попадают — их срок в
+# будущем; `created` для этого не годится: лестница `RETRY` с джиттером и
+# временем шагов тянется больше суток.
+ОЧЕРЕДЬ_Ч = _порог("MARA_QUEUE_STUCK_HOURS", 3)
+# Телефон выходит на связь, когда ему есть что сдать (`SyncWorker` раз в
+# 15 мин, но запрос — только с событием), так что тихие сутки — не тревога
+ТЕЛЕФОН_Ч = _порог("MARA_PHONE_SILENT_HOURS", 48)
+# Окно брошенных попыток — двое суток: сводка уходит раз в сутки, и
+# суточное окно пропускало бы брошенное незадолго до неё
+БРОШЕНО_Ч = 48
+ДЕМОН = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
+
+
+def очередь_стоит(con, hours=None, сейчас=None):
+    """Работа ждёт, срок её прошёл, а воркер дольше порога не начинал ни
+    одной попытки: демон лежит или поток воркера встал. Глубина очереди
+    этого не видит (длинная очередь при живом воркере выглядит так же), DLQ
+    — тоже: до него без воркера не дойдёт никогда."""
+    hours = ОЧЕРЕДЬ_Ч if hours is None else hours
+    сейчас = int(time.time()) if сейчас is None else int(сейчас)
+    граница = сейчас - int(hours * 3600)
+    rows = con.execute("select kind, count(*) as n, min(next_at) as t from jobs "
+                       "where state='ready' and next_at < ? and lease_until < ? "
+                       "group by kind order by kind", (граница, сейчас)).fetchall()
+    if not rows:
+        return []
+    # воркер жив, если начинал попытки за то же окно — значит, очередь просто
+    # длинная (один воркер, ASR по часу), а не брошенная
+    if con.execute("select 1 from job_attempts where "
+                   "cast(strftime('%s', started) as integer) >= ? limit 1",
+                   (граница,)).fetchone():
+        return []
+    return [находка("очередь-стоит", "warn",
+                    "работы с подошедшим сроком никто не берёт %d ч: %s — "
+                    "демон лежит или поток воркера встал; `systemctl status "
+                    "contextd`, `journalctl -u contextd`, очередь — "
+                    "`mara_ingest_queue_depth` в `/metrics` с петли"
+                    % (hours, ", ".join("%s — %d, срок прошёл %d ч назад"
+                                        % (r["kind"], r["n"], (сейчас - r["t"]) // 3600)
+                                        for r in rows)),
+                    count=sum(r["n"] for r in rows))]
+
+
+def шаги_брошены(con, hours=БРОШЕНО_Ч):
+    """Попытка шага закрыта `lease_expired` — итог не записан: воркер умер
+    посреди шага (выкат с рестартом демона, OOM) или упёрся в занятую базу,
+    закрывая работу. Работа при этом повторится сама, но час GPU ушёл
+    впустую; после выката это ждано, повторяющееся без выката — поломка."""
+    с = int(time.time()) - int(hours * 3600)
+    # Когда попытку признали брошенной — это старт следующей: `lease_expired`
+    # ставит повторная выдача той же транзакцией, что заводит новую попытку.
+    # По старту самой брошенной окно съедал бы простой воркера: после двух
+    # суток простоя находка исчезала бы, не успев родиться (Codex по #153)
+    rows = con.execute("select j.kind, count(*) as n from job_attempts a "
+                       "join jobs j on j.id = a.job_id "
+                       "join job_attempts b on b.job_id = a.job_id "
+                       "and b.attempt = a.attempt + 1 "
+                       "where a.outcome = 'lease_expired' "
+                       "and cast(strftime('%s', b.started) as integer) >= ? "
+                       "group by j.kind order by j.kind", (с,)).fetchall()
+    if not rows:
+        return []
+    return [находка("шаги-брошены", "warn",
+                    "за %d ч брошено попыток: %s — рестарт демона посреди шага "
+                    "(после выката это ждано), падение воркера или занятая база "
+                    "при закрытии; `journalctl -u contextd`"
+                    % (hours, ", ".join("%s %d" % (r["kind"], r["n"]) for r in rows)),
+                    count=sum(r["n"] for r in rows))]
+
+
+def телефон_молчит(con, hours=None):
+    """Телефон давно не выходил на связь: разряжен, нет сети, приложение
+    выгружено, токен отозван. `источник_замолчал` такой телефон сознательно
+    пропускает — молчит не слушатель, а сам телефон, — и до этой проверки
+    не говорил о нём никто.
+
+    Телефон — имя устройства, которое сдавало звонки, SMS или WhatsApp, а
+    не само имя: его задаёт человек. Импорт WhatsApp (`via: export`)
+    телефоном не считается — он приходит руками. Свежесть — по всем
+    неотозванным устройствам с этим именем: перевыпущенный токен, ещё не
+    сдавший событий, имя «оживляет» сразу. Время сравнивается как время, а
+    не как строка (сдвиги в `last_seen` бывают разные, Т2.1б)."""
+    hours = ТЕЛЕФОН_Ч if hours is None else hours
+    имена = [r[0] for r in con.execute(
+        "select distinct d.name from devices d where exists (select 1 from "
+        "events e where e.device_id = d.id "
+        "and e.source in ('phone', 'sms', 'whatsapp') "
+        "and coalesce(case when json_valid(e.payload_json) then "
+        "json_extract(e.payload_json, '$.via') end, '') <> 'export') "
+        "order by d.name")]
+    out = []
+    for имя in имена:
+        # ни разу не выходивший токен (`pair` заводит его с пустым
+        # `last_seen`) стареет от `created`: перевыпуск даёт отсрочку на
+        # порог, а не глушит тревогу навсегда (Codex по #153, круг 5)
+        возрасты = [_возраст(r[0]) for r in con.execute(
+            "select coalesce(last_seen, created) from devices "
+            "where name = ? and revoked_at is null", (имя,))]
+        возрасты = [в for в in возрасты if в is not None]
+        if not возрасты or min(возрасты) <= hours * 3600:
+            continue          # отозваны все или кто-то на связи
+        out.append(находка("телефон-молчит", "warn",
+                           "%s не выходил на связь %d ч: разряжен, нет сети, "
+                           "приложение выгружено или токен отозван — звонки и "
+                           "сообщения, если были, ждут на нём"
+                           % (имя, int(min(возрасты)) // 3600), device=имя))
+    return out
+
+
+def демон_не_отвечает(адрес):
+    """`contextd` не отвечает на петле — телефон не может сдать ни событие, ни
+    запись, а очередь не движется. Зовётся из крона (`main`), а не из
+    `run()`: тестам и самопроверке демон не нужен. Без адреса — молчим;
+    кривой адрес — своя находка, а не «демон лежит»."""
+    if not адрес:
+        return []
+    import urllib.request, urllib.parse
+    url = адрес.rstrip("/") + "/healthz"
+    try:
+        # `http://` или адрес без схемы `urlopen` отвергает по-разному
+        # (`URLError` — подкласс `OSError`), и он ушёл бы в «демон лежит»;
+        # кривую настройку называем до запроса (Codex по #153)
+        части = urllib.parse.urlsplit(адрес)
+        if части.scheme not in ("http", "https") or not части.hostname:
+            raise ValueError("нет схемы или хоста")
+        # `.port` разбирает порт лениво и бросает `ValueError` на нечисловом
+        # и вне 0–65535 — иначе `:99999` ушёл бы в «демон лежит» (Codex, круг 4)
+        части.port
+        # Живым считается ровно ответ самого `contextd`: 200 на тот же адрес и
+        # JSON с `ok: true` (`contextd.health`). `urlopen` бросает только на
+        # не-2xx, а иной 2xx (204) и редирект на страницу прокси с 200
+        # пропускает молча — тело и адрес ответа отсекают и то и другое
+        # (Codex по #153, круги 1 и 3)
+        with urllib.request.urlopen(url, timeout=5) as r:
+            if r.status != 200:
+                беда = "код %d" % r.status
+            elif r.geturl() != url:
+                беда = "перенаправлен"
+            else:
+                try:
+                    ответ = json.loads(r.read(4096) or b"null")
+                except ValueError:
+                    ответ = None
+                if isinstance(ответ, dict) and ответ.get("ok") is True:
+                    return []
+                беда = "ответ не от contextd"
+    except ValueError as e:
+        return [находка("демон-адрес-кривой", "warn",
+                        "MARA_CONTEXT_URL не разобрать (%s) — живость contextd "
+                        "не проверена" % type(e).__name__)]
+    except (OSError, http.client.HTTPException) as e:
+        беда = type(e).__name__
+    return [находка("демон-не-отвечает", "error",
+                    "contextd не отвечает на %s (%s) — телефон не сдаёт "
+                    "записи; `systemctl status contextd`" % (url, беда))]
 
 
 # §5.1 ТЗ просит `quick_check` по расписанию и слежку за WAL. Порог WAL в
@@ -1039,6 +1208,9 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += _застава("дайджест", дайджест_не_доставлен, con)
     out += _застава("догрузка", дайджест_догрузка, con)
     out += _застава("dlq", dlq, con)
+    out += _застава("очередь", очередь_стоит, con)
+    out += _застава("попытки", шаги_брошены, con)
+    out += _застава("телефон", телефон_молчит, con)
     out += _застава("бэкап", бэкап_ядра, targets, root=root)
     out += _застава("снимок", снимок_реестра_устарел, root)
     return out
@@ -1162,6 +1334,8 @@ def main():
     ap.add_argument("--json", action="store_true", dest="as_json")
     ap.add_argument("--telegram", action="store_true",
                     help="доложить владельцу о реальных проблемах; нет их — молчать")
+    ap.add_argument("--daemon-url", default=ДЕМОН,
+                    help="адрес contextd для проверки живости; пустой — не проверять")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args()
     if a.self_check:
@@ -1170,6 +1344,9 @@ def main():
     con, находки = открыть_реестр(a.root)
     if con is not None:
         находки = run(con, a.root, a.vault, a.bm_db)
+    # и при нечитаемой базе; первым — лежащий демон объясняет половину
+    # остального, а сводка режет хвост (`текст`, limit)
+    находки = _застава("демон", демон_не_отвечает, a.daemon_url) + находки
     if a.as_json:
         print(json.dumps(находки, ensure_ascii=False, indent=2))
     elif not находки:

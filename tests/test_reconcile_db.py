@@ -179,7 +179,8 @@ class БазаЦела(unittest.TestCase):
         mi.migrate(root, mi.ВЕРСИЯ - 1).close()
         self.addCleanup(setattr, mi, "ROOT", mi.ROOT)   # main переставляет mi.ROOT
         поток = io.StringIO()
-        with unittest.mock.patch.object(sys, "argv", ["rc", "--root", root, "--json"]), \
+        with unittest.mock.patch.object(sys, "argv", ["rc", "--root", root, "--json",
+                                                      "--daemon-url", ""]), \
                 contextlib.redirect_stdout(поток):
             код = rc.main()
         self.assertNotEqual(код, 0)
