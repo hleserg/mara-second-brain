@@ -193,13 +193,12 @@ class ДемонНеОтвечает(unittest.TestCase):
         self.assertEqual((f[0]["check"], f[0]["level"]), ("демон-не-отвечает", "error"))
         self.assertIn("/healthz", f[0]["detail"])
 
-    def test_ответ_не_200_это_error(self):
-        """`/healthz` отвечает, но не 200 — тоже тревога (`HTTPError`)."""
+    def отвечает(self, код):
         import http.server
 
         class Плохой(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                self.send_response(503)
+                self.send_response(код)
                 self.end_headers()
 
             def log_message(self, *a):
@@ -208,9 +207,18 @@ class ДемонНеОтвечает(unittest.TestCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        f = rc.демон_не_отвечает("http://127.0.0.1:%d" % srv.server_address[1])
+        return rc.демон_не_отвечает("http://127.0.0.1:%d" % srv.server_address[1])
+
+    def test_ответ_не_200_это_error(self):
+        """`/healthz` отвечает, но не 200 — тоже тревога: 503 бросает
+        `HTTPError`, а 204 (прокси, чужой слушатель) `urlopen` пропускает
+        молча (Codex по #153)."""
+        f = self.отвечает(503)
         self.assertEqual(f[0]["check"], "демон-не-отвечает")
         self.assertIn("HTTPError", f[0]["detail"])
+        f = self.отвечает(204)
+        self.assertEqual(f[0]["check"], "демон-не-отвечает")
+        self.assertIn("код 204", f[0]["detail"])
 
     def test_кривой_адрес_не_выдаётся_за_лежащий_демон(self):
         for адрес in ("не-адрес", "http://[::1"):

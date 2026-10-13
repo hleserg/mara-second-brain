@@ -889,9 +889,13 @@ def демон_не_отвечает(адрес):
     import urllib.request
     url = адрес.rstrip("/") + "/healthz"
     try:
-        # не-2xx `urlopen` бросает сам (`HTTPError` — подкласс `OSError`)
-        urllib.request.urlopen(url, timeout=5).close()
-        return []
+        # не-2xx `urlopen` бросает сам (`HTTPError` — подкласс `OSError`), а
+        # иной 2xx (прокси, чужой слушатель: 204) — нет; живой `contextd`
+        # отвечает ровно 200 (Codex по #153)
+        with urllib.request.urlopen(url, timeout=5) as r:
+            if r.status == 200:
+                return []
+            беда = "код %d" % r.status
     except ValueError as e:
         return [находка("демон-адрес-кривой", "warn",
                         "MARA_CONTEXT_URL не разобрать (%s) — живость contextd "
