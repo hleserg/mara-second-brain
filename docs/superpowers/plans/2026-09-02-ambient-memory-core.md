@@ -693,6 +693,10 @@ def metrics(con):
 - [x] **Шаг 5: юнит systemd и .gitignore**
 
 ```bash
+# сегодня юнит — шаблон с подстановками @USER@ и @REPO@, его собирает
+# install/install-units.sh (issue #89). Исторически здесь писался готовый
+# install/contextd.service с системным логином и путём к репозиторию в теле:
+# шаблонов в сентябре ещё не было, форма ниже — нынешняя, не тогдашняя.
 cat > install/contextd.service.in <<'EOF'
 [Unit]
 Description=Mara contextd: приём звонков и сообщений
@@ -1501,6 +1505,9 @@ git commit -m "ретеншен и сверка: удаление идемпот
 - [x] **Шаг 1: подготовка doctor**
 
 ```bash
+# владелец каталога записан так в #93 (issue #89): исторически в `-o` и `-g`
+# стоял системный логин явно. Результат тот же — каталог того, кто входит
+# по ssh, — но запускалась тогда строка с логином, а не эта.
 ssh doctor 'sudo apt-get install -y ffmpeg && sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /srv/mara-blobs && sudo install -d -m 755 /etc/mara'
 ```
 
