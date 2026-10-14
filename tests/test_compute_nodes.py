@@ -175,6 +175,18 @@ class Такт(unittest.TestCase):
         self.assertEqual(self.работа(self.asr)["queued_reason"], "node_offline:bigpc")
         self.assertNotIn("MARA_ASR_URL", os.environ)
 
+    def test_пустое_окружение_сильнее_файла(self):
+        """`MARA_ASR_URL=` в окружении юнита и старый адрес в файле: шаг
+        возьмёт пустое (`setdefault`) и упадёт на `нужен_адрес` — демон
+        должен видеть то же и работу брать, а не ждать узел по чужому адресу."""
+        env = os.path.join(self.dir, "mara.env")
+        with open(env, "w") as fh:
+            fh.write("MARA_ASR_URL=%s\n" % мёртвый_адрес(self))
+        os.environ["MARA_ENV_FILE"] = env
+        os.environ["MARA_ASR_URL"] = ""
+        self.assertIsNone(contextd.адрес_шага("MARA_ASR_URL"))
+        self.assertEqual(self.такт()["id"], self.asr)
+
     def test_кривой_адрес_шаг_падает_как_раньше(self):
         os.environ["MARA_ASR_URL"] = "bigpc:8770"
         self.assertEqual(self.такт()["id"], self.asr)
