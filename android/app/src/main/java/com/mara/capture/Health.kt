@@ -6,12 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.StatFs
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
-import androidx.documentfile.provider.DocumentFile
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
@@ -55,7 +53,9 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
          *  записи, «сломано» — до починки; одно перезаписывало бы другое. */
         const val ТРЕВОГА = 1
         const val СЛОМАНО = 2
-        private const val НЕДЕЛЯ_МС = 7 * 24 * 3600_000L
+        /** Третье — §8.6 п.3: reboot-unsafe рекордер, а контрольного
+         *  звонка после загрузки ещё не было (Т4.1). */
+        const val КОНТРОЛЬ = 3
 
         /** Сбор примет и переход состояния — под одним замком: снимок,
          *  собранный до чужого перехода, иначе переоткрыл бы закрытую тревогу
@@ -64,11 +64,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 
         /** Без этих двух захват не работает; остальные из `MainActivity.НУЖНЫ`
          *  — про контакты и SMS, их отсутствие здоровье захвата не ломает. */
-        val ДЛЯ_ЗАХВАТА: List<String> = listOf(
-            Manifest.permission.READ_CALL_LOG,
-            if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
-            else Manifest.permission.READ_EXTERNAL_STORAGE,
-        )
+        val ДЛЯ_ЗАХВАТА: List<String> = listOf(Manifest.permission.READ_CALL_LOG, Device.АУДИО)
 
         /** Всё, что видно телефону, без единого решения. Что не прочиталось
          *  — честный `null`, пустой список или флаг, а не «всё хорошо».
@@ -76,7 +72,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
          *  звонки до установки приложения отвечать нечем (Codex по #137). */
         fun собрать(ctx: Context, s: Settings): Приметы {
             val сейчас = System.currentTimeMillis()
-            val неделя = сейчас - НЕДЕЛЯ_МС
+            val неделя = сейчас - Здоровье.НЕДЕЛЯ_МС
             if (s.healthSinceMs == 0L) s.healthSinceMs = сейчас
             // «не прочитался» — не «звонков не было» и не «записей нет»: без
             // разрешения или с молчащим провайдером журнал — null, упавший
@@ -88,11 +84,11 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 загрузка = сейчас - SystemClock.elapsedRealtime(),
                 разрешенийНет = ДЛЯ_ЗАХВАТА.filterNot { Device.granted(ctx, it) }
                     .map { it.substringAfterLast('.') },
-                папкаЧитается = s.folderUri.ifEmpty { null }?.let { uri ->
-                    runCatching { DocumentFile.fromTreeUri(ctx, Uri.parse(uri))?.canRead() == true }
-                        .getOrDefault(false)
-                },
-                рекордерЕсть = Device.producers(ctx).isNotEmpty(),
+                // проба провайдера папки (`health()` §7.4): грант жив и читается
+                папкаЧитается = s.folderUri.ifEmpty { null }?.let { Папка(ctx, it).health().доступ },
+                // рекордеры звонков по профилям §7.1: штатная звонилка Huawei
+                // стоит всегда и рекордером не считается (Т4.1)
+                рекордеры = Рекордеры.вЗдоровье(Device.рекордеры(ctx)),
                 звонки = журнал ?: emptyList(),
                 записи = скан ?: emptyList(),
                 // обе периодические: сверка и сама проверка здоровья — потеря
@@ -153,6 +149,12 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             if (о.состояние == Состояние.unhealthy && о.тревога == null)
                 уведомить(ctx, СЛОМАНО, "Захват сломан", о.причина)
             else снять(ctx, СЛОМАНО)
+            // §8.6 п.3: reboot-unsafe рекордер (ACR Phone + APH) и ни одного
+            // состоявшегося звонка после загрузки — стойкое напоминание о
+            // контрольном; уходит с первым звонком, дальше говорит его исход
+            val контроль = Здоровье.контрольныйЗвонок(о, п)
+            if (контроль != null) уведомить(ctx, КОНТРОЛЬ, "Нужен контрольный звонок", контроль)
+            else снять(ctx, КОНТРОЛЬ)
             s.healthState = о.состояние.name
             s.healthReason = о.причина
             s.healthAtMs = п.сейчас
