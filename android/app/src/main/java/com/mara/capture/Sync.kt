@@ -108,7 +108,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                     журнал: List<CallLogEntry>, now: Long, s: Settings): ServerReply? {
         when (job.state) {
             JobState.NEW -> {
-                val sha = Device.sha256(ctx, job.recording())
+                val sha = Device.sha256(Device.провайдерЗаписи(ctx, s, job.recording()), job.recording())
                     ?: return null.also { q.save(job.copy(state = JobState.FAILED,
                         error = "файл не читается"), now) }
                 // беду гасим здесь же: шаг удался, а несброшенная строка до

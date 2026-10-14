@@ -23,9 +23,6 @@ import java.security.MessageDigest
  */
 object Device {
 
-    /** Слова в пути, по которым узнаём запись разговора. Регистр не важен. */
-    private val ПРИМЕТЫ = listOf("call", "record", "voice", "запис")
-
     fun granted(ctx: Context, perm: String): Boolean =
         ctx.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
 
@@ -39,7 +36,9 @@ object Device {
      * сюда, мы узнаём о ней сразу и без обхода папок.
      *
      * Путь не зашит: берём всё аудио и оставляем то, в чьём пути есть примета
-     * (ТЗ §22 — не hardcode'ить recording path Huawei).
+     * (ТЗ §22 — не hardcode'ить recording path Huawei) или чей владелец —
+     * рекордер звонков из профилей (`Рекордеры.вМедиатеке`: у ACR Phone в
+     * пути приметы нет).
      *
      * null — провайдер не отдал курсор: это не «записей нет», здоровье
      * (Т4.2) различает; сверке и мастеру хватает пустого списка.
@@ -58,7 +57,7 @@ object Device {
         c.use {
             while (it.moveToNext()) {
                 val путь = (it.getString(4) ?: "") + (it.getString(1) ?: "")
-                if (ПРИМЕТЫ.none { p -> путь.contains(p, ignoreCase = true) }) continue
+                if (!Рекордеры.вМедиатеке(путь, it.getString(5))) continue
                 val mtime = it.getLong(3) * 1000
                 if (mtime < sinceMs) continue
                 out += Recording(
@@ -122,7 +121,7 @@ object Device {
         Медиатека(ctx).listCandidates(sinceMs)?.let { (it + изПапки(ctx, s)).distinctBy { r -> r.id } }
 
     private fun изПапки(ctx: Context, s: Settings): List<Recording> =
-        if (s.folderUri.isEmpty()) emptyList() else Папка(ctx, s.folderUri).listCandidates(0)
+        if (s.folderUri.isEmpty()) emptyList() else Папка(ctx, s.folderUri).listCandidates(Long.MIN_VALUE)
 
     /** null — файла больше нет. `openInputStream` на исчезнувшей строке
      *  MediaStore не возвращает null, а бросает: без этого перехвата
@@ -142,10 +141,12 @@ object Device {
         null
     }
 
-    fun sha256(ctx: Context, rec: Recording): String? {
+    /** Хеш содержимого — через провайдер, которым запись видна
+     *  (`openRecording`): так и считает, и шлёт один и тот же путь. */
+    fun sha256(провайдер: RecorderProvider, rec: Recording): String? {
         val md = MessageDigest.getInstance("SHA-256")
         val buf = ByteArray(64 * 1024)
-        (open(ctx, rec) ?: return null).use { s ->
+        (провайдер.openRecording(rec) ?: return null).use { s ->
             while (true) {
                 val n = s.read(buf)
                 if (n <= 0) break
@@ -287,12 +288,21 @@ class Медиатека(private val ctx: Context) : RecorderProvider {
     override val providerVersion = 1
 
     override fun capabilities() = Манифест.поКандидатам(providerId, providerVersion,
-        "mediastore", null, true, listCandidates(0) ?: emptyList(),
+        "mediastore", null, true, listCandidates(Long.MIN_VALUE) ?: emptyList(),
         Рекордеры.вЗдоровье(Device.рекордеры(ctx)))
 
-    override fun health(): Проба =
-        if (Device.granted(ctx, Device.АУДИО)) Проба(true, "аудио в медиатеке читается")
-        else Проба(false, "нет разрешения " + Device.АУДИО.substringAfterLast('.'))
+    /** Проба чтения, а не только разрешения (ADR-0007 п.6): курсор
+     *  медиатеки отдан. */
+    override fun health(): Проба {
+        if (!Device.granted(ctx, Device.АУДИО))
+            return Проба(false, "нет разрешения " + Device.АУДИО.substringAfterLast('.'))
+        val отдан = runCatching {
+            ctx.contentResolver.query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Audio.Media._ID), null, null, null)?.use { true } ?: false
+        }.getOrDefault(false)
+        return if (отдан) Проба(true, "медиатека отдаёт аудио")
+               else Проба(false, "медиатека не отдала курсор")
+    }
 
     override fun listCandidates(sinceMs: Long): List<Recording>? = Device.mediaStoreOrNull(ctx, sinceMs)
     override fun openRecording(candidate: Recording): InputStream? = Device.open(ctx, candidate)
@@ -300,7 +310,7 @@ class Медиатека(private val ctx: Context) : RecorderProvider {
     override fun acknowledgeIngested(candidate: Recording, receipt: String) {}
 
     override fun diagnostics(): List<String> {
-        val все = listCandidates(0) ?: return listOf("$providerId: курсор не отдан")
+        val все = listCandidates(Long.MIN_VALUE) ?: return listOf("$providerId: курсор не отдан")
         // пакеты — имена приложений, не людей: в отчёт можно
         val поПакетам = все.groupingBy { it.producer ?: "?" }.eachCount()
             .entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key} ${it.value}" }
@@ -335,5 +345,6 @@ class Папка(private val ctx: Context, private val uri: String) : RecorderPr
     override fun openRecording(candidate: Recording): InputStream? = Device.open(ctx, candidate)
     override fun extractMetadata(candidate: Recording): String = Device.audioInfo(ctx, candidate)
     override fun acknowledgeIngested(candidate: Recording, receipt: String) {}
-    override fun diagnostics(): List<String> = listOf("$providerId: записей ${listCandidates(0).size}")
+    override fun diagnostics(): List<String> =
+        listOf("$providerId: записей ${listCandidates(Long.MIN_VALUE).size}")
 }

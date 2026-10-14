@@ -246,8 +246,14 @@ class MainActivity : AppCompatActivity() {
         for ((п, список) in видно) {
             строки += "провайдер ${п.providerId}: ${п.health().причина}, " +
                 (список?.let { "кандидатов ${it.size}" } ?: "не прочиталось")
-            строки += "манифест ${п.providerId}: " + runCatching { п.capabilities().json().toString() }
-                .getOrElse { "не собрался (${it.javaClass.simpleName})" }
+            строки += runCatching { п.diagnostics() }
+                .getOrElse { listOf("${п.providerId}: диагностика не собралась (${it.javaClass.simpleName})") }
+            // путь папки — формой: подпапка с именем контакта не уедет в отчёт
+            строки += "манифест ${п.providerId}: " + runCatching {
+                п.capabilities().json().let { j ->
+                    j.put("storage_path", Затирание.папка(j.optString("storage_path"))).toString()
+                }
+            }.getOrElse { "не собрался (${it.javaClass.simpleName})" }
         }
         if (s.folderUri.isEmpty()) строки += "папка не выбрана — смотрю только медиатеку"
         строки += listOf(
