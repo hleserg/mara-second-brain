@@ -15,20 +15,21 @@
   неотличима от поломки), а вечер — повод, а не отчёт: «завтра ничего»
   каждый вечер — шум, к которому привыкают и перестают читать.
 
-Срок — из шапки карточки, дата в начале значения, как у утра: авторитет
-пока в волте
+Срок и отбор — как у утра (`daily-summary.живые`): дата в начале значения,
+неподтверждённое старше трёх дней не напоминается. Авторитет пока в волте
 (ADR-0001); переедет в реестр — переедут все читатели разом.
 
 Отправка — строкой outbox вида `telegram_due` с ключом — датой срока
-(`object_id`): второй прогон того же вечера (крон перезапущен руками) дубль
-не шлёт. Не копится, как напоминание Т-У.4: нет транспорта — строка
+(`object_id`): повтор после успешной отправки дубль не шлёт. Доставка — «хотя
+бы раз», как у дайджеста: если транспорт упал уже после того, как телеграм
+принял сообщение, повтор тем же вечером пришлёт второе. Не копится, как напоминание Т-У.4: нет транспорта — строка
 `skipped`. «Завтра срок», доехавшее послезавтра, хуже никакого.
 
     python3 scripts/due_reminder.py                  # завтрашние сроки, в телеграм
     python3 scripts/due_reminder.py --dry-run        # только напечатать
     python3 scripts/due_reminder.py --self-check
 """
-import argparse, datetime, os, sys
+import argparse, datetime, importlib.util, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -45,14 +46,45 @@ def завтра(now=None):
     return (now.astimezone(mi.TZ) + datetime.timedelta(days=1)).date().isoformat()
 
 
+def _сводка():
+    """`daily-summary.py` с дефисом в имени обычным import не берётся."""
+    spec = importlib.util.spec_from_file_location(
+        "daily_summary", os.path.join(HERE, "daily-summary.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def к_сроку(vault, день):
-    """Открытые карточки со сроком `день` в форме `поля()`, по заголовку.
-    Срок — дата в начале значения, как у утра (`daily-summary.morning`):
-    `2026-10-15T18:00` — тоже 15-е, иначе утро назвало бы срок, о котором
-    вечер накануне промолчал. Нечитаемая карточка пропускается
-    (`открытые_карточки`)."""
-    return cp._отобрать(cp.открытые_карточки(vault),
-                        lambda fm: str(fm.get("due") or "").strip()[:10] == день)
+    """Карточки со сроком `день` в форме `поля()`. Отбор — утренний
+    (`daily-summary.живые` на день срока): неподтверждённое старше трёх
+    дней утро прячет, и вечер о нём не напоминает (ревью #174). Срок —
+    дата в начале значения, как у утра: `2026-10-15T18:00` — тоже 15-е.
+    Порядок: сначала со временем (оно и есть самое срочное), потом по
+    дате и заголовку — чтобы в обрезку «…и ещё N» уходило не оно."""
+    пункты = []
+    for fm in _сводка().живые(vault, день):
+        срок = str(fm.get("due") or "")
+        if срок[:10] != день:
+            continue
+        it = cp.поля(fm)
+        заголовок = cp.данные(it["title"], cp.MAX_TITLE)
+        if заголовок:
+            пункты.append(((len(срок) == 10, срок, заголовок), it))
+    return [it for _, it in sorted(пункты, key=lambda p: p[0])]
+
+
+def брошено(last_attempt, now=None):
+    """Строка `sending` старше аренды outbox — процесс умер посреди
+    отправки; моложе — её прямо сейчас шлёт другой прогон."""
+    try:
+        t = datetime.datetime.fromisoformat(str(last_attempt))
+    except ValueError:
+        return True
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=mi.TZ)
+    now = now or datetime.datetime.now(mi.TZ)
+    return (now - t).total_seconds() > mi.АРЕНДА_OUTBOX_С
 
 
 def текст(пункты):
@@ -82,15 +114,25 @@ def run(root=None, vault=None, env_file=None, now=None, dry_run=False):
         print(сообщение)
         return "dry-run"
     con = mi.connect(root or mi.ROOT)
-    было = con.execute("select state from outbox where kind=? and object_id=? and "
-                       "state in ('sent','sending')", (ВИД, день)).fetchone()
-    if было:
+    # проверка и вставка — одной транзакцией: иначе два прогона разом оба
+    # видели бы «ещё не слали» и слали оба (ревью #174)
+    with mi.транзакция(con):
+        было = con.execute("select id, state, last_attempt from outbox where kind=? "
+                           "and object_id=? and state in ('sent','sending')",
+                           (ВИД, день)).fetchone()
+        if было is None:
+            con.execute("update outbox set state='skipped', error='пересобран' "
+                        "where kind=? and object_id=? and state='pending'", (ВИД, день))
+            oid = mi.в_outbox(con, ВИД, {"text": сообщение}, "due", день)
+        elif было["state"] == "sending" and брошено(было["last_attempt"], now):
+            # процесс убит между захватом и пометкой: сообщение могло и уйти,
+            # повтор его не шлёт, а закрывает строку (как `message_nudge`)
+            con.execute("update outbox set state='skipped', error=? where id=? and "
+                        "state='sending'",
+                        ("брошено посреди отправки — возможно, доставлено", было["id"]))
+    if было is not None:
         print("due_reminder: на %s уже отправлялось (%s)" % (день, было["state"]))
         return "already"
-    with mi.транзакция(con):
-        con.execute("update outbox set state='skipped', error='пересобран' "
-                    "where kind=? and object_id=? and state='pending'", (ВИД, день))
-        oid = mi.в_outbox(con, ВИД, {"text": сообщение}, "due", день)
     # транспорт и застава §8.3 — дайджеста; исключение транспорта строку
     # оставляет `pending`, и ниже она гасится, как любой неуспех
     try:
@@ -103,8 +145,8 @@ def run(root=None, vault=None, env_file=None, now=None, dry_run=False):
         with mi.транзакция(con):
             con.execute("update outbox set state='skipped', error=? where id=? and "
                         "state='pending'", (исход or "не отправлено", oid))
-        print("due_reminder: %s — не доставлено (%s), не копится" % (день, исход),
-              file=sys.stderr)
+        print("due_reminder: %s — не доставлено (%s), не копится"
+              % (день, исход or "строку забрал другой прогон"), file=sys.stderr)
     print("due_reminder: %s — %s, пунктов %d" % (день, исход, len(пункты)))
     return исход
 
@@ -120,14 +162,14 @@ def self_check():
 
     now = datetime.datetime(2026, 10, 14, 20, 0, tzinfo=mi.TZ)
     assert завтра(now) == "2026-10-15"
-    assert завтра(datetime.datetime(2026, 10, 14, 22, 30, tzinfo=datetime.timezone.utc)) \
-        == завтра(datetime.datetime(2026, 10, 15, 1, 30, tzinfo=mi.TZ)), "день — владельца"
     card("a.md", title="прислать смету", status="open", due="2026-10-15", promised_to="Анна",
          id="01999999-0000-7000-8000-00000000abcd")
     card("b.md", title="закрыто", status="done", due="2026-10-15")
     card("c.md", title="послезавтра", status="open", due="2026-10-16")
     card("d.md", title="перезвонить", status="proposed", due="2026-10-15",
-         promised_to="+79990000000")
+         promised_to="+79990000000", occurred="2026-10-14")
+    card("e.md", title="давнее неподтверждённое", status="proposed", due="2026-10-15",
+         occurred="2026-09-01")
     пункты = к_сроку(v, "2026-10-15")
     assert [it["title"] for it in пункты] == ["перезвонить", "прислать смету"], пункты
     t = текст(пункты)

@@ -226,13 +226,21 @@ def _откуда(fm, today):
     return ("%s %s" % (src, when)).strip()
 
 
-def morning(vault, today):
-    """Утро v1 по правилам `docs/morning-brief.md`. Без модели."""
+def живые(vault, today):
+    """Что из обязательств живо на день `today`: открытое и неподтверждённое
+    не старше `FRESH_DAYS` (правило 3 `docs/morning-brief.md`). Одна
+    функция на утро и на вечернее «завтра срок» (Т-У.2): вечер не должен
+    напоминать о том, что утро нарочно прячет."""
     edge = (datetime.fromisoformat(today) - timedelta(days=FRESH_DAYS)).date().isoformat()
-    live = [fm for fm in commitments(vault)
+    return [fm for fm in commitments(vault)
             if fm.get("status") in context_pack.OPEN and fm.get("title")
             and (fm.get("status") == "open"
                  or str(fm.get("occurred") or "")[:10] >= edge)]
+
+
+def morning(vault, today):
+    """Утро v1 по правилам `docs/morning-brief.md`. Без модели."""
+    live = живые(vault, today)
     due = lambda fm: str(fm.get("due") or "")[:10]
     dated = [fm for fm in live if due(fm) == today]
     late = sorted([fm for fm in live if due(fm) and due(fm) < today], key=due)[-1:]
