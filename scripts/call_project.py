@@ -27,6 +27,19 @@ import vault_common
 from vault_common import canon_map, linkify, locked, scrub, yaml_str
 
 OWNER = vault_common.владелец()      # канон владельца, вне репозитория (Г7)
+
+
+def застава_владельца(vault):
+    """Писать в боевой волт от имени владельца можно, только если его канон
+    в индексе сущностей есть. Индекс есть, а канона нет (`MARA_OWNER` не
+    задан или задан не тем) — исключение: шаг уходит в ретрай и возьмётся
+    сам, когда канон поправят. Без заставы выкат без `MARA_OWNER` молча
+    метил бы карточки `owner: owner`, а владельца записывал бы собеседником
+    в каждый разговор — и ни одна строка не упала бы. Индекса нет (тесты,
+    клиентский спул) — судить не по чему, пишем."""
+    if vault_common.канон_в_индексе(vault, OWNER) is False:
+        raise RuntimeError("канона владельца нет в индексе сущностей: MARA_OWNER не "
+                           "задан или задан не тем (RUNBOOK §4а), затем рестарт contextd")
 CONV_DIR = "kb/conversations"
 COMM_DIR = "kb/commitments"
 
@@ -553,6 +566,7 @@ def _atomic(path, text):
 
 
 def run(event_id, vault, root=None):
+    застава_владельца(vault)
     root = root or mi.ROOT
     con = mi.connect(root)
     ev = mi.event_row(con, event_id)
@@ -1016,6 +1030,7 @@ def apply_correction(vault, event, con=None):
     в него (`ledger_import.перенести_карточку`), чтобы строка и шапка не
     расходились до ночного крона. Без `con` (тесты правки словами) волт
     остаётся единственным, кого правка касается — как и до Т2.2."""
+    застава_владельца(vault)
     p = event.get("payload") or {}
     item = scrub(str(p.get("item") or "").strip())
     status, due = p.get("status") or None, p.get("due") or None

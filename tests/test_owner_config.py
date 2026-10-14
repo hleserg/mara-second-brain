@@ -71,52 +71,110 @@ class Промпт(_Окружение):
 
 
 class Сверка(_Окружение):
-    def волт(self, индекс=True):
+    def волт(self, индекс=("ivan-petrov",)):
         v = os.path.join(self.dir, "vault")
         os.makedirs(os.path.join(v, "_system"), exist_ok=True)
-        if индекс:
+        if индекс is not None:
             with open(os.path.join(v, "_system/entity-index.json"), "w") as fh:
-                fh.write("[]")
+                json.dump([{"canonical": к, "type": "person", "aliases": [], "title": к}
+                           for к in индекс], fh)
         return v
 
-    def test_не_задан_при_живом_волте(self):
-        н, = cr.владелец_не_задан(self.волт())
-        self.assertEqual((н["check"], н["level"]), ("владелец-не-задан", "warn"))
+    def находки(self, v):
+        return [(н["check"], н["level"]) for н in cr.владелец_не_задан(v)]
 
-    def test_задан_или_волта_нет_молчит(self):
-        self.assertEqual(cr.владелец_не_задан(None), [])
-        self.assertEqual(cr.владелец_не_задан(self.волт(индекс=False)), [])
+    def test_не_задан(self):
+        self.assertEqual(self.находки(self.волт()), [("владелец-не-задан", "error")])
+
+    def test_не_в_индексе(self):
         self.файл("MARA_OWNER=oleg\n")
-        self.assertEqual(cr.владелец_не_задан(self.волт()), [])
+        self.assertEqual(self.находки(self.волт()), [("владелец-не-в-индексе", "error")])
+
+    def test_канон_без_учёта_регистра_и_без_имени(self):
+        self.файл("MARA_OWNER=Ivan-Petrov\n")
+        self.assertEqual(vault_common.владелец(), "ivan-petrov")
+        self.assertEqual(self.находки(self.волт()), [("имя-владельца-не-задано", "warn")])
+        self.файл("MARA_OWNER=Ivan-Petrov\nMARA_OWNER_NAME=Ваня\n")
+        self.assertEqual(self.находки(self.волт()), [])
+
+    def test_без_волта_или_индекса_молчит(self):
+        self.assertEqual(cr.владелец_не_задан(None), [])
+        self.assertEqual(cr.владелец_не_задан(self.волт(индекс=None)), [])
+
+
+class Застава(_Окружение):
+    """Проектор не пишет в боевой волт от имени владельца, которого нет в
+    индексе: иначе выкат без `MARA_OWNER` молча метил бы карточки
+    `owner: owner`."""
+
+    def волт(self):
+        v = os.path.join(self.dir, "vault")
+        os.makedirs(os.path.join(v, "_system"), exist_ok=True)
+        with open(os.path.join(v, "_system/entity-index.json"), "w") as fh:
+            json.dump([{"canonical": "ivan-petrov"}], fh)
+        return v
+
+    def test_нет_канона_исключение(self):
+        import call_project as cp
+        with mock.patch.object(cp, "OWNER", "owner"):
+            with self.assertRaises(RuntimeError) as ош:
+                cp.застава_владельца(self.волт())
+        self.assertIn("MARA_OWNER", str(ош.exception))
+        with mock.patch.object(cp, "OWNER", "ivan-petrov"):
+            cp.застава_владельца(self.волт())
+        # индекса нет — судить не по чему
+        cp.застава_владельца(os.path.join(self.dir, "пусто"))
+
+    def test_шаг_проекции_стоит_до_записи(self):
+        import call_project as cp
+        with mock.patch.object(cp, "OWNER", "owner"), self.assertRaises(RuntimeError):
+            cp.run("call_нет", self.волт(), root=os.path.join(self.dir, "блобы"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "блобы")),
+                         "до заставы ничего не открыто и не создано")
+
+    def test_правка_словами_тоже_стоит(self):
+        import call_project as cp
+        with mock.patch.object(cp, "OWNER", "owner"), self.assertRaises(RuntimeError):
+            cp.apply_correction(self.волт(), {"id": "c1", "payload": {"item": "смета"}})
 
 
 class Публичность(unittest.TestCase):
     """Г7 механикой: имени владельца нет ни в одном отслеживаемом файле —
     код, тесты, документы. Формы записаны кодами: сам тест не должен быть
-    исключением из своего правила. История git старое имя хранит — её не
-    переписываем, но новое не добавится."""
+    исключением из своего правила. Полное имя, уменьшительные (с «ё» и без)
+    и латиница; короткий латинский префикс из `claude-usage.py` и
+    GitHub-хэндл — не здесь: их владелец оставил решением 2026-09-03. История
+    git старое имя хранит — её не переписываем, но новое не добавится."""
 
-    def test_нет_имени_в_коде(self):
+    def test_нет_имени_ни_в_одном_файле(self):
         корень = os.path.join(СКРИПТЫ, "..")
-        файлы = subprocess.run(["git", "ls-files"],
-                               cwd=корень, capture_output=True, text=True).stdout.split()
-        if not файлы:
+        r = subprocess.run(["git", "ls-files", "-z"], cwd=корень, capture_output=True)
+        файлы = [f for f in r.stdout.decode("utf-8", "replace").split("\0") if f]
+        if r.returncode or not файлы:
             self.skipTest("не git-клон")
+
         def слово(*коды):
             return "".join(map(chr, коды))
+        с, е, р, г, ё, ж = 0x421, 0x435, 0x440, 0x433, 0x451, 0x436
         формы = re.compile("|".join(map(re.escape, [
-            слово(0x421, 0x435, 0x440, 0x433), слово(0x421, 0x435, 0x440, 0x451, 0x433),
-            слово(0x421, 0x435, 0x440, 0x451, 0x436), слово(0x421, 0x435, 0x440, 0x435, 0x436),
-            "s" + "ergey"])), re.I)
-        нашлось = []
+            слово(с, е, р, г), слово(с, е, р, ё, г), слово(с, е, р, е, г),
+            слово(с, е, р, ё, ж), слово(с, е, р, е, ж),
+            "s" + "erge", "s" + "eryo", "s" + "erezh", "s" + "erega", "s" + "eriozh"])), re.I)
+        нашлось, не_прочитано = [], []
         for f in файлы:
+            путь = os.path.join(корень, f)
             try:
-                текст = open(os.path.join(корень, f), encoding="utf-8").read()
-            except (OSError, UnicodeDecodeError):
+                with open(путь, "rb") as fh:
+                    сырьё = fh.read()
+            except OSError:
+                не_прочитано.append(f)
                 continue
-            if формы.search(текст):
+            if b"\0" in сырьё[:8192]:
+                continue                       # двоичный: картинки, jar
+            if формы.search(сырьё.decode("utf-8", "replace")):
                 нашлось.append(f)
         self.assertEqual(нашлось, [])
+        self.assertEqual(не_прочитано, [], "отслеживаемый файл не читается — проверка неполна")
 
 
 if __name__ == "__main__":
