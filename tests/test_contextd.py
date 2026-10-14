@@ -1310,10 +1310,15 @@ class ТестМетрикиСтадий(unittest.TestCase):
         jid = mi.add_job(self.con, eid, "asr")
         первый = mi.claim_job(self.con)
         mi.claim_job(self.con, now=int(time.time()) + mi.LEASE_SEC + 1)
-        contextd.закрыть_работу(self.con, первый, True, "")
+        # и строку `jobs` не трогает: работу держит второй (Т7.6)
+        self.assertFalse(contextd.закрыть_работу(self.con, первый, True, ""))
         self.assertEqual([tuple(r) for r in self.con.execute(
             "select attempt, outcome from job_attempts where job_id=? "
             "order by attempt", (jid,))], [(1, "lease_expired"), (2, None)])
+        self.assertEqual(tuple(self.con.execute(
+            "select state, attempts from jobs where id=?", (jid,)).fetchone()), ("ready", 0))
+        self.assertEqual([tuple(r) for r in self.con.execute(
+            "select kind from jobs where event_id=?", (eid,))], [("asr",)], "extract не заведён")
 
     def test_правка_по_настоящему_пути_ложится_с_исходом(self):
         """Исход пишет `apply_correction` в `audit_events` — проверяем на

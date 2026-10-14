@@ -1692,6 +1692,26 @@ def _убить(p):
         p.wait()
 
 
+_шаг = None                     # идущий процесс шага: его гасит `serve` при остановке
+
+
+def погасить_шаг():
+    """Остановка демона руками (Ctrl-C): шаг живёт в своей сессии
+    (`start_new_session`), сигнал терминала до него не доходит, а поток
+    воркера — `daemon` и свой `except` не выполнит. Без этого шаг дописывал
+    бы сиротой, пока новый демон берёт ту же работу. Под systemd группу
+    гасит `KillMode=control-group`, здесь — ручной запуск. Только сигнал
+    группе: трубы читает поток воркера, второй `communicate` из этого
+    потока с ним бы столкнулся."""
+    import signal
+    p = _шаг
+    if p is not None and p.poll() is None:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _запустить(argv, продлить=None):
     """Процесс шага: `(код, stderr)`; таймаут — `(None, "")`, потерянная
     аренда — `(АРЕНДА_ПОТЕРЯНА, "")`.
@@ -1706,8 +1726,10 @@ def _запустить(argv, продлить=None):
     теряет. Любое исключение здесь убивает шаг, а не бросает его сиротой."""
     период = max(1, mi.LEASE_SEC // 3)
     начало = time.monotonic()
+    global _шаг
     p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          start_new_session=True)
+    _шаг = p
     try:
         while True:
             осталось = ШАГ_ТАЙМАУТ - (time.monotonic() - начало)
@@ -1734,6 +1756,8 @@ def _запустить(argv, продлить=None):
     except BaseException:
         _убить(p)
         raise
+    finally:
+        _шаг = None
 
 
 def run_step(kind, event_id, продлить=None):
@@ -1866,7 +1890,7 @@ def такт(con, отмечено=None):
     if not job:
         return None
     ok, err = run_step(job["kind"], job["event_id"],
-                       lambda: mi.продлить_аренду(con, job["id"]))
+                       lambda: mi.продлить_аренду(con, job["id"], job["attempt"]))
     if ok is None:
         # аренду забрал другой (ADR-0010 решение 7): итог шага — не наш
         print("%s работа %s %s — %s" % (mi.now_iso(), job["kind"], job["event_id"], err),
@@ -1876,7 +1900,10 @@ def такт(con, отмечено=None):
         # коробка могла лечь посреди шага: следующая проба — сразу, а не по
         # кэшу «жив», иначе ретрай через минуту сжёг бы ещё одну попытку
         _пробы.pop(адрес_шага(ТЯЖЁЛЫЕ[job["kind"]][1]), None)
-    закрыть_работу(con, job, ok, err)
+    if not закрыть_работу(con, job, ok, err):
+        print("%s работа %s %s — аренда ушла другому, итог не записан"
+              % (mi.now_iso(), job["kind"], job["event_id"]), flush=True)
+        return job
     print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
                                   "ок" if ok else "сбой"), flush=True)
     return job
@@ -1915,11 +1942,19 @@ def закрыть_работу(con, job, ok, err):
     на диске — его пишет подпроцесс до своего нулевого кода. Смерть воркера
     между `finish_job` и `add_job` оставляла `done` без продолжения, и
     цепочку доводила сверка (`транскрипт_без_извлечения`).
+
+    Итог пишется, только пока попытка своя (`mi.попытка_открыта`, в той же
+    транзакции): шаг мог кончиться сам уже после того, как работу взял
+    другой, — тогда `jobs` его итогом не трогается. Возвращает, записан ли.
     """
     with транзакция(con):
+        if job.get("attempt") is not None and not mi.попытка_открыта(
+                con, job["id"], job["attempt"]):
+            return False
         mi.finish_job(con, job["id"], ok, err, job.get("attempt"))
         if ok and job["kind"] in NEXT:
             mi.add_job(con, job["event_id"], NEXT[job["kind"]])
+    return True
 
 
 def serve(root, port, host="127.0.0.1"):
@@ -1933,6 +1968,7 @@ def serve(root, port, host="127.0.0.1"):
         srv.serve_forever()
     except KeyboardInterrupt:
         stop.set()
+        погасить_шаг()
     return 0
 
 

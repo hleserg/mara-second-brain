@@ -961,14 +961,32 @@ def claim_job(con, kinds=None, now=None):
     return job
 
 
-def продлить_аренду(con, job_id, now=None):
+def попытка_открыта(con, job_id, попытка):
+    """Попытка `попытка` работы ещё идёт: не закрыта итогом и не отнята
+    захватом другого (`_начать_попытку` закрывает прежнюю `lease_expired`).
+    Это и есть «аренда моя»: срок аренды — когда её можно отнять, а не чья
+    она сейчас."""
+    return con.execute("select 1 from job_attempts where job_id=? and attempt=? "
+                       "and finished is null and outcome is null",
+                       (job_id, попытка)).fetchone() is not None
+
+
+def продлить_аренду(con, job_id, попытка, now=None):
     """Ещё `LEASE_SEC` аренды работе, которую воркер держит и считает
-    (ADR-0010 решение 7). Только живую: истёкшая аренда могла уйти другому
-    воркеру, и продлевать её — отнять. Возвращает, продлена ли. `updated`
-    не трогается: продление — не событие работы, а её дыхание."""
+    (ADR-0010 решение 7). Только своей: попытка `попытка` (номер из
+    `claim_job`) ещё открыта. Срок тут не судья: истёкшую аренду мог взять
+    другой — тогда его захват закрыл нашу попытку, и продление отвечает «не
+    твоя»; а истёкшая и никем не взятая (две отметки подряд упёрлись в
+    занятую базу, часы скакнули) — по-прежнему наша, и убить почти готовый
+    часовой шаг дороже, чем продлить её. Проверка и запись — одним
+    оператором: захват между ними не вклинится. Возвращает, продлена ли.
+    `updated` не трогается: продление — не событие работы, а её дыхание."""
     now = int(time.time()) if now is None else int(now)
-    return con.execute("update jobs set lease_until=? where id=? and state='ready' "
-                       "and lease_until>=?", (now + LEASE_SEC, job_id, now)).rowcount == 1
+    return con.execute(
+        "update jobs set lease_until=? where id=? and state='ready' and exists("
+        "select 1 from job_attempts where job_id=jobs.id and attempt=? "
+        "and finished is null and outcome is null)",
+        (now + LEASE_SEC, job_id, попытка)).rowcount == 1
 
 
 def next_delay(attempts):
