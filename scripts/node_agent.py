@@ -13,6 +13,7 @@
   в `ready` с причиной `node_no_capability:<узел>`, не тратя попыток;
 - `models` — модели Ollama (`/api/tags`);
 - `vram_free_mb`, `vram_total_mb` — `nvidia-smi`, если он есть;
+- `load` — загрузка GPU в процентах (`utilization.gpu` того же `nvidia-smi`);
 - `minecraft_active` — запущен ли процесс игры (застава GTR, решение 4);
 - `accept_jobs` — `MARA_NODE_ACCEPT=0` ставит узел на паузу руками;
 - `interval_s` — свой интервал: doctor считает узел живым три интервала.
@@ -78,18 +79,26 @@ def модели(адрес):
                    and 0 < len(m["name"]) <= 80 and m["name"].isprintable()})[:32]
 
 
-def видеопамять(запуск=subprocess.run):
-    """(свободно, всего) в МБ по первой карте или (None, None)."""
-    if not shutil.which("nvidia-smi"):
-        return None, None
+def видеокарта(запуск=subprocess.run, есть=shutil.which):
+    """(свободно, всего, загрузка) по первой карте: память в МБ, загрузка
+    GPU в процентах; чего не узнать — None. Загрузку иные карты отдают как
+    `[N/A]` — тогда без неё, память остаётся (ревью Т9.1: без `load`
+    `mara_node_load` на doctor был бы −1 всегда)."""
+    if not есть("nvidia-smi"):
+        return None, None, None
     try:
-        r = запуск(["nvidia-smi", "--query-gpu=memory.free,memory.total",
+        r = запуск(["nvidia-smi", "--query-gpu=memory.free,memory.total,utilization.gpu",
                     "--format=csv,noheader,nounits"],
                    capture_output=True, text=True, timeout=10)
-        свободно, всего = [int(x) for x in r.stdout.splitlines()[0].split(",")]
-        return свободно, всего
+        поля = [x.strip() for x in r.stdout.splitlines()[0].split(",")]
+        свободно, всего = int(поля[0]), int(поля[1])
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        return None, None
+        return None, None, None
+    try:
+        загрузка = int(поля[2])
+    except (ValueError, IndexError):
+        загрузка = None
+    return свободно, всего, загрузка
 
 
 def процессы(запуск=subprocess.run, windows=None):
@@ -137,9 +146,11 @@ def собрать(env=None, имена=None):
         if ок:
             cap.append("llm")
             out["models"] = модели(env["MARA_NODE_LLM_URL"])
-    свободно, всего = видеопамять()
+    свободно, всего, загрузка = видеокарта()
     if свободно is not None:
         out["vram_free_mb"], out["vram_total_mb"] = свободно, всего
+    if загрузка is not None:
+        out["load"] = загрузка
     out.update(capabilities=cap, checked=проверено, minecraft_active=игра_идёт(имена),
                accept_jobs=env.get("MARA_NODE_ACCEPT", "1") != "0",
                interval_s=интервал(env),
@@ -224,6 +235,14 @@ def self_check():
     assert т["capabilities"] == [] and т["checked"] == [] and т["accept_jobs"] is False
     assert т["minecraft_active"] is False and т["interval_s"] == ИНТЕРВАЛ
     assert отвечает(None) == (False, b"")
+
+    class Ответ:
+        def __init__(self, stdout):
+            self.stdout = stdout
+    assert видеокарта(lambda *a, **k: Ответ("1200, 16303, 37\n"), lambda x: x) == (1200, 16303, 37)
+    assert видеокарта(lambda *a, **k: Ответ("1200, 16303, [N/A]\n"), lambda x: x) == (1200, 16303, None)
+    assert видеокарта(lambda *a, **k: Ответ(""), lambda x: x) == (None, None, None)
+    assert видеокарта(есть=lambda x: None) == (None, None, None)
     print("node_agent self-check: ок")
     return 0
 

@@ -15,7 +15,7 @@
     python3 scripts/contextd_reconcile.py --telegram
     python3 scripts/contextd_reconcile.py --self-check
 """
-import os, sys, json, glob, time, sqlite3, argparse, http.client, tempfile
+import os, sys, json, glob, math, time, sqlite3, argparse, http.client, tempfile
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1501,6 +1501,43 @@ def бэкап_ядра(targets=None, days=БЭКАП_СУТКИ, root=None):
     return out
 
 
+def _момент(v):
+    """Секунды эпохи из отметки — конечное число, иначе None: `NaN` и
+    `Infinity` json пропускает, а время из них не вычесть."""
+    return v if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                 and math.isfinite(v)) else None
+
+
+def учение_бэкапа(days=БЭКАП_СУТКИ):
+    """Ночное учение не проходит, а архивы ложатся (ревью Т9.1, P2-2).
+    Учение `core-backup.py` разворачивает свежий архив во временный каталог
+    и сверяет его; удалось — отметка `mi.ОТМЕТКА_УЧЕНИЯ`. Падает оно уже
+    после того, как архив лёг на носители и отметка носителей обновлена, —
+    поэтому `бэкап-ядра-устарел` и `-отвалился` молчат, а копия, которую ни
+    разу не развернули, копией не доказана (§17.3 п.4).
+
+    Судит только, пока бэкап сам пишет: носитель принимал архив за `days`.
+    Не пишет — об этом `бэкап_ядра`. Отметка старше `days` — `error`;
+    отметки нет вовсе — `warn`: учение не прошло ни разу (или выкат был
+    после вчерашней ночи — тогда находка уйдёт сама)."""
+    писали = [в for в in map(_момент, _отмечено(mi.ОТМЕТКА_НОСИТЕЛЕЙ).values())
+              if в is not None]
+    if not писали or time.time() - max(писали) > days * 86400:
+        return []
+    когда = _момент(_отмечено(mi.ОТМЕТКА_УЧЕНИЯ).get("at"))
+    if когда is None:
+        return [находка("учение-не-проходит", "warn",
+                        "архивы ядра ложатся, а удачного учения не отмечено ни "
+                        "разу — смотреть core-backup.log (учение после записи)")]
+    простой = (time.time() - когда) / 86400.0
+    if простой > days:
+        return [находка("учение-не-проходит", "error",
+                        "архивы ядра ложатся, а учение не проходит %.1f сут. — "
+                        "копия не доказана разворачиванием, смотреть "
+                        "core-backup.log" % простой, days=round(простой, 1))]
+    return []
+
+
 def снимок_реестра_устарел(root=None, hours=None):
     """Частый локальный снимок реестра встал (Т3б.5, §5.3). Пишет его
     `core-backup.py --snapshot` раз в час в `mi.снимки(root)`; как и у
@@ -1597,6 +1634,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += _застава("телефон", телефон_молчит, con)
     out += _застава("захват", захват_телефона, con)
     out += _застава("бэкап", бэкап_ядра, targets, root=root)
+    out += _застава("учение", учение_бэкапа)
     out += _застава("снимок", снимок_реестра_устарел, root)
     return out
 
