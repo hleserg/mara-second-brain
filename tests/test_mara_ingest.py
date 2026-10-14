@@ -844,6 +844,26 @@ class Сущности(unittest.TestCase):
         con.close()
         mi.migrate(self.dir).close()
 
+    def test_миграция_9_отмена_и_путь_вниз(self):
+        """Т7.6, ADR-0010 решение 8: `jobs.cancel_requested`. Отменённую
+        работу `claim_job` не берёт; откат 9 → 8 безусловный."""
+        self.база_v1()
+        con = mi.migrate(self.dir)
+        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
+                                    "source_id": "c9", "payload": {}})
+        jid = mi.add_job(con, eid, "asr")
+        self.assertEqual(mi.отменить(con, jid), "отменена")
+        self.assertIsNone(mi.claim_job(con))
+        con.close()
+        con = mi.migrate(self.dir, 8)
+        self.assertNotIn("cancel_requested",
+                         {r[1] for r in con.execute("pragma table_info(jobs)")})
+        self.assertEqual(con.execute("select state from jobs where id=?", (jid,)).fetchone()[0],
+                         "cancelled", "строка осталась, старый код её не возьмёт")
+        self.assertEqual(self.версия(), 8)
+        con.close()
+        mi.migrate(self.dir).close()
+
     def test_состояние_сообщения_по_времени_а_не_по_строке(self):
         """Правка позже оригинала по времени, но раньше по строке: оригинал
         со сдвигом +14, правка в UTC. Порядок по строке `occurred` отдал бы

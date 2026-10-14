@@ -642,14 +642,28 @@ def _откат_8(con):
     con.execute("alter table jobs drop column queued_reason")
 
 
+# Миграция 9 (Т7.6, ADR-0010 решение 8): `jobs.cancel_requested` — когда
+# попросили отменить работу (`отменить`). Отмена доходит до воркера: шаг,
+# который уже идёт, он убивает при следующей отметке аренды, а итог не
+# пишет; отменённая работа — `state = 'cancelled'`. Откат — без условий:
+# старый код состояния `cancelled` не берёт (`claim_job` ищет `ready`), а
+# незавершённая просьба с колонкой и уходит — шаг доиграет, как раньше.
+def _миграция_9(con):
+    con.execute("alter table jobs add column cancel_requested text")
+
+
+def _откат_9(con):
+    con.execute("alter table jobs drop column cancel_requested")
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
 МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3, _миграция_4, _миграция_5,
-            _миграция_6, _миграция_7, _миграция_8)
+            _миграция_6, _миграция_7, _миграция_8, _миграция_9)
 # Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
 # ниже него только пустая база.
 ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5, _откат_6, _откат_7,
-          _откат_8)
+          _откат_8, _откат_9)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 
@@ -931,7 +945,9 @@ def claim_job(con, kinds=None, now=None, первыми=()):
     `первыми` — виды, которые берутся раньше остальных готовых, сколько бы
     те ни ждали (напоминание устаревает за час, расшифровка — нет)."""
     now = int(time.time()) if now is None else int(now)
-    q = "select * from jobs where state='ready' and next_at<=? and lease_until<? "
+    # отменённую не берём, даже если аренда истекла: её доводит `доотменить`
+    q = ("select * from jobs where state='ready' and next_at<=? and lease_until<? "
+         "and cancel_requested is null ")
     args = [now, now]
     if kinds:
         q += "and kind in (%s) " % ",".join("?" * len(kinds))
@@ -958,7 +974,8 @@ def claim_job(con, kinds=None, now=None, первыми=()):
     # `LEASE_SEC`, а брошенную потом нечем было и назвать).
     with транзакция(con):
         if con.execute("update jobs set lease_until=?, updated=?, queued_reason=null "
-                       "where id=? and lease_until<? and state='ready'",
+                       "where id=? and lease_until<? and state='ready' "
+                       "and cancel_requested is null",
                        (now + LEASE_SEC, now_iso(), row["id"], now)).rowcount != 1:
             return None
         номер = _начать_попытку(con, row["id"])
@@ -966,6 +983,63 @@ def claim_job(con, kinds=None, now=None, первыми=()):
     job["lease_until"] = now + LEASE_SEC
     job["attempt"] = номер
     return job
+
+
+def отменить(con, job_id, now=None):
+    """Попросить отменить работу (Т7.6, ADR-0010 решение 8). Исход:
+
+    - `отменена` — работа не шла: закрыта сразу, следующий шаг не ставится;
+    - `запрошена` — шаг идёт: воркер убьёт его при следующей отметке аренды
+      (`contextd._запустить`, раз в `LEASE_SEC / 3`), итог не запишет;
+    - `done`, `dlq`, `cancelled` — состояние, в котором отменять нечего;
+    - None — такой работы нет.
+
+    Проверка и запись — одной транзакцией: воркер не возьмёт работу между
+    ними."""
+    now = int(time.time()) if now is None else int(now)
+    with транзакция(con):
+        row = con.execute("select state, lease_until from jobs where id=?",
+                          (job_id,)).fetchone()
+        if not row:
+            return None
+        if row["state"] != "ready":
+            return row["state"]
+        когда = now_iso()
+        if row["lease_until"] >= now:
+            con.execute("update jobs set cancel_requested=coalesce(cancel_requested, ?), "
+                        "updated=? where id=?", (когда, когда, job_id))
+            return "запрошена"
+        con.execute("update jobs set state='cancelled', lease_until=0, queued_reason=null, "
+                    "cancel_requested=coalesce(cancel_requested, ?), updated=? where id=?",
+                    (когда, когда, job_id))
+        return "отменена"
+
+
+def отмена_запрошена(con, job_id):
+    r = con.execute("select cancel_requested from jobs where id=?", (job_id,)).fetchone()
+    return bool(r and r[0])
+
+
+def закрыть_отменённую(con, job_id, попытка=None):
+    """Отменённая работа: `cancelled`, открытая попытка — исход `cancelled`,
+    следующий шаг не ставится, лестница ретраев не трогается."""
+    with транзакция(con):
+        con.execute("update jobs set state='cancelled', lease_until=0, queued_reason=null, "
+                    "updated=? where id=? and state='ready'", (now_iso(), job_id))
+        _закрыть_попытку(con, job_id, "cancelled", попытка)
+
+
+def доотменить(con, now=None):
+    """Отмену просили у шедшей работы, а воркер умер, не дойдя до отметки
+    аренды: аренда истекла — работа закрывается `cancelled`, а не уходит в
+    очередь заново (`claim_job` её и не возьмёт). Возвращает число."""
+    now = int(time.time()) if now is None else int(now)
+    ids = [r[0] for r in con.execute(
+        "select id from jobs where state='ready' and cancel_requested is not null "
+        "and lease_until < ?", (now,)).fetchall()]
+    for jid in ids:
+        закрыть_отменённую(con, jid)
+    return len(ids)
 
 
 def попытка_открыта(con, job_id, попытка):
@@ -1028,7 +1102,7 @@ def _начать_попытку(con, job_id):
 
 
 def _закрыть_попытку(con, job_id, исход, попытка=None):
-    """Попытка `попытка` работы — `ok`, `retry` или `dlq`, если она ещё
+    """Попытка `попытка` работы — `ok`, `retry`, `dlq` или `cancelled`, если она ещё
     открыта. Её уже закрыли брошенной (аренда истекла, работу выдали снова)
     — доигравший опоздал, и чужую попытку, открытую после него, он не
     трогает: иначе её длительность считалась бы от чужого старта. Номера нет
