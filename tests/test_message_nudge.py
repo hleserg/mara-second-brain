@@ -196,8 +196,9 @@ class Шаг(_База):
 
     def test_исключение_транспорта_ретрай_и_не_копится(self):
         """Транспорт бросил — строка `pending`, шаг — ретрай. Пришёл ретрай
-        уже устаревшим — строка гаснет, а не ждёт будущего `--outbox`; были
-        сбои — шаг падает, чтобы постоянная беда дошла до DLQ."""
+        уже устаревшим — строка гаснет, а не ждёт будущего `--outbox`; сбоев
+        два и больше — шаг падает, чтобы постоянная беда дошла до DLQ; один
+        сбой у опоздавшего сообщения — не беда."""
         карточка(self.vault, "a", "прислать смету", "Анна Петрова")
         eid, jid = self.завести(сообщение())
 
@@ -207,13 +208,31 @@ class Шаг(_База):
         with self.assertRaises(OSError):
             self.шаг(eid)
         self.assertEqual(self.строки(eid), [("pending", "OSError: сеть")])
-        self.con.execute("update jobs set attempts=1 where id=?", (jid,))
+        self.con.execute("update jobs set attempts=2 where id=?", (jid,))
         поздно = time.time() + mn.СВЕЖЕСТЬ_С + 120
         with self.assertRaises(RuntimeError):
             self.шаг(eid, now=поздно)
         self.assertEqual(self.строки(eid), [("skipped", "устарело")])
-        self.con.execute("update jobs set attempts=0 where id=?", (jid,))
+        self.con.execute("update jobs set attempts=1 where id=?", (jid,))
         self.assertIsNone(self.шаг(eid, now=поздно))
+
+    def test_ждущая_строка_гаснет_на_любом_выходе(self):
+        """Транспорт бросил, а к ретраю карточку закрыли — строка не висит
+        `pending`."""
+        карточка(self.vault, "a", "прислать смету", "Анна Петрова")
+        eid, _ = self.завести(сообщение())
+
+        def бросить(текст, token, chat):
+            raise OSError("сеть")
+        cd.deliver = бросить
+        with self.assertRaises(OSError):
+            self.шаг(eid)
+        карточка(self.vault, "a", "прислать смету", "Анна Петрова", status="done")
+        self.assertIsNone(self.шаг(eid))
+        self.assertEqual(self.строки(eid), [("skipped", "открытого нет")])
+
+    def test_служебное_не_повод(self):
+        self.assertIsNone(self.завести(сообщение(text="", media=[]))[1])
 
     def test_брошенная_посреди_отправки_не_повторяется(self):
         """Не больше одного раза: `sending` от убитого шага могло уйти."""

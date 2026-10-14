@@ -14,6 +14,7 @@
 - группа: «пишет Анна» в общем чате — не разговор с ней (`отправитель`);
 - импорт истории (`via: export`), правки и надгробия — это не «пришло
   сейчас»; удалённое до шага сообщение тоже не напоминает;
+- служебное без текста и вложений («X теперь в Telegram»);
 - старое (`occurred` старше часа): догон TDLib после простоя отдаёт сотни
   сообщений, и напоминание про вчерашнее — не напоминание. Этот же порог
   гасит ретраи шага: через час после сообщения напоминать поздно.
@@ -31,7 +32,7 @@ SMS — номер, у мессенджеров — подпись как её �
 Напоминание, доехавшее после починки токена через день, хуже, чем никакое.
 Своей находки у недоставленного напоминания нет: причина — в `outbox.error`,
 а что транспорта нет, сверка скажет по недоставленным дайджестам звонков.
-Доставка — не больше одного раза (`run`).
+Брошенная посреди отправки строка не повторяется (`run`).
 
     python3 scripts/message_nudge.py --event msg_<uuid>
     python3 scripts/message_nudge.py --self-check
@@ -62,6 +63,11 @@ def _когда(s):
 ЛИЧНЫЕ = ("private", "secret")     # `chat_type` личного чата (TDLib, телефон)
 
 
+def _похож_на_номер(s):
+    return bool(s) and sum(c.isdigit() for c in s) >= 7 and all(
+        c.isdigit() or c in "+-() " for c in s.strip())
+
+
 def отправитель(source, payload):
     """`(подпись, имена, ключ)` отправителя или None.
 
@@ -77,6 +83,10 @@ def отправитель(source, payload):
     if source == "sms":
         имя = p.get("contact_name") if isinstance(p.get("contact_name"), str) else ""
         номер = p.get("number") if isinstance(p.get("number"), str) else ""
+        if not номер and _похож_на_номер(имя):
+            # SMS из уведомления (без READ_SMS): номера нет, а заголовок
+            # беседы у незнакомого отправителя — сам номер
+            имя, номер = "", имя
         цифры = "".join(c for c in номер if c.isdigit())[-10:]
         if not (имя.strip() or цифры):
             return None
@@ -102,6 +112,10 @@ def повод(source, payload, occurred, now=None):
     if p.get("via") == "export" or p.get("revision_of") or p.get("tombstone_of"):
         return False
     if отправитель(source, p) is None:
+        return False
+    if not (str(p.get("text") or "").strip() or p.get("media")):
+        # служебное («X теперь в Telegram», `messageContactRegistered`):
+        # входящее в личный чат, но человек ничего не писал
         return False
     t = _когда(occurred)
     now = time.time() if now is None else now
@@ -179,12 +193,16 @@ def run(event_id, root=None, env_file=None, vault=None, now=None):
     нечего.
 
     Исключение — когда телеграм отказал (`failed`) или транспорт бросил:
-    ретрай имеет смысл, пока сообщение свежее. Устарело после сбоев — тоже
-    исключение, а не тихий нуль: иначе постоянная поломка шага не дошла бы
-    до DLQ и находки `dlq` в сверке.
+    ретрай имеет смысл, пока сообщение свежее. Устарело после двух и более
+    сбоев — тоже исключение, а не тихий нуль: постоянная поломка шага за
+    час успевает упасть трижды и должна дойти до DLQ и находки `dlq`; один
+    сбой у сообщения, пришедшего с опозданием, — не поломка, и DLQ из-за
+    него была бы ложной тревогой.
 
-    Доставка — не больше одного раза: строка, брошенная посреди отправки
-    (`sending`, демон убит), могла и уйти — повтор её не шлёт, а закрывает."""
+    Строка, брошенная посреди отправки (`sending`, демон убит), могла и
+    уйти — повтор её не шлёт, а закрывает. Исключение транспорта после
+    того, как телеграм принял сообщение (обрыв на чтении ответа), — ретрай
+    и возможный дубль, как у дайджеста."""
     import call_digest as cd
     root = root or mi.ROOT
     vault = vault or os.environ.get("VAULT", "/srv/vault")
@@ -195,12 +213,13 @@ def run(event_id, root=None, env_file=None, vault=None, now=None):
         _погасить(con, event_id, "устарело")
         сбои = con.execute("select max(attempts) from jobs where event_id=? and kind=? "
                            "and state='ready'", (event_id, ШАГ)).fetchone()[0]
-        if сбои:
+        if сбои and сбои >= 2:
             raise RuntimeError("напоминание устарело после сбоев шага: %d" % сбои)
         print("message_nudge: %s — не повод (не входящее или старше %d мин)"
               % (event_id, СВЕЖЕСТЬ_С // 60))
         return None
     if mi.message_state(con, ev["source"], ev["source_id"]) is None:
+        _погасить(con, event_id, "удалено")
         print("message_nudge: %s — сообщение удалено" % event_id)
         return None
     было = con.execute("select id, state from outbox where kind=? and object_id=? and "
@@ -216,6 +235,7 @@ def run(event_id, root=None, env_file=None, vault=None, now=None):
     подпись, имена, _ = отправитель(ev.get("source"), p)
     пункты = обещано(vault, имена)
     if not пункты:
+        _погасить(con, event_id, "открытого нет")
         print("message_nudge: %s — открытого нет" % event_id)
         return None
     with mi.транзакция(con):
@@ -247,11 +267,16 @@ def self_check():
     for лишнее in ({"outgoing": True}, {"via": "export"}, {"revision_of": "7/2"},
                    {"chat_type": "group"}, {"chat_type": None}, {"sender_name": "  "}):
         assert not повод("telegram", dict(p, **лишнее), т, now), лишнее
-    смс = {"number": "+7 999 000-00-01", "contact_name": "Анна", "direction": "incoming"}
+    смс = {"number": "+7 999 000-00-01", "contact_name": "Анна", "direction": "incoming",
+           "text": "привет"}
     assert отправитель("sms", смс) == ("Анна", ["Анна", "+7 999 000-00-01"],
                                       "tel:9990000001")
     assert отправитель("sms", {"number": "89990000001"})[0] == "номер …0001"
     assert повод("sms", смс, т, now)
+    assert отправитель("sms", {"contact_name": "+7 999 000-00-01"}) == (
+        "номер …0001", ["+7 999 000-00-01"], "tel:9990000001")
+    assert not повод("telegram", dict(p, text="", media=[]), т, now), "служебное"
+    assert повод("telegram", dict(p, text="", media=[{"type": "photo"}]), т, now)
     assert not повод("sms", dict(смс, direction="outgoing"), т, now)
     t = текст("Анна", [{"title": "прислать смету", "due": "2026-09-04",
                         "promised_to": "Анна", "id": None}] * 7)
