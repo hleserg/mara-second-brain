@@ -789,6 +789,9 @@ def dlq(con):
 # Окно брошенных попыток — двое суток: сводка уходит раз в сутки, и
 # суточное окно пропускало бы брошенное незадолго до неё
 БРОШЕНО_Ч = 48
+# Узел, который молчит дольше суток при ждущих его работах (ADR-0010
+# решение 3): выключенная на ночь коробка — не тревога, на выходные — да
+УЗЕЛ_Ч = _порог("MARA_NODE_SILENT_HOURS", 24)
 ДЕМОН = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
 
 
@@ -800,9 +803,14 @@ def очередь_стоит(con, hours=None, сейчас=None):
     hours = ОЧЕРЕДЬ_Ч if hours is None else hours
     сейчас = int(time.time()) if сейчас is None else int(сейчас)
     граница = сейчас - int(hours * 3600)
+    # ждущие молчащий узел — не «никто не берёт»: воркер их не берёт
+    # нарочно, о них говорит `узел_молчит`. Но только пока воркер жив: у
+    # вставшего причина осталась от прошлого, и прятать её работы нельзя
+    ждут = ("and (queued_reason is null or queued_reason not like 'node_offline:%') "
+            if воркер_жив(con, сейчас) else "")
     rows = con.execute("select kind, count(*) as n, min(next_at) as t from jobs "
                        "where state='ready' and next_at < ? and lease_until < ? "
-                       "group by kind order by kind", (граница, сейчас)).fetchall()
+                       + ждут + "group by kind order by kind", (граница, сейчас)).fetchall()
     if not rows:
         return []
     # воркер жив, если начинал попытки за то же окно — значит, очередь просто
@@ -820,6 +828,61 @@ def очередь_стоит(con, hours=None, сейчас=None):
                                         % (r["kind"], r["n"], (сейчас - r["t"]) // 3600)
                                         for r in rows)),
                     count=sum(r["n"] for r in rows))]
+
+
+# Воркер отмечает себя в `compute_nodes` (`contextd.ВОРКЕР`) раз в минуту;
+# десять минут тишины — он встал или демон лежит
+ВОРКЕР_ТИШИНА_С = 600
+
+
+def воркер_жив(con, сейчас=None):
+    """Сердцебиение воркера свежее `ВОРКЕР_ТИШИНА_С`. Строки нет (код до
+    Т7.3 или воркер ни разу не прошёл оборот) — не жив: причины ожидания
+    тогда не доказаны свежими."""
+    сейчас = int(time.time()) if сейчас is None else int(сейчас)
+    r = con.execute("select cast(strftime('%s', last_seen) as integer) from compute_nodes "
+                    "where id='doctor'").fetchone()
+    return bool(r and r[0] is not None and сейчас - r[0] <= ВОРКЕР_ТИШИНА_С)
+
+
+def узел_молчит(con, hours=None, сейчас=None):
+    """Готовые работы ждут узел (`queued_reason = node_offline:<узел>`,
+    ADR-0010 решение 3), а он молчит дольше порога. Сколько молчит — по
+    `compute_nodes.last_seen` (его пишет проба воркера, когда узел ответил);
+    ни разу не отвечал — по самой старой ждущей работе. В DLQ такие работы
+    не уходят: включится коробка — возьмутся сами."""
+    hours = УЗЕЛ_Ч if hours is None else hours
+    сейчас = int(time.time()) if сейчас is None else int(сейчас)
+    if not воркер_жив(con, сейчас):
+        return []                       # причины не свежие — это `очередь-стоит`
+    out = []
+    for узел, n, kinds, старейшая in con.execute(
+            "select substr(queued_reason, length('node_offline:') + 1) as узел, "
+            "count(*), group_concat(distinct kind), "
+            "min(cast(strftime('%s', created) as integer)) from jobs "
+            "where state='ready' and queued_reason like 'node_offline:%' "
+            "group by узел order by узел").fetchall():
+        видел = con.execute("select cast(strftime('%s', last_seen) as integer) "
+                            "from compute_nodes where id=?", (узел,)).fetchone()
+        # молчание — с последнего ответа, но не раньше самой старой ждущей
+        # работы: узел, забытый неделю назад и включённый час назад, не
+        # тревога (ADR-0010 решение 3 мерит ожидание работы)
+        видел = видел[0] if видел and видел[0] is not None else None
+        с = max(видел, старейшая) if видел is not None and старейшая is not None \
+            else (видел if видел is not None else старейшая)
+        if с is None or сейчас - с <= hours * 3600:
+            continue
+        шаги = ", ".join(sorted((kinds or "").split(",")))
+        когда = ("не отвечает по шагам %s %d ч" % (шаги, (сейчас - с) // 3600)
+                 if видел is not None
+                 else "ни разу не отвечал по шагам %s, работы ждут %d ч"
+                 % (шаги, (сейчас - с) // 3600))
+        out.append(находка(
+            "узел-молчит", "warn",
+            "узел %s %s; ждут работ: %d — включить коробку или проверить "
+            "сервис; в DLQ они не уйдут и возьмутся сами, когда узел ответит"
+            % (узел, когда, n), count=n, node=узел))
+    return out
 
 
 def шаги_брошены(con, hours=БРОШЕНО_Ч):
@@ -1209,6 +1272,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += _застава("догрузка", дайджест_догрузка, con)
     out += _застава("dlq", dlq, con)
     out += _застава("очередь", очередь_стоит, con)
+    out += _застава("узел", узел_молчит, con)
     out += _застава("попытки", шаги_брошены, con)
     out += _застава("телефон", телефон_молчит, con)
     out += _застава("бэкап", бэкап_ядра, targets, root=root)
