@@ -11,7 +11,7 @@ EVENT = {"id": "call_1", "occurred": "2026-09-02T14:05:00+03:00",
 
 SPAN = [{"start_ms": 252000, "end_ms": 260000}]
 EXTR = {"requests": [{"action": "прислать смету", "requester": "Анна",
-                      "owner": "sergey", "explicit": True, "confidence": 0.93,
+                      "owner": "owner", "explicit": True, "confidence": 0.93,
                       "due_at": "2026-09-04", "deadline_explicit": True,
                       "deadline_phrase": "до пятницы", "disposition": "task",
                       "evidence": SPAN}],
@@ -51,9 +51,9 @@ class Карточка(unittest.TestCase):
         self.assertIn("Проекты: ", text)
 
     def test_хозяин_не_попадает_в_люди(self):
-        _, text = cp.conversation_card(EVENT, EXTR, {"шеф": "sergey", "анна": "anna"})
+        _, text = cp.conversation_card(EVENT, EXTR, {"шеф": cp.OWNER, "анна": "anna"})
         people = [l for l in text.splitlines() if l.startswith("Люди: ")][0]
-        self.assertNotIn("sergey", people, "себя в собеседники не записываем")
+        self.assertNotIn(cp.OWNER, people, "себя в собеседники не записываем")
         self.assertIn("anna", people)
 
     def test_незнакомое_имя_не_линкуется(self):

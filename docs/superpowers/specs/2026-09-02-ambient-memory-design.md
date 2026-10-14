@@ -45,7 +45,7 @@ ASR и извлечение нельзя гонять параллельно (VR
                              /srv/vault (kb/conversations, kb/commitments)
                                    │
                                    ▼
-                        Telegram Bot API ─► дайджест Серёге
+                        Telegram Bot API ─► дайджест владельцу
 ```
 
 `contextd` слушает **только loopback** doctor (ТЗ §4: не выставлять наружу). Всё, что к
@@ -167,7 +167,7 @@ blobs    (sha256 PRIMARY KEY, path, bytes, mime, created, pin,
 digests  (id, event_id, chat_id, text, items_json, sent_at, state)
 ```
 
-`digests.items_json` нужен для коррекций: когда Серёга отвечает «это тоже задача, срок
+`digests.items_json` нужен для коррекций: когда владелец отвечает «это тоже задача, срок
 пятница», надо знать, о каком пункте последнего дайджеста речь.
 
 Воркер — тред внутри демона, берущий работы по `lease_until` (аренда 10 минут, чтобы
@@ -196,7 +196,7 @@ digests  (id, event_id, chat_id, text, items_json, sent_at, state)
 ```json
 {"id":"call_<uuid>","type":"call","source":"phone","source_id":"...",
  "started_at":"...","ended_at":"...","direction":"incoming|outgoing|unknown",
- "participants":["person:sergey","person:unknown"],
+ "participants":["person:owner","person:unknown"],
  "classification":"personal","sensitive":true,"cloud_allowed":false,
  "recording":{"producer":"huawei-native|external-recorder|unknown",
               "audio_sha256":"...","blob_ref":"local://calls/2026/09/<sha>.m4a",
@@ -364,7 +364,7 @@ valid_from: 2026-09-02T14:23:11+03:00
 запускает полноценный ход модели, то есть дайджест стоил бы одного вызова LLM и мог бы
 быть переписан ею; к тому же он должен доходить, когда Мара занята или лежит.
 
-Дайджест сохраняется в таблицу `digests` вместе с пунктами. Ответ Серёги обычной фразой
+Дайджест сохраняется в таблицу `digests` вместе с пунктами. Ответ владельца обычной фразой
 обрабатывает инструмент Мары `mara_correction` (спека 2): он тянет последний дайджест
 через `/v1/context/bootstrap`, понимает, к какому пункту относится «это», и шлёт
 `kind: correction` обратно в contextd. YAML руками никто не правит (ТЗ §16).
@@ -511,5 +511,5 @@ bigpc, глубина очереди, возраст последнего соб
 
 1. Хранение аудио 90 дней — оставляем дефолт или другой срок?
 2. Дайджест приходит сразу после обработки звонка или собирается в один вечерний?
-3. Голосовой профиль Серёги для различения «я / собеседник» записываем или живём с
+3. Голосовой профиль владельца для различения «я / собеседник» записываем или живём с
    `unknown-A/B` до диаризации?

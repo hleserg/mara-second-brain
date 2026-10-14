@@ -223,6 +223,23 @@ def replay(каталог=КОРПУС, ключ="recorded"):
     return итог(счета), расхождения
 
 
+def _без_имени(raw):
+    """Г7: в промпте живой модели — имя владельца (`MARA_OWNER_NAME`), и
+    модель может повторить его в ответе, а ответ ложится в отслеживаемый
+    корпус. Имя и его падежные формы (основа без последней гласной)
+    заменяются словом «владелец» до счёта: что записано, то и посчитано.
+    Синтетическое золото имени владельца не знает, счёт от замены не
+    меняется."""
+    import vault_common
+    имя = vault_common.имя_владельца()
+    if not имя:
+        return raw
+    основа = имя[:-1] if len(имя) > 3 and имя[-1].lower() in "аяоеёиыьй" else имя
+    текст = re.sub(r"(?<!\w)%s\w*" % re.escape(основа), "владелец",
+                   json.dumps(raw, ensure_ascii=False), flags=re.I)
+    return json.loads(текст)
+
+
 def live(каталог=КОРПУС, записать=False, спросить=None):
     """Каждый случай — модели, счёт по золоту. Случай, на котором модель
     упала или ответила не объектом, — `ошибка` в итоге, остальные идут
@@ -233,7 +250,7 @@ def live(каталог=КОРПУС, записать=False, спросить=N
     счета, ответы, ошибки = [], [], 0
     for путь, с in случаи(каталог):
         try:
-            raw = спросить(ce.transcript_text(с["segments"]))
+            raw = _без_имени(спросить(ce.transcript_text(с["segments"])))
             счёт = оценить(с, raw)
         except Exception as e:
             ошибки += 1
@@ -248,6 +265,7 @@ def live(каталог=КОРПУС, записать=False, спросить=N
         for путь, с, raw, счёт in ответы:
             с["живой"] = {"model": ce.MODEL, "prompt_version": ce.PROMPT_VERSION,
                           "rules_version": ce.RULES_VERSION,
+                          "owner_named": ce.конфигурация()["owner_named"],
                           "date": date.today().isoformat(),
                           "response": raw, "ожидаемо": счёт}
             with open(путь, "w", encoding="utf-8") as fh:

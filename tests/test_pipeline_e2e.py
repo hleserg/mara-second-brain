@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 РАСШИФРОВКА = "Шеф привет пришли смету до пятницы"
 ИЗВЛЕЧЕНИЕ = {
-    "requests": [{"action": "прислать смету", "requester": "Анна", "owner": "sergey",
+    "requests": [{"action": "прислать смету", "requester": "Анна", "owner": "owner",
                   "explicit": True, "confidence": 0.93, "deadline_phrase": "до пятницы",
                   "evidence": [{"segment": "s0001"}]}],
     "commitments": [], "decisions": [], "constraints": [], "open_questions": [],

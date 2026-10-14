@@ -625,8 +625,8 @@ def self_check():
         assert not any(("Тема" in l or "привет" in l) for l in log), "тем и тел в журнале нет"
         # html → текст
         t = html_text("<html><head><title>x</title><style>p{}</style></head><body>"
-                      "<p>Привет,&nbsp;Серёга!</p><script>alert(1)</script><div>до <b>пятницы</b></div></body></html>")
-        assert t == "Привет, Серёга!\nдо пятницы", repr(t)
+                      "<p>Привет,&nbsp;Олег!</p><script>alert(1)</script><div>до <b>пятницы</b></div></body></html>")
+        assert t == "Привет, Олег!\nдо пятницы", repr(t)
         # кодировка из заголовка части
         m = _msg("w"); m["payload"]["parts"][0] = {
             "mimeType": "text/plain", "headers": [{"name": "Content-Type", "value": 'text/plain; charset="windows-1251"'}],

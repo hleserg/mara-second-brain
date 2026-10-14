@@ -15,7 +15,7 @@ import context_pack as cp
 def карточка(vault, name, **fm):
     """Карточка обязательства в волте. Тело всегда есть: его не должно быть в пакете."""
     поля = {"title": "прислать смету", "type": "commitment", "sensitive": "true",
-            "cloud_allowed": "false", "status": "proposed", "owner": "sergey",
+            "cloud_allowed": "false", "status": "proposed", "owner": "owner",
             "promised_to": "Анна", "origin": "call/call_1"}
     поля.update({k: v for k, v in fm.items() if v is not None})
     head = "\n".join("%s: %s" % (k, v) for k, v in поля.items())

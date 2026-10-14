@@ -23,9 +23,23 @@ import context_pack
 import call_extract
 import ledger_import as li
 import vault_manifest
+import vault_common
 from vault_common import canon_map, linkify, locked, scrub, yaml_str
 
-OWNER = os.environ.get("MARA_OWNER", "sergey")
+OWNER = vault_common.владелец()      # канон владельца, вне репозитория (Г7)
+
+
+def застава_владельца(vault):
+    """Писать в боевой волт от имени владельца можно, только если его канон
+    в индексе сущностей есть. Индекс есть, а канона нет (`MARA_OWNER` не
+    задан или задан не тем) — исключение: шаг уходит в ретрай и возьмётся
+    сам, когда канон поправят. Без заставы выкат без `MARA_OWNER` молча
+    метил бы карточки `owner: owner`, а владельца записывал бы собеседником
+    в каждый разговор — и ни одна строка не упала бы. Индекса нет (тесты,
+    клиентский спул) — судить не по чему, пишем."""
+    if vault_common.канон_в_индексе(vault, OWNER) is False:
+        raise RuntimeError("канона владельца нет в индексе сущностей: MARA_OWNER не "
+                           "задан или задан не тем (RUNBOOK §4а), затем рестарт contextd")
 CONV_DIR = "kb/conversations"
 COMM_DIR = "kb/commitments"
 
@@ -552,6 +566,7 @@ def _atomic(path, text):
 
 
 def run(event_id, vault, root=None):
+    застава_владельца(vault)
     root = root or mi.ROOT
     con = mi.connect(root)
     ev = mi.event_row(con, event_id)
@@ -625,7 +640,7 @@ def run(event_id, vault, root=None):
     print("call_project: %s — карточек %d" % (event_id, len(written)))
     return written
 
-# --- правка обязательства словами Серёги (ТЗ §16) ---------------------------
+# --- правка обязательства словами владельца (ТЗ §16) -------------------------
 #
 # «Это тоже задача, срок пятница», «сделал», «отмени» — Мара зовёт инструмент
 # mara_correction, плагин шлёт событие kind=correction, contextd применяет его
@@ -639,7 +654,7 @@ def run(event_id, vault, root=None):
 
 def check_correction(payload):
     """Граница доверия: аргументы придумывает модель. Ошибка — строкой, чтобы
-    Мара переспросила Серёгу, а не оставила 500 в логе."""
+    Мара переспросила владельца, а не оставила 500 в логе."""
     item = str(payload.get("item") or "").strip()
     if not item or len(item) > 200:
         return "нужно название обязательства, до 200 знаков"
@@ -789,7 +804,7 @@ def _норма(s):
 def _похожие(item, cards):
     """Карточки по названию: точное совпадение, потом вхождение, потом общие
     слова. Внутри яруса открытые важнее закрытых. Два равных кандидата — не
-    «берём первый», а вопрос Серёге: правка не должна лечь в чужую карточку молча."""
+    «берём первый», а вопрос владельцу: правка не должна лечь в чужую карточку молча."""
     # Мара цитирует заголовок таким, каким его показал пакет: обрезанным по
     # `MAX_TITLE` с «…» на конце. Хвостовое многоточие — не слово, а обрезанный
     # показ сравнивается с обрезанным же заголовком карточки (Codex по #129,
@@ -906,7 +921,7 @@ def карточка_правки(item, due, note, когда, event, oid):
 
 
 def _завести(vault, item, due, note, когда, event):
-    """Новая задача словами Серёги. Поля те же, что у карточки из звонка, чтобы
+    """Новая задача словами владельца. Поля те же, что у карточки из звонка, чтобы
     context_pack и сводки видели её как любую другую."""
     day, stem = когда[:10], slug(item)[:40]
     oid = mi.uuid7()
@@ -1015,6 +1030,7 @@ def apply_correction(vault, event, con=None):
     в него (`ledger_import.перенести_карточку`), чтобы строка и шапка не
     расходились до ночного крона. Без `con` (тесты правки словами) волт
     остаётся единственным, кого правка касается — как и до Т2.2."""
+    застава_владельца(vault)
     p = event.get("payload") or {}
     item = scrub(str(p.get("item") or "").strip())
     status, due = p.get("status") or None, p.get("due") or None
@@ -1134,7 +1150,7 @@ def self_check():
             "commitments": [], "decisions": [], "open_questions": [],
             "changed_instructions": [], "constraints": [], "followups": [],
             "people_mentioned": ["Анна", "Шеф"], "projects_mentioned": []}
-    path, text = conversation_card(event, extr, {"шеф": "sergey"})
+    path, text = conversation_card(event, extr, {"шеф": OWNER})
     assert path == "kb/conversations/2026-09-02-1405-anna.md", path
     # класс символов, а не один вход: на этом стоит потолок перечисления в
     # сверке (`contextd_reconcile`, обход `kb/`) — точка, пробел, NFD и
@@ -1144,7 +1160,7 @@ def self_check():
     assert "sensitive: true" in text and "cloud_allowed: false" in text
     assert "04:12" in text, "метка времени спана потерялась"
     people = [l for l in text.splitlines() if l.startswith("Люди: ")][0]
-    assert "sergey" not in people, "себя в собеседники не записываем"
+    assert OWNER not in people, "себя в собеседники не записываем"
     for line in text.split("---", 2)[1].strip().splitlines():
         assert not (line.startswith("  ") and not line.strip().startswith("- ")), \
             "вложенная карта в фронтматтере: %r" % line

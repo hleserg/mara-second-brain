@@ -220,6 +220,26 @@ class Живой(unittest.TestCase):
             ee.live(self.каталог, записать=False, спросить=self.ответы.__getitem__)
         self.assertEqual(self.снимок(), было)
 
+    def test_имя_владельца_в_корпус_не_ложится(self):
+        """Г7: имя из промпта (`MARA_OWNER_NAME`), повторённое моделью в
+        любом падеже, в отслеживаемый корпус не попадает."""
+        def спросить(текст):
+            ответ = json.loads(json.dumps(self.ответы[текст]))
+            for k in ("requests", "commitments"):
+                for it in ответ.get(k) or []:
+                    it["action"] = it.get("action", "") + " — сказал Тимофею"
+            return ответ
+        with mock.patch.dict(os.environ, {"MARA_OWNER_NAME": "Тимофей",
+                                          "MARA_ENV_FILE": "/nonexistent/x"}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ee.live(self.каталог, записать=True, спросить=спросить)
+        for путь, с in ee.случаи(self.каталог):
+            текст = json.dumps(с["живой"], ensure_ascii=False)
+            self.assertNotIn("Тимоф", текст, путь)
+            self.assertTrue(с["живой"]["owner_named"])
+        self.assertTrue(any("владелец" in json.dumps(с["живой"]["response"], ensure_ascii=False)
+                            for _, с in ee.случаи(self.каталог)))
+
     def test_ошибка_на_случае_не_пишет_ничего(self):
         было = self.снимок()
         четвёртый = ce.transcript_text(ee.случаи(self.каталог)[3][1]["segments"])

@@ -19,7 +19,7 @@ import ledger_import as li
 
 def карточка(vault, rel, **fm):
     поля = {"title": "прислать смету", "type": "commitment", "status": "proposed",
-            "owner": "sergey", "promised_to": "Анна", "due": "2026-09-04",
+            "owner": "owner", "promised_to": "Анна", "due": "2026-09-04",
             "source_id": "commitment/call_1/requests/1", "origin": "call/call_1",
             "created": "2026-09-03T01:00:00+03:00",
             "occurred": "2026-09-02T14:05:00+03:00"}

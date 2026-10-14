@@ -158,7 +158,7 @@ _system/context/now.md ──► contextd GET /v1/context/bootstrap
 
 ### Вторая нарезка: `mara_correction`
 
-Обратная дорога (ТЗ §16). Серёга отвечает на дайджест «это тоже задача, срок
+Обратная дорога (ТЗ §16). Владелец отвечает на дайджест «это тоже задача, срок
 пятница», «сделал», «отмени» — Мара зовёт инструмент
 `mara_correction(item, status?, due?, note?)`, плагин постит `kind: correction`
 в `/v1/ingest/event`, contextd применяет синхронно через

@@ -75,7 +75,7 @@ SMS → direct SMS read if granted, otherwise notification fallback → ingest
 И затем:
 
 ```text
-новая реплика Сергея Маре
+новая реплика владельца Маре
     ↓
 Context Broker / Hermes pre_llm_call
     ↓
@@ -304,7 +304,7 @@ started_at: ...
 ended_at: ...
 direction: incoming|outgoing|unknown
 participants:
-  - person:sergey
+  - person:owner
   - person:<resolved-or-unknown>
 classification: personal|work-confidential|third-party
 sensitive: true
@@ -351,7 +351,7 @@ Retention purge должен быть idempotent и оставлять manifest 
 
 1. сначала проверить, не пишет ли конкретный recorder каналы раздельно;
 2. если нет — diarization;
-3. поддержать optional local voice enrollment Сергея и хранить voice embedding **только локально**;
+3. поддержать optional local voice enrollment владельца и хранить voice embedding **только локально**;
 4. если identity не уверена — не выдумывать, а помечать ambiguity.
 
 Transcript хранить JSONL/JSON с evidence spans:
