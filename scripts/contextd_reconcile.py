@@ -244,7 +244,8 @@ def транскрипт_без_извлечения(con, root):
             continue
         занято = con.execute(
             "select 1 from jobs where event_id=? and kind in ('extract','project') "
-            "and state in ('ready','dlq','done')", (eid,)).fetchone()
+            # `cancelled` — владелец отменил: ставить заново значит отменить отмену
+            "and state in ('ready','dlq','done','cancelled')", (eid,)).fetchone()
         if занято:
             continue
         if not con.execute("select 1 from events where id=?", (eid,)).fetchone():

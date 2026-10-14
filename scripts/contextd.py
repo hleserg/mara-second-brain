@@ -623,7 +623,8 @@ def metrics(con, root=None, vault=None):
         ("mara_ingest_oldest_job_seconds", ждёт),
         # «ASR/diarization/extraction duration/status»: длительность шага
         # (`asr`, `extract`, `project`, `digest`) по исходу — `ok`, `retry`,
-        # `dlq` — парой summary `_sum`/`_count`: среднее за окно —
+        # `dlq`, `cancelled` (Т7.6: шаг остановлен отменой — длительность
+        # настоящая, до остановки) — парой summary `_sum`/`_count`: среднее за окно —
         # `rate(_sum) / rate(_count)`. Разрешение — целые секунды (`now_iso`
         # без долей): у `project` и `digest` среднее будет почти нулём, это
         # не поломка. Брошенные попытки — отдельным счётом
@@ -1775,6 +1776,9 @@ def make_server(root, port=8788, vault=None, host="127.0.0.1"):
 
 
 АРЕНДА_ПОТЕРЯНА = "аренда потеряна"
+# Т7.6, ADR-0010 решение 8: отмену воркер видит там же, где продлевает
+# аренду, — `продлить` возвращает этот знак вместо «своя / не своя»
+ШАГ_ОТМЕНЁН = "шаг отменён"
 
 
 def _убить(p):
@@ -1815,7 +1819,8 @@ def погасить_шаг():
 
 def _запустить(argv, продлить=None):
     """Процесс шага: `(код, stderr)`; таймаут — `(None, "")`, потерянная
-    аренда — `(АРЕНДА_ПОТЕРЯНА, "")`.
+    аренда — `(АРЕНДА_ПОТЕРЯНА, "")`, отмена (Т7.6: `продлить` вернул
+    `ШАГ_ОТМЕНЁН`) — `(ШАГ_ОТМЕНЁН, "")`.
 
     ADR-0010 решение 7 (Т7.6, N9 аудита): аренда работы — `LEASE_SEC`, а шаг
     живёт до часа; пока дочерний процесс жив, аренда продлевается раз в
@@ -1850,6 +1855,10 @@ def _запустить(argv, продлить=None):
                         счесть_занятость("worker")
                     print("%s аренда не продлена: %s" % (mi.now_iso(), e), flush=True)
                     continue
+                if своя == ШАГ_ОТМЕНЁН:
+                    print("%s работу отменили — шаг остановлен" % mi.now_iso(), flush=True)
+                    _убить(p)
+                    return ШАГ_ОТМЕНЁН, ""
                 if своя is False:
                     print("%s аренда потеряна — шаг остановлен" % mi.now_iso(), flush=True)
                     _убить(p)
@@ -1863,8 +1872,9 @@ def _запустить(argv, продлить=None):
 
 def run_step(kind, event_id, продлить=None):
     """Шаг пайплайна отдельным процессом. Возвращает (успех, хвост ошибки);
-    успех `None` — аренда потеряна, работу держит другой, закрывать её
-    нельзя. `продлить` — продление аренды, пока шаг идёт (`_запустить`)."""
+    успех `None` — итог не пишется: аренда потеряна (работу держит другой,
+    вторым — `АРЕНДА_ПОТЕРЯНА`) или работу отменили (`ШАГ_ОТМЕНЁН`, Т7.6).
+    `продлить` — продление аренды, пока шаг идёт (`_запустить`)."""
     script = STEP.get(kind)
     if not script:
         return False, "неизвестный шаг %s" % kind
@@ -1879,8 +1889,8 @@ def run_step(kind, event_id, продлить=None):
             GPU.release()
     if код is None:
         return False, "таймаут часа на шаге %s" % kind
-    if код == АРЕНДА_ПОТЕРЯНА:
-        return None, АРЕНДА_ПОТЕРЯНА
+    if код in (АРЕНДА_ПОТЕРЯНА, ШАГ_ОТМЕНЁН):
+        return None, код
     # хвост stderr уходит в `jobs.last_error`, оттуда — в сверку и Telegram:
     # без путей карточек и секретов (§15.1). Обезличиваем до среза: срез
     # посреди пути или токена оставил бы обрубок, который шаблон не узнает
@@ -2078,10 +2088,11 @@ def отметить_узел(con, узел, роль):
 
 
 def такт(con, отмечено=None):
-    """Один оборот воркера: пробы, причины ожидания, взять работу, шаг.
-    Возвращает работу или None. `отмечено` — `[monotonic, причины]`
-    прошлой отметки: причины пишутся при смене и раз в `ПРОБА_С`, чтобы
-    новые работы молчащего узла тоже получили причину."""
+    """Один оборот воркера: пробы, причины ожидания, доведение брошенных
+    отмен (`mi.доотменить`), взять работу, шаг. Возвращает работу или None.
+    `отмечено` — `[monotonic, причины]` прошлой отметки: причины пишутся при
+    смене и раз в `ПРОБА_С`, чтобы новые работы молчащего узла тоже получили
+    причину."""
     причины = недоступные(con)
     отмечено = отмечено if отмечено is not None else [None, None]
     сейчас = time.monotonic()
@@ -2093,14 +2104,32 @@ def такт(con, отмечено=None):
         отметить_узел(con, ВОРКЕР, "core")
         отмечено[:] = [сейчас, причины]
     ждут = {k for k, п in причины.items() if п}
+    # отмену просили у шедшей работы, а воркер (прошлый) умер — довести
+    for _ in range(mi.доотменить(con)):
+        print("%s отменённая работа закрыта после смерти воркера" % mi.now_iso(), flush=True)
     # лёгкое напоминание — раньше всех: за пачкой расшифровок оно устареет
     # (`message_nudge.СВЕЖЕСТЬ_С`) и пропадёт вместе с дневным поводом
     job = mi.claim_job(con, kinds=[k for k in STEP if k not in ждут] if ждут else None,
                        первыми=("nudge",))
     if not job:
         return None
-    ok, err = run_step(job["kind"], job["event_id"],
-                       lambda: mi.продлить_аренду(con, job["id"], job["attempt"]))
+    # id работы — в журнал: по нему `--cancel` (Т7.6); событие в строке итога
+    print("%s работа %s %s %s начата" % (mi.now_iso(), job["id"], job["kind"],
+                                        job["event_id"]), flush=True)
+
+    def продлить():
+        if mi.отмена_запрошена(con, job["id"]):
+            return ШАГ_ОТМЕНЁН
+        return mi.продлить_аренду(con, job["id"], job["attempt"])
+    # отменили между захватом и запуском — шаг не начинаем
+    ok, err = ((None, ШАГ_ОТМЕНЁН) if mi.отмена_запрошена(con, job["id"]) else
+               run_step(job["kind"], job["event_id"], продлить))
+    if err == ШАГ_ОТМЕНЁН and ok is None:
+        # итог отменённого шага не пишется, следующий шаг не ставится
+        mi.закрыть_отменённую(con, job["id"], job["attempt"])
+        print("%s работа %s %s %s отменена" % (mi.now_iso(), job["id"], job["kind"],
+                                              job["event_id"]), flush=True)
+        return job
     if ok is None:
         # аренду забрал другой (ADR-0010 решение 7): итог шага — не наш
         print("%s работа %s %s — %s" % (mi.now_iso(), job["kind"], job["event_id"], err),
@@ -2110,12 +2139,13 @@ def такт(con, отмечено=None):
         # коробка могла лечь посреди шага: следующая проба — сразу, а не по
         # кэшу «жив», иначе ретрай через минуту сжёг бы ещё одну попытку
         _пробы.pop(адрес_шага(ТЯЖЁЛЫЕ[job["kind"]][1]), None)
-    if not закрыть_работу(con, job, ok, err):
+    итог = закрыть_работу(con, job, ok, err)
+    if not итог:
         print("%s работа %s %s — аренда ушла другому, итог не записан"
               % (mi.now_iso(), job["kind"], job["event_id"]), flush=True)
         return job
-    print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"],
-                                  "ок" if ok else "сбой"), flush=True)
+    print("%s работа %s %s %s" % (mi.now_iso(), job["kind"], job["event_id"], итог),
+          flush=True)
     return job
 
 
@@ -2154,17 +2184,30 @@ def закрыть_работу(con, job, ok, err):
     цепочку доводила сверка (`транскрипт_без_извлечения`).
 
     Итог пишется, только пока попытка своя (`mi.попытка_открыта`, в той же
-    транзакции): шаг мог кончиться сам уже после того, как работу взял
-    другой, — тогда `jobs` его итогом не трогается. Возвращает, записан ли.
+    транзакции) и работа ещё `ready`: шаг мог кончиться сам уже после того,
+    как работу взял другой или закрыли, — тогда `jobs` его итогом не
+    трогается. Отмену просили, а шаг упал раньше отметки аренды (Т7.6) —
+    работа закрывается отменённой: ретрай, а на последней ступени DLQ у
+    работы, которую владелец отменил, — неправда (ревью #165). Успех при
+    той же просьбе засчитывается: шаг доиграл до отметки, как и обещает
+    `--cancel`. Возвращает, что записано: `ок`, `сбой`, `отменена`; None —
+    ничего.
     """
     with транзакция(con):
         if job.get("attempt") is not None and not mi.попытка_открыта(
                 con, job["id"], job["attempt"]):
-            return False
+            return None
+        row = con.execute("select state, cancel_requested from jobs where id=?",
+                          (job["id"],)).fetchone()
+        if not row or row["state"] != "ready":
+            return None
+        if not ok and row["cancel_requested"]:
+            mi.закрыть_отменённую(con, job["id"], job.get("attempt"))
+            return "отменена"
         mi.finish_job(con, job["id"], ok, err, job.get("attempt"))
         if ok and job["kind"] in NEXT:
             mi.add_job(con, job["event_id"], NEXT[job["kind"]])
-    return True
+    return "ок" if ok else "сбой"
 
 
 def serve(root, port, host="127.0.0.1"):
@@ -2222,6 +2265,37 @@ def self_check():
     return 0
 
 
+def отменить_команда(con, что):
+    """`--cancel` (Т7.6): `что` — id работы или события. По событию —
+    его живая работа, если она одна: id события печатают и журнал воркера, и
+    сверка, а id работы — только строка «начата» в журнале."""
+    jid = что
+    if not con.execute("select 1 from jobs where id=?", (что,)).fetchone():
+        живые = con.execute("select id, kind from jobs where event_id=? and state='ready' "
+                            "order by created", (что,)).fetchall()
+        if len(живые) > 1:
+            print("у события живых работ несколько — отмени по id:\n" + "\n".join(
+                "%s %s" % (r["id"], r["kind"]) for r in живые))
+            return 1
+        if живые:
+            jid = живые[0]["id"]
+    исход = mi.отменить(con, jid)
+    if исход == "запрошена":
+        осталось = con.execute("select lease_until from jobs where id=?",
+                               (jid,)).fetchone()[0] - int(time.time())
+        print("отмена запрошена: шаг числится идущим. Живой воркер остановит его "
+              "при следующей отметке аренды (раз в %d с); кончится раньше — успех "
+              "засчитается, сбой закроется отменой. Воркер умер — работу закроет "
+              "его оборот после истечения аренды (%s)" % (
+                  max(1, mi.LEASE_SEC // 3),
+                  "через %d с" % осталось if осталось > 0 else "она уже истекла"))
+    else:
+        print({None: "нет такой работы",
+               "отменена": "отменена: шаг не шёл, следующий не поставлен"}.get(
+            исход, "отменять нечего: работа уже %s" % исход))
+    return 0 if исход in ("отменена", "запрошена") else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="приём событий Mara Ambient Memory")
     ap.add_argument("--root", default=mi.ROOT)
@@ -2234,6 +2308,12 @@ def main(argv=None):
     ap.add_argument("--pair-node", metavar="УЗЕЛ", dest="pair_node",
                     help="токен сердцебиения узла (Т7.2): `--pair-node bigpc`")
     ap.add_argument("--revoke", metavar="ID")
+    ap.add_argument("--cancel", metavar="JOB|EVENT",
+                    help="отменить работу (Т7.6): id работы (строка «начата» в "
+                         "журнале воркера) или события, если живая работа у него "
+                         "одна. Не шла — закрыта сразу; идёт — воркер остановит "
+                         "шаг при следующей отметке аренды. Код 0 — отменена или "
+                         "запрошена, 1 — нечего отменять, 2 — база занята")
     ap.add_argument("--scopes", metavar="ID", help="показать allowlist устройства")
     ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
                     help="задать allowlist видов из `events.kind` "
@@ -2266,6 +2346,15 @@ def main(argv=None):
               "на узле: MARA_NODE_TOKEN=<токен> в окружении node_agent.py"
               % (a.pair_node, dev, token))
         return 0
+    if a.cancel:
+        con = mi.connect(a.root)
+        try:
+            return отменить_команда(con, a.cancel)
+        except sqlite3.OperationalError as e:
+            if not mi.база_занята(e):
+                raise
+            print("база занята — отмена не записана, повтори позже")
+            return 2
     if a.revoke:
         con = mi.connect(a.root)
         row = revoke(con, a.revoke)
