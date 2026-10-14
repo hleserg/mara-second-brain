@@ -1007,6 +1007,60 @@ def телефон_молчит(con, hours=None):
     return out
 
 
+# Т4.3, §8.4 п.5: телефон отчитывается о здоровье захвата каждой сверкой
+# (15 минут). Отчёт старше недели с запасом не судится: молчащий телефон —
+# находка `телефон_молчит`, а неделя — окно журнала звонков на телефоне.
+ЗДОРОВЬЕ_СВЕЖЕЕ_Ч = 8 * 24
+
+
+def _когда(iso):
+    """«14.10 09:30» по поясу владельца; не читается — как есть."""
+    try:
+        return datetime.fromisoformat(iso).astimezone(mi.TZ).strftime("%d.%m %H:%M")
+    except (TypeError, ValueError):
+        return str(iso)
+
+
+def захват_телефона(con, hours=ЗДОРОВЬЕ_СВЕЖЕЕ_Ч):
+    """Что телефон сообщил о захвате (Т4.3, ТЗ §8.4 п.5). Открытая тревога
+    «звонок был, записи нет» (`mi.ЗАПИСИ_НЕТ`) — `error` на каждый звонок:
+    запись разговора не появилась, и рекордер, скорее всего, не пишет
+    (ACR Phone + APH слетает после перезагрузки, §7.2). `unhealthy` без
+    тревоги — сломано разрешение или папка: `warn` с причиной от телефона,
+    обезличенной ещё раз. Журнала звонков у сервера нет, и без отчёта
+    телефона случай «записи не было вовсе» он не видел. Отчёт старше
+    `hours` не судится: телефон молчит — об этом `телефон_молчит`."""
+    out = []
+    for r in con.execute("select provider, state, checked, detail_json from provider_health "
+                         "where provider like 'phone:%' order by provider").fetchall():
+        возраст = _возраст(r["checked"])
+        if возраст is None or возраст > hours * 3600:
+            continue
+        try:
+            детали = json.loads(r["detail_json"] or "{}")
+        except ValueError:
+            детали = {}
+        dev = r["provider"][len("phone:"):]
+        имя = (con.execute("select name from devices where id=?", (dev,)).fetchone() or [dev])[0]
+        тревоги = [x[0] for x in con.execute(
+            "select json_extract(detail_json, '$.call_started') from alerts where kind=? "
+            "and object_kind='device' and object_id=? and state='open' order by opened",
+            (mi.ЗАПИСИ_НЕТ, dev))]
+        for звонок in тревоги:
+            out.append(находка("запись-не-появилась", "error",
+                               "%s: звонок %s был, а записи нет — рекордер не пишет? "
+                               "(ACR Phone + APH слетает после перезагрузки) — позвони "
+                               "себе и проверь" % (имя, _когда(звонок)),
+                               device=имя, call=звонок))
+        if r["state"] == "unhealthy" and not тревоги:
+            причина = детали.get("reason") if isinstance(детали, dict) else None
+            out.append(находка("захват-сломан", "warn",
+                               "%s: захват сломан — %s" % (
+                                   имя, mi.обезличить(str(причина or "причины нет"))[:200]),
+                               device=имя))
+    return out
+
+
 def демон_не_отвечает(адрес):
     """`contextd` не отвечает на петле — телефон не может сдать ни событие, ни
     запись, а очередь не движется. Зовётся из крона (`main`), а не из
@@ -1514,6 +1568,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += _застава("узел", узел_молчит, con)
     out += _застава("попытки", шаги_брошены, con)
     out += _застава("телефон", телефон_молчит, con)
+    out += _застава("захват", захват_телефона, con)
     out += _застава("бэкап", бэкап_ядра, targets, root=root)
     out += _застава("снимок", снимок_реестра_устарел, root)
     return out

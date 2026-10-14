@@ -102,6 +102,10 @@ GPU = threading.Semaphore(1)
 # разрешённым видом `heartbeat`. Узел берётся из токена, а не из тела: чужим
 # токеном за bigpc не отчитаться.
 ПУТЬ_СЕРДЦА = "/v1/node/heartbeat"
+# Т4.3, ТЗ §8.4 п.5: телефон присылает здоровье захвата — состояние §8.5 и
+# открытую тревогу «звонок был, записи нет» (`принять_здоровье`)
+ПУТЬ_ЗДОРОВЬЯ = "/v1/device/health"
+СОСТОЯНИЯ_ЗАХВАТА = ("healthy", "degraded", "unhealthy", "unknown", "recovering")
 УЗЕЛ_ПРЕФИКС = "node:"
 # какая возможность узла нужна тяжёлому шагу (решение 1)
 ВОЗМОЖНОСТЬ = {"asr": "asr", "extract": "llm"}
@@ -586,6 +590,17 @@ def metrics(con, root=None, vault=None):
             с = {}
         return age_of(с.get("heartbeat_at")) if isinstance(с, dict) else -1
     сердца = [(у, сердце_возраст(у)) for у in тяжёлые]
+    # здоровье захвата по имени телефона (Т4.3): по имени, как у
+    # `mara_device_last_seen_seconds`, — свежайший отчёт среди его устройств
+    захват = [(n, st, age_of(ch)) for n, st, ch, _ in con.execute(
+        "select d.name, p.state, p.checked, max(%s) from provider_health p "
+        "join devices d on p.provider = 'phone:' || d.id where d.revoked_at is null "
+        "group by d.name order by d.name" % mi.секунды("p.checked"))]
+    закрыто = dict(con.execute(
+        "select coalesce(json_extract(detail_json, '$.resolution'), 'closed'), count(*) "
+        "from alerts where kind=? and state='resolved' group by 1", (mi.ЗАПИСИ_НЕТ,)))
+    переходы = [("opened", q("select count(*) from alerts where kind=?", mi.ЗАПИСИ_НЕТ))] + [
+        (т, закрыто.get(т, 0)) for т in ("recovered", "expired", "closed")]
     devices = [(n, age_of(t)) for n, t, _ in con.execute(
         "select name, last_seen, max(%s) from devices where revoked_at is null "
         "group by name order by name" % mi.секунды("last_seen"))]
@@ -661,6 +676,20 @@ def metrics(con, root=None, vault=None):
         ("mara_version_conflicts_open",
          q("select count(*) from alerts where kind='version_conflict' "
            "and state='open'")),
+        # Т4.3, §8.4: телефон сообщил «звонок был, записи нет», и запись так
+        # и не появилась — открытые тревоги по всем телефонам
+        ("mara_recording_missing_open",
+         q("select count(*) from alerts where kind=? and state='open'", mi.ЗАПИСИ_НЕТ)),
+        # §15.1 «recorder health and alert transitions»: переходы тревоги —
+        # счёт из `alerts`, рестарт его не теряет; `opened` — заведено всего,
+        # остальные — чем закрылись (переоткрытая считается один раз)
+        *[('mara_recording_missing_total{transition="%s"}' % т, n) for т, n in переходы],
+        # состояние захвата по §8.5 у каждого телефона, отчитавшегося хоть
+        # раз: 1 у нынешнего, 0 у прочих, и возраст отчёта
+        *[('mara_capture_state{device="%s",state="%s"}' % (метка(имя), с),
+           int(с == нынешнее)) for имя, нынешнее, _ in захват for с in СОСТОЯНИЯ_ЗАХВАТА],
+        *[('mara_capture_report_age_seconds{device="%s"}' % метка(имя), возраст)
+          for имя, _, возраст in захват],
         # «entity/revision created»: ревизии по тому, кто менял — `import`
         # (`ledger_import.ПЕРЕНОС_АКТОР`), `projector` и `human` (переносы
         # карточек в `call_project`). Счёт из базы, а не из памяти: рестарт
@@ -1091,6 +1120,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.say(409, {"error": "в compute_nodes узел «%s» записан под "
                                                "другим id" % узел})
             return self.say(200, {"node": узел, "interval_s": сердце["interval_s"]})
+        if p.path == ПУТЬ_ЗДОРОВЬЯ:
+            dev = device_of(con, self.headers.get("Authorization"))
+            if not dev:
+                return self.say(403, {"error": "устройство отозвано"})
+            здоровье, беда = разобрать_здоровье(data)
+            if беда:
+                return self.say(400, {"error": беда})
+            принять_здоровье(con, dev, здоровье)
+            return self.say(200, {"ok": True})
         if p.path in ("/v1/ingest/event", "/v1/ingest/message", "/v1/ingest/email"):
             kind = {"/v1/ingest/message": "message",
                     "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
@@ -2011,6 +2049,98 @@ def разобрать_сердцебиение(data):
         return None, "interval_s — целое от 10 до 3600"
     out["interval_s"] = интервал
     return out, None
+
+
+def разобрать_здоровье(data):
+    """(здоровье, беда). Закрытый список полей отчёта телефона (Т4.3, ТЗ
+    §8.4–8.5): состояние, причина, звонок открытой тревоги «записи нет»,
+    счёт тревог, чем закрылась последняя, рекордеры, когда проверено.
+    Номера и имени в отчёте нет по построению (`Здоровье.оценить` на
+    телефоне), но тело пишет чужое устройство: причина режется по длине и
+    обезличивается, неизвестное отбрасывается."""
+    def мс(x):
+        return isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 2 ** 53
+    if data.get("state") not in СОСТОЯНИЯ_ЗАХВАТА:
+        return None, "state — одно из: " + ", ".join(СОСТОЯНИЯ_ЗАХВАТА)
+    причина = data.get("reason", "")
+    if not (isinstance(причина, str) and len(причина) <= 300 and причина.isprintable()):
+        return None, "reason — строка до 300 знаков"
+    out = {"state": data["state"], "reason": mi.обезличить(причина)}
+    for k in ("alert_call_ms", "closed_call_ms", "checked_at_ms"):
+        if not мс(data.get(k, 0)):
+            return None, "%s — миллисекунды эпохи" % k
+        out[k] = data.get(k, 0)
+    закрыта = data.get("closed_as", "")
+    if закрыта not in ("", "recovered", "expired"):
+        return None, "closed_as — recovered, expired или пусто"
+    out["closed_as"] = закрыта
+    n = data.get("alerts_total", 0)
+    if not (isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= 10 ** 6):
+        return None, "alerts_total — целое"
+    out["alerts_total"] = n
+    рекордеры = data.get("recorders", [])
+    if not (isinstance(рекордеры, list) and len(рекордеры) <= 8 and all(
+            isinstance(r, str) and re.fullmatch(r"[a-z0-9_]{1,40}", r) for r in рекордеры)):
+        return None, "recorders — список id рекордеров (строчные латинские)"
+    out["recorders"] = sorted(set(рекордеры))
+    return out, None
+
+
+def _из_мс(ms):
+    """Миллисекунды эпохи с телефона → ISO со сдвигом doctor (`mi.TZ`)."""
+    return datetime.fromtimestamp(ms / 1000, mi.TZ).isoformat(timespec="seconds")
+
+
+def принять_здоровье(con, dev, з):
+    """Здоровье захвата телефона (Т4.3, ТЗ §8.4 п.5). Состояние — в
+    `provider_health`, строка `phone:<устройство>`: `since` держит, с какого
+    отчёта состояние такое. Тревога «звонок был, записи нет» — в `alerts`
+    (`mi.ЗАПИСИ_НЕТ`), одна на звонок (п.4): тот же звонок, названный снова,
+    — та же строка, а закрытая раньше переоткрывается, а не множится.
+    Телефон назвал другой звонок или ни одного — прежняя открытая
+    закрывается; чем — говорит телефон (`closed_as` у `closed_call_ms`):
+    `recovered`, когда запись появилась (п.7, история остаётся), `expired`,
+    когда звонок ушёл из недельного журнала; не сказал — `closed`."""
+    сейчас = mi.now_iso()
+    провайдер = "phone:" + dev
+    звонок = _из_мс(з["alert_call_ms"]) if з["alert_call_ms"] else None
+    закрыт = _из_мс(з["closed_call_ms"]) if з["closed_call_ms"] else None
+    детали = json.dumps({"device_id": dev, "reason": з["reason"], "recorders": з["recorders"],
+                         "alerts_total": з["alerts_total"],
+                         "checked_at": _из_мс(з["checked_at_ms"]) if з["checked_at_ms"] else None},
+                        ensure_ascii=False, sort_keys=True)
+    with транзакция(con):
+        row = con.execute("select state, since from provider_health where provider=?",
+                          (провайдер,)).fetchone()
+        since = row["since"] if row and row["state"] == з["state"] else сейчас
+        con.execute("insert into provider_health(provider,state,checked,since,detail_json) "
+                    "values(?,?,?,?,?) on conflict(provider) do update set "
+                    "state=excluded.state, checked=excluded.checked, since=excluded.since, "
+                    "detail_json=excluded.detail_json",
+                    (провайдер, з["state"], сейчас, since, детали))
+        тревоги = con.execute(
+            "select id, state, json_extract(detail_json, '$.call_started') as звонок "
+            "from alerts where kind=? and object_kind='device' and object_id=? "
+            "order by opened", (mi.ЗАПИСИ_НЕТ, dev)).fetchall()
+        for т in тревоги:
+            if т["state"] == "open" and т["звонок"] != звонок:
+                исход = з["closed_as"] if т["звонок"] == закрыт and з["closed_as"] else "closed"
+                con.execute("update alerts set state='resolved', resolved=?, "
+                            "detail_json=json_set(detail_json, '$.resolution', ?) where id=?",
+                            (сейчас, исход, т["id"]))
+        if звонок is None:
+            return
+        та = next((т for т in тревоги if т["звонок"] == звонок), None)
+        if та is None:
+            con.execute("insert into alerts(id,kind,severity,state,object_kind,object_id,"
+                        "opened,detail_json) values(?,?,?,?,?,?,?,?)",
+                        (mi.uuid7(), mi.ЗАПИСИ_НЕТ, "error", "open", "device", dev, сейчас,
+                         json.dumps({"call_started": звонок, "reason": з["reason"]},
+                                    ensure_ascii=False)))
+        elif та["state"] != "open":
+            con.execute("update alerts set state='open', resolved=null, "
+                        "detail_json=json_remove(detail_json, '$.resolution') where id=?",
+                        (та["id"],))
 
 
 def принять_сердцебиение(con, узел, сердце):

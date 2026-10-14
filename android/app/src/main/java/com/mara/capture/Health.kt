@@ -122,6 +122,8 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             val о = Здоровье.оценить(п)
             for (е in Здоровье.события(о, s.alertCallMs, п)) when (е) {
                 Здоровье.Событие.ВОССТАНОВЛЕНО -> {
+                    s.alertClosedCallMs = s.alertCallMs
+                    s.alertClosedAs = "recovered"
                     s.alertCallMs = 0L
                     s.alertRecoveredMs = п.сейчас
                     снять(ctx, ТРЕВОГА)
@@ -129,6 +131,8 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 // звонок ушёл из недельного журнала: записи так и нет, но
                 // проверять больше нечего — закрыть, не называя восстановлением
                 Здоровье.Событие.ИСТЕКЛА -> {
+                    s.alertClosedCallMs = s.alertCallMs
+                    s.alertClosedAs = "expired"
                     s.alertCallMs = 0L
                     снять(ctx, ТРЕВОГА)
                 }

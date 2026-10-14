@@ -263,6 +263,25 @@ class CoreTest {
     }
 
     @Test
+    fun `отчёт о здоровье совпадает с общим фиксом контракта`() {
+        // Т4.3: тот же фикс читает `tests/test_device_health.py` — поле,
+        // которое сервер выбросил бы, разошлось бы здесь, а не молча
+        val ждём = JSONObject(fixture("device-health.json").readText())
+        val есть = HealthJson.build("unhealthy", "звонок был, записи нет", 1_760_000_000_000L, 1,
+            0L, "", listOf("acr_phone_aph", "acr_phone_aph"), 1_760_000_900_000L)
+        assertEquals(canon(ждём), canon(есть))
+    }
+
+    @Test
+    fun `причина отчёта — одна строка не длиннее предела сервера`() {
+        val j = HealthJson.build("degraded", "а\nб\tв" + "г".repeat(400), 0L, 0, 0L, "",
+            emptyList(), 1L)
+        val причина = j.getString("reason")
+        assertEquals(HealthJson.ПРИЧИНА_МАКС, причина.length)
+        assertTrue(причина.startsWith("а б в"))
+    }
+
+    @Test
     fun `ключом события служит хеш содержимого, а не имя файла`() {
         val переименован = файл.copy(name = "совсем другое имя.m4a")
         val a = EventJson.build(файл, звонок, ША, "m4a", null, мск).getString("source_id")

@@ -100,6 +100,18 @@ class Settings(ctx: Context) {
         get() = prefs.getLong("alert_recovered", 0)
         set(v) = prefs.edit().putLong("alert_recovered", v).apply()
 
+    /** Чем закрылась последняя тревога (Т4.3): её звонок и `recovered` —
+     *  запись появилась, или `expired` — звонок ушёл из недельного журнала.
+     *  Сервер закрывает свою копию тем же исходом (§8.4 п.7); без этого он
+     *  знал бы только, что тревога пропала. */
+    var alertClosedCallMs: Long
+        get() = prefs.getLong("alert_closed_call", 0)
+        set(v) = prefs.edit().putLong("alert_closed_call", v).apply()
+
+    var alertClosedAs: String
+        get() = prefs.getString("alert_closed_as", "") ?: ""
+        set(v) = prefs.edit().putString("alert_closed_as", v).apply()
+
     /** Начало наблюдения за здоровьем: первый прогон `HealthWorker`. Звонки
      *  до него — до установки приложения, за них тревоги нет. */
     var healthSinceMs: Long

@@ -1,5 +1,6 @@
 package com.mara.capture
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
 import java.time.ZoneId
@@ -328,6 +329,34 @@ object EventJson {
         idempotencyKey?.let { ev.put("idempotency_key", it) }
         return ev.put("payload", payload).put("blob", blob)
     }
+}
+
+/**
+ * Отчёт о здоровье захвата для `POST /v1/device/health` (Т4.3, ТЗ §8.4
+ * п.5): журнала звонков у сервера нет, и «звонок был, записи нет» знает
+ * только телефон. Контракт — `tests/fixtures/device-health.json`, с ним
+ * сверяются обе стороны (`contextd.разобрать_здоровье` на сервере).
+ * Номера и имени в отчёте нет: причина — из `Здоровье.оценить`, тревога —
+ * время начала звонка, рекордеры — id профилей (`Рекордеры`).
+ */
+object HealthJson {
+    /** Предел причины на сервере; длиннее — 400, и отчёт не дошёл бы вовсе. */
+    const val ПРИЧИНА_МАКС = 300
+
+    fun build(
+        состояние: String, причина: String, тревогаМс: Long, тревог: Int,
+        закрытМс: Long, закрытКак: String, рекордеры: List<String>, провереноМс: Long,
+    ): JSONObject = JSONObject()
+        .put("state", состояние)
+        // управляющих знаков сервер не примет: причина — одна строка экрана
+        .put("reason", причина.map { if (it.isISOControl()) ' ' else it }
+            .joinToString("").take(ПРИЧИНА_МАКС))
+        .put("alert_call_ms", тревогаМс)
+        .put("alerts_total", тревог)
+        .put("closed_call_ms", закрытМс)
+        .put("closed_as", закрытКак)
+        .put("recorders", JSONArray(рекордеры.distinct().sorted()))
+        .put("checked_at_ms", провереноМс)
 }
 
 enum class JobState { NEW, HASHED, POSTED, DONE, FAILED }
