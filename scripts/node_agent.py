@@ -11,7 +11,8 @@
 - `capabilities` — `asr`, если отвечает локальный STT-сервис, `llm`, если
   отвечает Ollama; сервис лёг — возможности нет, и doctor держит работы
   в `ready` с причиной `node_no_capability:<узел>`, не тратя попыток;
-- `models` — модели Ollama (`/api/tags`);
+- `models` — модели Ollama (`/api/tags`), `models_complete` — список полон:
+  Ollama ответила, и ни одно имя не отброшено и не обрезано;
 - `vram_free_mb`, `vram_total_mb` — `nvidia-smi`, если он есть;
 - `load` — загрузка GPU в процентах (`utilization.gpu` того же `nvidia-smi`);
 - `minecraft_active` — запущен ли процесс игры (застава GTR, решение 4);
@@ -80,19 +81,29 @@ def отвечает(адрес, путь="", таймаут=ТАЙМАУТ):
         return False, b""
 
 
+МОДЕЛЕЙ_МАКС = 32              # столько имён принимает doctor (`contextd.МОДЕЛЕЙ_МАКС`)
+
+
 def модели(адрес):
+    """(имена, полный): модели Ollama (`/api/tags`), по алфавиту, не больше
+    `МОДЕЛЕЙ_МАКС`. `полный` — Ollama ответила списком, и ни одно имя не
+    отброшено (длиннее 80 знаков, непечатное) и не обрезано: только по такому
+    списку doctor вправе сказать «модели нет» (Т7.1). Не ответила или
+    ответила не так — `([], False)`: «не знаю», а не «пусто»."""
     ок, тело = отвечает(адрес, "/api/tags")
     if not ок:
-        return []
+        return [], False
     try:
         список = json.loads(тело or b"{}").get("models")
     except (ValueError, AttributeError):
-        return []
+        return [], False
     if not isinstance(список, list):
-        return []
-    return sorted({m["name"] for m in список
-                   if isinstance(m, dict) and isinstance(m.get("name"), str)
-                   and 0 < len(m["name"]) <= 80 and m["name"].isprintable()})[:32]
+        return [], False
+    годные = [m["name"] for m in список
+              if isinstance(m, dict) and isinstance(m.get("name"), str)
+              and 0 < len(m["name"]) <= 80 and m["name"].isprintable()]
+    имена = sorted(set(годные))
+    return имена[:МОДЕЛЕЙ_МАКС], len(годные) == len(список) and len(имена) <= МОДЕЛЕЙ_МАКС
 
 
 def видеокарта(запуск=subprocess.run, есть=shutil.which):
@@ -161,7 +172,7 @@ def собрать(env=None, имена=None):
         ок, _ = отвечает(env["MARA_NODE_LLM_URL"])
         if ок:
             cap.append("llm")
-            out["models"] = модели(env["MARA_NODE_LLM_URL"])
+            out["models"], out["models_complete"] = модели(env["MARA_NODE_LLM_URL"])
     свободно, всего, загрузка = видеокарта()
     if свободно is not None:
         out["vram_free_mb"], out["vram_total_mb"] = свободно, всего

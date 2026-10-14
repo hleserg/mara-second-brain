@@ -36,7 +36,7 @@ OLLAMA = os.environ.get("MARA_LLM_URL") or None
 # Т0.9 п. 5: тот же общий секрет, что у `call_asr`, — текст расшифровки уходит
 # только узлу, доказавшему секрет, а «обязательства» без подписи не принимаются
 СЕКРЕТ_УЗЛА = os.environ.get("MARA_NODE_SECRET") or None
-MODEL = os.environ.get("MARA_EXTRACT_MODEL", "qwen3.5:9b")
+MODEL = os.environ.get("MARA_EXTRACT_MODEL", vault_common.МОДЕЛЬ_ИЗВЛЕЧЕНИЯ)
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))
 REVIEW_MIN = float(os.environ.get("MARA_REVIEW_MIN", 0.60))
 HTTP_TIMEOUT = 900
