@@ -53,6 +53,9 @@ class Api(private val base: String, private val token: String) {
     /** Сообщения — тем же путём, что Telegram с doctor'а. */
     fun postMessage(body: JSONObject) = post("/v1/ingest/message", body)
 
+    /** Здоровье захвата (Т4.3): состояние §8.5 и открытая тревога. */
+    fun postHealth(body: JSONObject) = post("/v1/device/health", body)
+
     private fun post(path: String, body: JSONObject): ServerReply {
         val c = соединение(path, "POST") ?: return ServerReply(0)
         return try {

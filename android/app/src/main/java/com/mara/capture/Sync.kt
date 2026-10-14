@@ -50,6 +50,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             пауза = прогон(ctx, q, api, журнал, потом, s)
         }
         сообщения(ctx, q, api, s, System.currentTimeMillis())
+        здоровье(ctx, api, s)
         s.lastContactMs = System.currentTimeMillis()
         // Сетевые повторы размечены в очереди, и ради них Result.retry()
         // не нужен. Нужен он ради 503: сервер просит подождать, а следующая
@@ -197,6 +198,24 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             val r = api.postMessage(JSONObject(m.body))
             q.saveMessage(m.copy(state = MessageFlow.next(r), attempts = m.attempts + 1), ошибка(r), now)
             if (r.code == 0) break   // сеть легла — не долбим
+        }
+    }
+
+    /**
+     * Здоровье захвата — серверу (Т4.3, ТЗ §8.4 п.5): последний вердикт
+     * `HealthWorker`, а не новый прогон — проверку ведёт он, сверке только
+     * донести. Раз в сверку: четверть часа и после отбоя. Отчёт — состояние,
+     * а не событие: не дошёл — дойдёт следующий, поэтому ни очереди, ни
+     * повторов. Проверки ещё не было — слать нечего. Бросок отсюда не должен
+     * уронить сверку, которая уже доставила записи и сообщения.
+     */
+    private fun здоровье(ctx: Context, api: Api, s: Settings) {
+        if (s.healthAtMs == 0L || s.healthState.isEmpty()) return
+        runCatching {
+            api.postHealth(HealthJson.build(s.healthState, s.healthBroken, s.healthReason,
+                s.alertCallMs, s.alertCount, s.alertClosedCallMs, s.alertClosedAs,
+                Рекордеры.вЗдоровье(Device.рекордеры(ctx)).map { it.id }, s.healthAtMs,
+                System.currentTimeMillis()))
         }
     }
 

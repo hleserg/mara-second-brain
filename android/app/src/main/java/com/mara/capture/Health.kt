@@ -122,6 +122,8 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             val о = Здоровье.оценить(п)
             for (е in Здоровье.события(о, s.alertCallMs, п)) when (е) {
                 Здоровье.Событие.ВОССТАНОВЛЕНО -> {
+                    s.alertClosedCallMs = s.alertCallMs
+                    s.alertClosedAs = "recovered"
                     s.alertCallMs = 0L
                     s.alertRecoveredMs = п.сейчас
                     снять(ctx, ТРЕВОГА)
@@ -129,6 +131,8 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 // звонок ушёл из недельного журнала: записи так и нет, но
                 // проверять больше нечего — закрыть, не называя восстановлением
                 Здоровье.Событие.ИСТЕКЛА -> {
+                    s.alertClosedCallMs = s.alertCallMs
+                    s.alertClosedAs = "expired"
                     s.alertCallMs = 0L
                     снять(ctx, ТРЕВОГА)
                 }
@@ -146,7 +150,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             if (s.alertCallMs != 0L) уведомить(ctx, ТРЕВОГА, "Звонок был, записи нет",
                 if (о.тревога == s.alertCallMs) о.причина else "записи за звонком так и нет")
             // сломанное разрешение или папка — своё уведомление, пока сломано
-            if (о.состояние == Состояние.unhealthy && о.тревога == null)
+            if (Здоровье.сломан(о))
                 уведомить(ctx, СЛОМАНО, "Захват сломан", о.причина)
             else снять(ctx, СЛОМАНО)
             // §8.6 п.3: reboot-unsafe рекордер (ACR Phone + APH) и ни одного
@@ -156,6 +160,7 @@ class HealthWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             if (контроль != null) уведомить(ctx, КОНТРОЛЬ, "Нужен контрольный звонок", контроль)
             else снять(ctx, КОНТРОЛЬ)
             s.healthState = о.состояние.name
+            s.healthBroken = Здоровье.сломан(о)
             s.healthReason = о.причина
             s.healthAtMs = п.сейчас
             о

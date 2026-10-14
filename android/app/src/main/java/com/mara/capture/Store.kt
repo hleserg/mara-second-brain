@@ -85,6 +85,14 @@ class Settings(ctx: Context) {
         get() = prefs.getLong("health_at", 0)
         set(v) = prefs.edit().putLong("health_at", v).apply()
 
+    /** Вердикт — «Захват сломан» (`Здоровье.сломан`): разрешение или папка,
+     *  а не звонок без записи. Сервер судит о поломке по нему, а не по
+     *  открытой тревоге: тревога по старому звонку и отозванное разрешение
+     *  бывают разом (Т4.3). */
+    var healthBroken: Boolean
+        get() = prefs.getBoolean("health_broken", false)
+        set(v) = prefs.edit().putBoolean("health_broken", v).apply()
+
     /** Открытая тревога «звонок был, записи нет»: `startMs` звонка; 0 — нет.
      *  Ключ дедупа §8.4 п.4: один звонок — одна тревога. */
     var alertCallMs: Long
@@ -99,6 +107,18 @@ class Settings(ctx: Context) {
     var alertRecoveredMs: Long
         get() = prefs.getLong("alert_recovered", 0)
         set(v) = prefs.edit().putLong("alert_recovered", v).apply()
+
+    /** Чем закрылась последняя тревога (Т4.3): её звонок и `recovered` —
+     *  запись появилась, или `expired` — звонок ушёл из недельного журнала.
+     *  Сервер закрывает свою копию тем же исходом (§8.4 п.7); без этого он
+     *  знал бы только, что тревога пропала. */
+    var alertClosedCallMs: Long
+        get() = prefs.getLong("alert_closed_call", 0)
+        set(v) = prefs.edit().putLong("alert_closed_call", v).apply()
+
+    var alertClosedAs: String
+        get() = prefs.getString("alert_closed_as", "") ?: ""
+        set(v) = prefs.edit().putString("alert_closed_as", v).apply()
 
     /** Начало наблюдения за здоровьем: первый прогон `HealthWorker`. Звонки
      *  до него — до установки приложения, за них тревоги нет. */

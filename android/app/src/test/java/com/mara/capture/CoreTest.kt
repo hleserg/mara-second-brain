@@ -263,6 +263,26 @@ class CoreTest {
     }
 
     @Test
+    fun `отчёт о здоровье совпадает с общим фиксом контракта`() {
+        // Т4.3: тот же фикс читает `tests/test_device_health.py` — поле,
+        // которое сервер выбросил бы, разошлось бы здесь, а не молча
+        val ждём = JSONObject(fixture("device-health.json").readText())
+        val есть = HealthJson.build("unhealthy", false, "звонок был, записи нет",
+            1_760_000_000_000L, 1, 0L, "", listOf("acr_phone_aph", "acr_phone_aph"),
+            1_760_000_900_000L, 1_760_000_960_000L)
+        assertEquals(canon(ждём), canon(есть))
+    }
+
+    @Test
+    fun `причина отчёта — одна строка не длиннее предела сервера`() {
+        val j = HealthJson.build("degraded", false, "а\nб\tв" + "г".repeat(400), 0L, 0, 0L, "",
+            emptyList(), 1L, 2L)
+        val причина = j.getString("reason")
+        assertEquals(HealthJson.ПРИЧИНА_МАКС, причина.length)
+        assertTrue(причина.startsWith("а б в"))
+    }
+
+    @Test
     fun `ключом события служит хеш содержимого, а не имя файла`() {
         val переименован = файл.copy(name = "совсем другое имя.m4a")
         val a = EventJson.build(файл, звонок, ША, "m4a", null, мск).getString("source_id")
@@ -997,6 +1017,18 @@ class CoreTest {
         assertEquals(Состояние.unhealthy, Здоровье.оценить(здоров.copy(папкаЧитается = false)).состояние)
         assertEquals("папка не выбрана — медиатека, это норма",
             Состояние.healthy, Здоровье.оценить(здоров.copy(папкаЧитается = null)).состояние)
+    }
+
+    @Test
+    fun `захват сломан — разрешение или папка, а не звонок без записи`() {
+        // `broken` в отчёте серверу (Т4.3) и уведомление «Захват сломан»
+        val здоров = приметы(звонки = listOf(звонок), записи = зап(звонок.endMs))
+        assertTrue(Здоровье.сломан(Здоровье.оценить(здоров.copy(разрешенийНет = listOf("READ_CALL_LOG")))))
+        assertTrue(Здоровье.сломан(Здоровье.оценить(здоров.copy(папкаЧитается = false))))
+        assertFalse("тревога по звонку — не поломка",
+            Здоровье.сломан(Оценка(Состояние.unhealthy, "звонок был, записи нет", тревога = 1L)))
+        assertFalse(Здоровье.сломан(Оценка(Состояние.degraded, "журнал звонков не прочитался")))
+        assertFalse(Здоровье.сломан(Здоровье.оценить(здоров)))
     }
 
     @Test
