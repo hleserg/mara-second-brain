@@ -47,7 +47,7 @@ bind. Но из локалки он виден, и это осознанный �
 это не вид, а дозагрузка к уже принятому событию, и телефону в список пишется
 `call`.
 """
-import os, sys, io, re, json, time, socket, hashlib, secrets, argparse, math
+import os, sys, io, re, json, time, glob, socket, hashlib, secrets, argparse, math
 import unicodedata
 import threading, subprocess, sqlite3
 from datetime import datetime, timedelta
@@ -615,6 +615,49 @@ def metrics(con, root=None, vault=None):
             с = {}
         return age_of(с.get("heartbeat_at")) if isinstance(с, dict) else -1
     сердца = [(у, сердце_возраст(у)) for у in тяжёлые]
+    # §15.1 «compute utilization» (Т9.1): из свежего сердцебиения узла
+    # (Т7.2), одного на узел — поля одного снимка; −1 — свежего нет или узел
+    # поле не прислал (VRAM и загрузка — без `nvidia-smi`). Память — в байтах,
+    # как принято у Prometheus; загрузка — проценты GPU (`utilization.gpu`);
+    # `accept_jobs` — 1/0: пауза руками видна числом
+    def из_сердца(с, поле, множитель=1):
+        v = с.get(поле)
+        if isinstance(v, bool):
+            return int(v)
+        return v * множитель if isinstance(v, (int, float)) else -1
+    загрузка = []
+    for у in тяжёлые:
+        с = сердцебиение_узла(con, у) or {}
+        загрузка += [(имя, у, из_сердца(с, поле, к)) for имя, поле, к in (
+            ("mara_node_vram_free_bytes", "vram_free_mb", 1 << 20),
+            ("mara_node_vram_total_bytes", "vram_total_mb", 1 << 20),
+            ("mara_node_load", "load", 1), ("mara_node_accepting_jobs", "accept_jobs", 1))]
+    # §15.1 «backup/restore verification» (Т9.1): когда на каждый носитель
+    # последний раз лёг архив, сверенный чтением (`core-backup.отметка`),
+    # когда учение последний раз его развернуло (`отметить_учение`) и
+    # когда лёг частый снимок реестра; −1 — ни разу. Носитель, ни разу не
+    # принявший архив, ряда не даёт вовсе: списка носителей демон не знает
+    # (`MARA_CORE_TARGETS` живёт в crontab), знает только отметку; снятый
+    # носитель остаётся в ней, и его ряд стареет — это видно, а не прячется.
+    # Кривая отметка (`NaN`, огромное число, порча) — −1, а не падение
+    # обработчика: `/metrics` скребут раз в минуту
+    def возраст_эпохи(t):
+        if not (isinstance(t, (int, float)) and not isinstance(t, bool)):
+            return -1
+        try:
+            return max(0, int(time.time() - t))
+        except (OverflowError, ValueError):
+            return -1
+    носители = sorted((t, возраст_эпохи(v)) for t, v in mi.отметка(mi.ОТМЕТКА_НОСИТЕЛЕЙ).items()
+                      if t.isprintable())
+    учение = возраст_эпохи(mi.отметка(mi.ОТМЕТКА_УЧЕНИЯ).get("at"))
+    снимки_реестра = []
+    for п in glob.glob(os.path.join(mi.снимки(root), "contextd-*.db")):
+        try:
+            снимки_реестра.append(os.path.getmtime(п))
+        except OSError:
+            pass                # висячая ссылка, ротация между `glob` и `stat`
+    снимок = возраст_эпохи(max(снимки_реестра)) if снимки_реестра else -1
     # Здоровье захвата (Т4.3) — по имени телефона, как и строки
     # `provider_health`, и только у имён с живым токеном: отозванный телефон
     # из серий уходит. Возраст — проверки, а не отчёта: свежесть отчёта —
@@ -746,6 +789,10 @@ def metrics(con, root=None, vault=None):
         *[('mara_jobs_waiting_node{node="%s"}' % метка(у), n) for у, n in ждут_узел],
         *[('mara_node_last_seen_seconds{node="%s"}' % метка(у), a) for у, a in узлы],
         *[('mara_node_heartbeat_seconds{node="%s"}' % метка(у), a) for у, a in сердца],
+        *[('%s{node="%s"}' % (имя, метка(у)), v) for имя, у, v in загрузка],
+        *[('mara_backup_target_age_seconds{target="%s"}' % метка(t), a) for t, a in носители],
+        ("mara_backup_drill_age_seconds", учение),
+        ("mara_registry_snapshot_age_seconds", снимок),
         # Семантика (хвост #39, Т3.1): «записей обещано, но тела ещё нет».
         # Считаются события в `new` с объявленным `blob_sha256` — телефон
         # прислал событие звонка и заявил хеш, а `/v1/ingest/audio` до

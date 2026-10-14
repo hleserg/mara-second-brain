@@ -124,9 +124,14 @@ class Прогон(unittest.TestCase):
         self.боевая_отметка = mi.ОТМЕТКА_НОСИТЕЛЕЙ
         self.отметка = os.path.join(self.tmp, "state", "core-targets.json")
         mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.отметка
+        # и отметка учения (Т9.1): удавшееся учение пишет её туда же
+        self.боевое_учение = mi.ОТМЕТКА_УЧЕНИЯ
+        self.учение = os.path.join(self.tmp, "state", "core-drill.json")
+        mi.ОТМЕТКА_УЧЕНИЯ = self.учение
 
     def tearDown(self):
         mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.боевая_отметка
+        mi.ОТМЕТКА_УЧЕНИЯ = self.боевое_учение
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
@@ -183,6 +188,8 @@ class Прогон(unittest.TestCase):
         # носитель, на который не легло ничего, обязан в ней отсутствовать.
         self.assertEqual(list(json.load(open(self.отметка, encoding="utf-8"))),
                          [цель])
+        # учение прошло — отметка учения на носителе учения (Т9.1, §15.1)
+        self.assertEqual(json.load(open(self.учение, encoding="utf-8"))["target"], цель)
         # Права ставятся временному файлу, до переименования: если сверка
         # переедет, легко потерять и chmod.
         лежит = os.path.join(цель, r["архив"])

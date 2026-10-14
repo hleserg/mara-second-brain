@@ -1373,14 +1373,10 @@ def база_цела(con, root):
 
 
 def _отмечено(путь):
-    """Когда бэкап в последний раз реально писал на каждый носитель.
-    Пишет файл `core-backup.py`, сверка только читает."""
-    try:
-        with open(путь, encoding="utf-8") as fh:
-            d = json.load(fh)
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    """Когда бэкап в последний раз реально писал на каждый носитель (или
+    учение прошло). Пишет файл `core-backup.py`, сверка только читает —
+    тем же `mi.отметка`, что и `/metrics`."""
+    return mi.отметка(путь)
 
 
 def бэкап_ядра(targets=None, days=БЭКАП_СУТКИ, root=None):

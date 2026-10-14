@@ -1776,12 +1776,23 @@ Gmail в той части, где не нужен его браузер. **Ге
   (error, `/healthz` на `MARA_CONTEXT_URL`, из крона, первой). Тесты
   `tests/test_reconcile_alerts.py`. Спека —
   `docs/superpowers/specs/2026-09-02-reconcile-metrics-design.md`.
-  Открыто: бэкап и проверка восстановления как метрики (сейчас — находки
-  сверки `бэкап`/`снимок`), загрузка вычислителей (Т7); gated sensitive
-  mode для логов. Закрыто после этого хода: тревоги на счётчики в памяти
-  демона — #96 (2026-10-14, `отказы-растут`, `демон-падает`,
-  `база-занята`); рекордер и переходы его тревоги — Т4.3 (2026-10-14,
-  `mara_capture_state`, `mara_recording_missing_total`).
+  Открыто: gated sensitive mode для логов. Закрыто после этого хода:
+  тревоги на счётчики в памяти демона — #96 (2026-10-14, `отказы-растут`,
+  `демон-падает`, `база-занята`); рекордер и переходы его тревоги — Т4.3
+  (2026-10-14, `mara_capture_state`, `mara_recording_missing_total`).
+  *Ход 2026-10-14, остаток §15.1:* «compute utilization» — из свежего
+  сердцебиения узла (Т7.2): `mara_node_vram_free_mb`,
+  `mara_node_vram_total_mb`, `mara_node_load`, `mara_node_accepting_jobs`
+  (`{node}`, −1 — свежего сердцебиения нет или поле не прислано);
+  «backup/restore verification» — `mara_backup_target_age_seconds{target}`
+  (когда на носитель последний раз лёг архив, сверенный чтением, — та же
+  отметка `core-targets.json`, что у сверки), `mara_backup_drill_age_seconds`
+  (новая отметка `mi.ОТМЕТКА_УЧЕНИЯ`, `core-drill.json`: `core-backup`
+  пишет её только после удавшегося учения, сбой записи прогон не роняет) и
+  `mara_registry_snapshot_age_seconds` (свежайший частый снимок реестра);
+  −1 — ни разу. Тревоги по ним — находки сверки `бэкап` и `снимок`, как и
+  были; метрики — для Control Plane. Тесты: `tests/test_metrics_tail.py`,
+  отметка учения в полном прогоне — `tests/test_backup_mount.py`.
 - [x] **Т9.2 Три недостающих ADR: 0004, 0010, 0011.** §21 требует 12,
   есть 9. Размер M. *Сделано 2026-10-05:* `0004-evidence-provenance`,
   `0010-compute-scheduling`, `0011-widget-extension-boundary`, статус
