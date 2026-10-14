@@ -1,10 +1,14 @@
 {
   "state": "unhealthy",
+  "broken": false,
   "reason": "звонок был, записи нет",
   "alert_call_ms": 1760000000000,
   "alerts_total": 1,
   "closed_call_ms": 0,
   "closed_as": "",
-  "recorders": ["acr_phone_aph"],
-  "checked_at_ms": 1760000900000
+  "recorders": [
+    "acr_phone_aph"
+  ],
+  "checked_at_ms": 1760000900000,
+  "sent_at_ms": 1760000960000
 }

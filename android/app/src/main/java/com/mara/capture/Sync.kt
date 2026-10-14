@@ -212,9 +212,10 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     private fun здоровье(ctx: Context, api: Api, s: Settings) {
         if (s.healthAtMs == 0L || s.healthState.isEmpty()) return
         runCatching {
-            api.postHealth(HealthJson.build(s.healthState, s.healthReason, s.alertCallMs,
-                s.alertCount, s.alertClosedCallMs, s.alertClosedAs,
-                Рекордеры.вЗдоровье(Device.рекордеры(ctx)).map { it.id }, s.healthAtMs))
+            api.postHealth(HealthJson.build(s.healthState, s.healthBroken, s.healthReason,
+                s.alertCallMs, s.alertCount, s.alertClosedCallMs, s.alertClosedAs,
+                Рекордеры.вЗдоровье(Device.рекордеры(ctx)).map { it.id }, s.healthAtMs,
+                System.currentTimeMillis()))
         }
     }
 

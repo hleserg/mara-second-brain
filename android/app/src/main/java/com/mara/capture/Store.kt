@@ -85,6 +85,14 @@ class Settings(ctx: Context) {
         get() = prefs.getLong("health_at", 0)
         set(v) = prefs.edit().putLong("health_at", v).apply()
 
+    /** Вердикт — «Захват сломан» (`Здоровье.сломан`): разрешение или папка,
+     *  а не звонок без записи. Сервер судит о поломке по нему, а не по
+     *  открытой тревоге: тревога по старому звонку и отозванное разрешение
+     *  бывают разом (Т4.3). */
+    var healthBroken: Boolean
+        get() = prefs.getBoolean("health_broken", false)
+        set(v) = prefs.edit().putBoolean("health_broken", v).apply()
+
     /** Открытая тревога «звонок был, записи нет»: `startMs` звонка; 0 — нет.
      *  Ключ дедупа §8.4 п.4: один звонок — одна тревога. */
     var alertCallMs: Long
