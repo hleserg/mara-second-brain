@@ -91,7 +91,7 @@ def payload(raw_path, kind="distill"):
         return open(raw_path, encoding="utf-8", errors="replace").read()[:MAX_CHARS]
     parts, total = [], 0
     for role, text in messages(raw_path):
-        who = "Сергей" if role == "user" else "Ассистент"
+        who = (vault_common.имя_владельца() or "Владелец") if role == "user" else "Ассистент"
         piece = "## %s\n%s\n" % (who, text.strip())
         if total + len(piece) > MAX_CHARS:
             parts.append("\n[…сессия обрезана по объёму…]\n"); break

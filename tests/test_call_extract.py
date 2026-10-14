@@ -17,7 +17,7 @@ SPAN = [{"segment": "s0001"}]
 class Правила(unittest.TestCase):
     def test_явная_просьба_становится_задачей(self):
         raw = {"requests": [{"action": "прислать смету", "requester": "Анна",
-                             "owner": "sergey", "explicit": True, "confidence": 0.93,
+                             "owner": "owner", "explicit": True, "confidence": 0.93,
                              "evidence": SPAN}]}
         out = ce.normalize(raw, OCC, СЕГМЕНТЫ)
         self.assertEqual(out["requests"][0]["disposition"], "task")
@@ -40,7 +40,7 @@ class Правила(unittest.TestCase):
         self.assertEqual(ce.normalize(raw, OCC, СЕГМЕНТЫ)["requests"], [])
 
     def test_явный_дедлайн_парсится(self):
-        raw = {"commitments": [{"action": "смета", "owner": "sergey", "confidence": 0.9,
+        raw = {"commitments": [{"action": "смета", "owner": "owner", "confidence": 0.9,
                                 "deadline_phrase": "до пятницы", "explicit": True,
                                 "evidence": SPAN}]}
         out = ce.normalize(raw, OCC, СЕГМЕНТЫ)
@@ -359,6 +359,7 @@ class Шаг(unittest.TestCase):
                           self.mi.PIPELINE_VERSION))
         self.assertEqual(extr["config"], {"model": ce.MODEL, "options": ce.OPTIONS,
                                           "task_min": ce.TASK_MIN,
+                                          "owner_named": False,
                                           "review_min": ce.REVIEW_MIN,
                                           "schema_sha256": extr["config"]["schema_sha256"],
                                           # Т4.3: входы правила исхода — в каждой ревизии

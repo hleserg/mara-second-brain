@@ -938,7 +938,7 @@ OCC = "2026-09-02T14:05:00+03:00"     # среда
 class Правила(unittest.TestCase):
     def test_явная_просьба_становится_задачей(self):
         raw = {"requests": [{"action": "прислать смету", "requester": "Анна",
-                             "owner": "sergey", "explicit": True, "confidence": 0.93,
+                             "owner": "owner", "explicit": True, "confidence": 0.93,
                              "evidence": [{"start_ms": 0, "end_ms": 25000}]}]}
         out = ce.normalize(raw, OCC)
         self.assertEqual(out["requests"][0]["disposition"], "task")
@@ -956,7 +956,7 @@ class Правила(unittest.TestCase):
         self.assertEqual(ce.normalize(raw, OCC)["requests"], [])
 
     def test_явный_дедлайн_парсится(self):
-        raw = {"commitments": [{"action": "смета", "owner": "sergey", "confidence": 0.9,
+        raw = {"commitments": [{"action": "смета", "owner": "owner", "confidence": 0.9,
                                 "deadline_phrase": "до пятницы", "explicit": True,
                                 "evidence": [{"start_ms": 0, "end_ms": 1}]}]}
         out = ce.normalize(raw, OCC)

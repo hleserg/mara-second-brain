@@ -15,7 +15,7 @@ import call_project as cp
 import contextd
 
 ИЗВЛЕЧЕНИЕ = {"requests": [{"action": "прислать смету", "requester": "Анна",
-                            "owner": "sergey", "explicit": True, "confidence": 0.9,
+                            "owner": "owner", "explicit": True, "confidence": 0.9,
                             "due_at": "2026-09-04", "deadline_explicit": True,
                             "disposition": "task",
                             "evidence": [{"start_ms": 1000, "end_ms": 2000}]}],

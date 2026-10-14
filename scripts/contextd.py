@@ -23,7 +23,7 @@ bind. Но из локалки он виден, и это осознанный �
 Тела сообщений, транскрипты и токены не логируются никогда.
 
     python3 scripts/contextd.py --serve
-    python3 scripts/contextd.py --pair "телефон Серёги"
+    python3 scripts/contextd.py --pair "телефон владельца"
     python3 scripts/contextd.py --revoke dev_ab12...
     python3 scripts/contextd.py --scopes dev_ab12...
     python3 scripts/contextd.py --allow dev_ab12... call message
@@ -1126,7 +1126,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "подождать %d с" % (коррекций_в_час(), много.ждать)},
                     ещё={"Retry-After": str(много.ждать)}, поля=data)
             if kind == "correction" and not dup:
-                # синхронно, а не через очередь: Серёга ждёт ответа Мары, а не
+                # синхронно, а не через очередь: владелец ждёт ответа Мары, а не
                 # ночного крона. Писатель карточек один — call_project; свои
                 # транзакции у него внутри.
                 try:
@@ -1527,6 +1527,7 @@ def ingest_audio(con, root, event_id, поток, n=None):
 def manifest(con, root, event_id):
     """Неизменяемый манифест звонка (ТЗ §7). Вложенность допустима: это JSON,
     а не фронтматтер, который в этом репо разбирается регэкспами."""
+    import vault_common
     e = mi.event_row(con, event_id)
     b = con.execute("select * from blobs where sha256=?", (e["blob_sha256"],)).fetchone()
     p = e["payload"]
@@ -1535,7 +1536,8 @@ def manifest(con, root, event_id):
         "source_id": e["source_id"],
         "started_at": e["occurred"], "ended_at": e["ended"],
         "direction": p.get("direction", "unknown"),
-        "participants": ["person:sergey", "person:" + (p.get("contact_name") or "unknown")],
+        "participants": ["person:" + vault_common.владелец(),
+                         "person:" + (p.get("contact_name") or "unknown")],
         "classification": e["classification"], "sensitive": True, "cloud_allowed": False,
         "recording": {"producer": p.get("producer", "unknown"),
                       "audio_sha256": e["blob_sha256"],
