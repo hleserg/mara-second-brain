@@ -18,7 +18,8 @@ import node_agent
 
 
 def сердце(**kw):
-    d = {"capabilities": ["asr", "llm"], "models": ["qwen3.5:9b"], "accept_jobs": True,
+    d = {"capabilities": ["asr", "llm"], "checked": ["asr", "llm"], "models": ["qwen3.5:9b"],
+         "accept_jobs": True,
          "minecraft_active": False, "interval_s": 60}
     d.update(kw)
     return d
@@ -29,7 +30,8 @@ class Разбор(unittest.TestCase):
         с, беда = contextd.разобрать_сердцебиение({"capabilities": ["llm", "asr", "asr"],
                                                    "лишнее": "x" * 10 ** 5})
         self.assertIsNone(беда)
-        self.assertEqual(с, {"capabilities": ["asr", "llm"], "models": [], "versions": {},
+        self.assertEqual(с, {"capabilities": ["asr", "llm"], "checked": [], "models": [],
+                             "versions": {},
                              "minecraft_active": False, "accept_jobs": True,
                              "interval_s": contextd.СЕРДЦЕ_ИНТЕРВАЛ_С})
 
@@ -37,7 +39,8 @@ class Разбор(unittest.TestCase):
         for плохо in ({"capabilities": "asr"}, {"capabilities": ["ASR"]},
                       {"models": ["x" * 81]}, {"vram_free_mb": -1}, {"vram_free_mb": True},
                       {"load": "high"}, {"accept_jobs": "да"}, {"interval_s": 5},
-                      {"versions": {"agent": 1}}, {"models": ["a\nb"]}):
+                      {"versions": {"agent": 1}}, {"models": ["a\nb"]},
+                      {"checked": "asr"}):
             with self.subTest(плохо=плохо):
                 с, беда = contextd.разобрать_сердцебиение(плохо)
                 self.assertIsNone(с)
@@ -106,6 +109,15 @@ class Причины(_База):
         self.assertEqual(contextd.недоступные(self.con),
                          {"asr": "node_no_capability:bigpc", "extract": None})
 
+    def test_непроверенное_не_держит(self):
+        """Ревью Т7.2, P2: агенту не задали адрес STT — он про него молчит, и
+        «нет возможности» не ставится: судит проба doctor, как без агента."""
+        self.отчитаться(capabilities=[], checked=["llm"])
+        self.assertEqual(contextd.недоступные(self.con),
+                         {"asr": None, "extract": "node_no_capability:bigpc"})
+        self.отчитаться(capabilities=[], checked=[])
+        self.assertEqual(contextd.недоступные(self.con), {"asr": None, "extract": None})
+
     def test_всё_хорошо_не_отменяет_пробу(self):
         """Узел сказал «беру», но с doctor адрес не отвечает — ждём, как
         молчащий: дорогу к сервису проверяет doctor."""
@@ -133,6 +145,26 @@ class Причины(_База):
         self.assertEqual(tuple(self.con.execute(
             "select state, attempts, queued_reason from jobs where id=?", (jid,)).fetchone()),
             ("ready", 0, "node_paused:bigpc"))
+
+
+class ЖивойАгентНеМолодит(_База):
+    """Ревью Т7.2, P1: агент жив и отчитывается, а doctor до сервиса не
+    достаёт (адрес сменился, фаервол) — работы ждут `node_offline`, и
+    `узел-молчит` обязан сработать: сердцебиение `last_seen` не пишет."""
+
+    def test_узел_молчит_при_живом_агенте(self):
+        self.отчитаться()
+        self.assertIsNone(self.con.execute(
+            "select last_seen from compute_nodes where id='bigpc'").fetchone()[0])
+        eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",
+                                         "source_id": "p1", "payload": {}})
+        jid = mi.add_job(self.con, eid, "asr")
+        когда = (datetime.now(mi.TZ) - timedelta(hours=30)).isoformat(timespec="seconds")
+        self.con.execute("update jobs set queued_reason='node_offline:bigpc', created=?, "
+                         "next_at=0 where id=?", (когда, jid))
+        contextd.отметить_узел(self.con, contextd.ВОРКЕР, "core")
+        н, = cr.узел_молчит(self.con, hours=24)
+        self.assertEqual((н["check"], н["node"]), ("узел-молчит", "bigpc"))
 
 
 class Сверка(_База):
@@ -172,6 +204,34 @@ class Метрики(_База):
         строки = contextd.metrics(self.con, self.dir, None).splitlines()
         v = [l for l in строки if l.startswith('mara_node_heartbeat_seconds{node="bigpc"}')]
         self.assertTrue(v and 0 <= int(v[0].split()[1]) <= 5, v)
+
+
+class Агент(unittest.TestCase):
+    def test_tasklist_в_866(self):
+        """Ревью Т7.2, P2: русская Windows пишет `tasklist` в OEM-866 с
+        неразрывным пробелом 0xFF — агент читает байты и не падает."""
+        строка = '"javaw.exe","1234","Console","1","512 340 КБ"\r\n'.encode("cp866")
+        строка = строка.replace(b"512 340", b"512\xff340")
+
+        class Р:
+            stdout = строка
+        self.assertEqual(node_agent.процессы(lambda *a, **k: Р(), windows=True), {"javaw.exe"})
+
+        class Пусто:
+            stdout = None
+        self.assertEqual(node_agent.процессы(lambda *a, **k: Пусто(), windows=True), set())
+
+    def test_кривой_ответ_ollama(self):
+        with mock.patch.object(node_agent, "отвечает", lambda *a: (True, b'{"models": null}')):
+            self.assertEqual(node_agent.модели("http://x"), [])
+
+    def test_сбой_оборота_не_роняет(self):
+        with mock.patch.dict(os.environ, {"MARA_URL": "http://127.0.0.1:9",
+                                          "MARA_NODE_TOKEN": "t"}), \
+                mock.patch.object(node_agent, "собрать", side_effect=TypeError("x")), \
+                contextlib.redirect_stdout(io.StringIO()) as лог:
+            self.assertEqual(node_agent.main(["--once"]), 1)
+        self.assertIn("оборот не удался: TypeError", лог.getvalue())
 
 
 class _Ollama(BaseHTTPRequestHandler):
@@ -222,8 +282,22 @@ class Сеть(unittest.TestCase):
     def test_узел_по_токену(self):
         self.assertEqual(contextd.узел_устройства(self.con, self.узел), "bigpc")
         self.assertIsNone(contextd.узел_устройства(self.con, self.телефон))
+        for плохо in ("Big PC", contextd.ВОРКЕР):
+            with self.subTest(узел=плохо), self.assertRaises(ValueError):
+                contextd.pair_node(self.con, плохо)
         with self.assertRaises(ValueError):
-            contextd.pair_node(self.con, "Big PC")
+            contextd.pair(self.con, contextd.УЗЕЛ_ПРЕФИКС + "gtr")
+
+    def test_отозванный_и_без_heartbeat_и_чужая_строка(self):
+        dev, токен = contextd.pair_node(self.con, "gtr")
+        contextd.set_scopes(self.con, dev, ["call"])
+        self.assertEqual(self.запрос(contextd.ПУТЬ_СЕРДЦА, токен, сердце())[0], 403)
+        contextd.set_scopes(self.con, dev, ["heartbeat"])
+        self.con.execute("insert into compute_nodes(id, name, role) values('gtr_old', 'gtr', 'x')")
+        код, ответ = self.запрос(contextd.ПУТЬ_СЕРДЦА, токен, сердце())
+        self.assertEqual(код, 409, ответ)
+        contextd.revoke(self.con, dev)
+        self.assertEqual(self.запрос(contextd.ПУТЬ_СЕРДЦА, токен, сердце())[0], 401)
 
     def test_токен_узла_только_для_сердцебиения(self):
         код, ответ = self.запрос(contextd.ПУТЬ_СЕРДЦА, self.токен_узла, сердце())
@@ -243,8 +317,9 @@ class Сеть(unittest.TestCase):
         env = {"MARA_NODE_LLM_URL": "http://127.0.0.1:%d" % оллама.server_address[1],
                "MARA_NODE_INTERVAL": "30"}
         тело = node_agent.собрать(env=env, имена={"javaw.exe"})
-        self.assertEqual((тело["capabilities"], тело["models"], тело["minecraft_active"]),
-                         (["llm"], ["bge-m3", "qwen3.5:9b"], True))
+        self.assertEqual((тело["capabilities"], тело["checked"], тело["models"],
+                          тело["minecraft_active"]),
+                         (["llm"], ["llm"], ["bge-m3", "qwen3.5:9b"], True))
         self.assertEqual(node_agent.отправить(self.url, self.токен_узла, тело), 200)
         с = contextd.сердцебиение_узла(self.con, "bigpc")
         self.assertEqual((с["capabilities"], с["interval_s"], с["minecraft_active"]),

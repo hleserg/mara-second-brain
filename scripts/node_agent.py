@@ -37,7 +37,9 @@ Ollama чужие, и шаг ходит к ним с doctor напрямую. Э
 import argparse, json, os, shutil, subprocess, sys, time, urllib.error, urllib.request
 
 ИНТЕРВАЛ = 60
-ТАЙМАУТ = 3
+# Подольше, чем у пробы doctor: «сервиса нет» от агента держит работы, и
+# STT, занятый куском doctor-а, не должен сойти за лёгший
+ТАЙМАУТ = 10
 # javaw — Java-версия игры (лаунчер запускает её этим процессом), остальные
 # — магазинная версия и лаунчер
 ИГРА = ("javaw.exe", "Minecraft.Windows.exe", "MinecraftLauncher.exe")
@@ -66,11 +68,14 @@ def модели(адрес):
     if not ок:
         return []
     try:
-        return sorted({m["name"] for m in json.loads(тело or b"{}").get("models", [])
-                       if isinstance(m, dict) and isinstance(m.get("name"), str)
-                       and 0 < len(m["name"]) <= 80})[:32]
+        список = json.loads(тело or b"{}").get("models")
     except (ValueError, AttributeError):
         return []
+    if not isinstance(список, list):
+        return []
+    return sorted({m["name"] for m in список
+                   if isinstance(m, dict) and isinstance(m.get("name"), str)
+                   and 0 < len(m["name"]) <= 80 and m["name"].isprintable()})[:32]
 
 
 def видеопамять(запуск=subprocess.run):
@@ -87,17 +92,25 @@ def видеопамять(запуск=subprocess.run):
         return None, None
 
 
-def процессы(запуск=subprocess.run):
-    """Имена запущенных процессов, в нижнем регистре."""
+def процессы(запуск=subprocess.run, windows=None):
+    """Имена запущенных процессов, в нижнем регистре.
+
+    Вывод читается байтами: `tasklist` на русской Windows пишет в OEM-866
+    (колонка памяти с «КБ» и неразрывным пробелом), и декодирование
+    локальной кодировкой, а в режиме UTF-8 тем более, роняло агента на
+    первом же сердцебиении. Имена процессов — латиница, им замены
+    непонятных байт не вредят."""
+    windows = os.name == "nt" if windows is None else windows
     try:
-        if os.name == "nt":
-            r = запуск(["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
-                       text=True, timeout=10)
+        if windows:
+            r = запуск(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, timeout=10)
+            текст = (r.stdout or b"").decode("ascii", "replace")
             return {l.split('","')[0].strip('"').lower()
-                    for l in r.stdout.splitlines() if l.strip()}
-        r = запуск(["ps", "-eo", "comm="], capture_output=True, text=True, timeout=10)
-        return {l.strip().lower() for l in r.stdout.splitlines() if l.strip()}
-    except (OSError, subprocess.SubprocessError):
+                    for l in текст.splitlines() if l.strip()}
+        r = запуск(["ps", "-eo", "comm="], capture_output=True, timeout=10)
+        текст = (r.stdout or b"").decode("utf-8", "replace")
+        return {l.strip().lower() for l in текст.splitlines() if l.strip()}
+    except (OSError, subprocess.SubprocessError, ValueError):
         return set()
 
 
@@ -111,10 +124,15 @@ def игра_идёт(имена=None, игра=None):
 def собрать(env=None, имена=None):
     """Тело сердцебиения."""
     env = os.environ if env is None else env
-    cap, out = [], {}
-    if env.get("MARA_NODE_ASR_URL") and отвечает(env["MARA_NODE_ASR_URL"])[0]:
-        cap.append("asr")
+    # `checked` — что агент проверял: про незаданный адрес он молчит, и
+    # doctor судит о таком сервисе по своей пробе, как без агента
+    cap, проверено, out = [], [], {}
+    if env.get("MARA_NODE_ASR_URL"):
+        проверено.append("asr")
+        if отвечает(env["MARA_NODE_ASR_URL"])[0]:
+            cap.append("asr")
     if env.get("MARA_NODE_LLM_URL"):
+        проверено.append("llm")
         ок, _ = отвечает(env["MARA_NODE_LLM_URL"])
         if ок:
             cap.append("llm")
@@ -122,7 +140,7 @@ def собрать(env=None, имена=None):
     свободно, всего = видеопамять()
     if свободно is not None:
         out["vram_free_mb"], out["vram_total_mb"] = свободно, всего
-    out.update(capabilities=cap, minecraft_active=игра_идёт(имена),
+    out.update(capabilities=cap, checked=проверено, minecraft_active=игра_идёт(имена),
                accept_jobs=env.get("MARA_NODE_ACCEPT", "1") != "0",
                interval_s=интервал(env),
                versions={"agent": "1", "python": "%d.%d" % sys.version_info[:2]})
@@ -169,15 +187,28 @@ def main(argv=None):
         лог("нужны MARA_URL и MARA_NODE_TOKEN (contextd.py --pair-node <узел>)")
         return 2
     while True:
-        тело = собрать()
-        код = отправить(url, token, тело)
-        лог("сердцебиение: %s, возможности %s, пауза %s, игра %s" % (
+        try:
+            тело = собрать()
+            код = отправить(url, token, тело)
+        except Exception as e:
+            # сбой одного оборота (чужой ответ на порту сервиса, обрыв
+            # посреди чтения) — не смерть агента: планировщик упавшего не
+            # поднимет, и doctor молча перестал бы видеть паузу
+            лог("оборот не удался: %s" % type(e).__name__)
+            if a.once:
+                return 1
+            time.sleep(интервал(os.environ))
+            continue
+        лог("сердцебиение: %s, возможности %s из проверенных %s, пауза %s, игра %s" % (
             код or "нет связи", ",".join(тело["capabilities"]) or "нет",
+            ",".join(тело["checked"]) or "нет",
             "нет" if тело["accept_jobs"] else "да",
             "да" if тело["minecraft_active"] else "нет"))
         if код in (401, 403):
             лог("токен не принят — перевыпустить: contextd.py --pair-node <узел>")
             return 1
+        if код == 409:
+            лог("doctor не принял: строка узла записана под другим id")
         if a.once:
             return 0 if код == 200 else 1
         time.sleep(тело["interval_s"])
@@ -190,7 +221,7 @@ def self_check():
     assert интервал({"MARA_NODE_INTERVAL": "5"}) == 10
     assert интервал({"MARA_NODE_INTERVAL": "мусор"}) == ИНТЕРВАЛ
     т = собрать(env={"MARA_NODE_ACCEPT": "0"}, имена=set())
-    assert т["capabilities"] == [] and т["accept_jobs"] is False
+    assert т["capabilities"] == [] and т["checked"] == [] and т["accept_jobs"] is False
     assert т["minecraft_active"] is False and т["interval_s"] == ИНТЕРВАЛ
     assert отвечает(None) == (False, b"")
     print("node_agent self-check: ок")
