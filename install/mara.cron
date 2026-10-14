@@ -55,6 +55,12 @@ MARA_CORE_SNAPSHOT_MAX_H=2.2
 0    8 * * *  /usr/bin/python3 @REPO@/scripts/contextd_reconcile.py --telegram >> @STATE@/reconcile.log 2>&1
 */10 * * * *  /usr/bin/python3 @REPO@/scripts/gmail_ingest.py --sync >> @STATE@/gmail-ingest.log 2>&1
 
+# Напоминание по сроку накануне (Т-У.2): завтрашние сроки — владельцу в
+# телеграм, тем же транспортом, что дайджест; пустой вечер — тишина. Время —
+# по часам doctor, «завтра» — по дню владельца (MARA_TZ_HOURS). Дубль за ту же
+# дату не уходит, так что ручной повтор безопасен.
+0    20 * * * /usr/bin/python3 @REPO@/scripts/due_reminder.py >> @STATE@/due-reminder.log 2>&1
+
 # --- сбор в волт ------------------------------------------------------------
 20   * * * *  @REPO@/scripts/sessions-backfill.sh >/dev/null
 25   * * * *  /usr/bin/python3 @REPO@/scripts/hermes-ingest.py >> @STATE@/hermes-ingest.log 2>&1
