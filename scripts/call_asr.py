@@ -18,11 +18,12 @@ Whisper на bigpc принимает не больше тридцати сек�
     python3 scripts/call_asr.py --event call_<uuid>
     python3 scripts/call_asr.py --self-check
 """
-import os, sys, json, argparse, subprocess, urllib.request
+import os, sys, json, argparse, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
+import node_agent
 import vault_common
 
 # Файл читаем на импорте, а не лениво: ниже из окружения берутся ручки
@@ -33,6 +34,10 @@ import vault_common
 vault_common.load_env()
 
 ASR_URL = os.environ.get("MARA_ASR_URL") or None
+# Т0.9 п. 5: общий секрет с узлом — запрос к STT подписан, аудио уходит только
+# узлу, доказавшему секрет, ответ без верной подписи не принимается
+# (`node_agent.к_узлу`, threat-model п. 9). Без секрета — как раньше, напрямую
+СЕКРЕТ_УЗЛА = os.environ.get("MARA_NODE_SECRET") or None
 WINDOW_MS = int(os.environ.get("MARA_ASR_WINDOW_MS", 25000))
 OVERLAP_MS = int(os.environ.get("MARA_ASR_OVERLAP_MS", 2000))
 HTTP_TIMEOUT = 300
@@ -92,11 +97,10 @@ def transcribe_spans(base_url, plan, cutter, движок=None):
     """
     segs = []
     for i, (a, b) in enumerate(plan, 1):
-        req = urllib.request.Request(base_url + "/transcribe", data=cutter(a, b),
-                                     method="POST")
-        req.add_header("Content-Type", "application/octet-stream")
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-            d = json.loads(r.read() or b"{}")
+        ответ = node_agent.к_узлу(base_url + "/transcribe", cutter(a, b),
+                                  "application/octet-stream", секрет=СЕКРЕТ_УЗЛА,
+                                  таймаут=HTTP_TIMEOUT)
+        d = json.loads(ответ or b"{}")
         if движок is not None:
             for k in ("engine", "model", "language"):
                 if d.get(k) and not движок.get(k):

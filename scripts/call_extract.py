@@ -15,13 +15,14 @@
     python3 scripts/call_extract.py --event call_<uuid>
     python3 scripts/call_extract.py --self-check
 """
-import os, sys, re, json, hashlib, argparse, urllib.request
+import os, sys, re, json, hashlib, argparse
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mara_ingest as mi
 import call_asr
+import node_agent
 import vault_common
 
 # Файл читаем на импорте, а не лениво: ниже из окружения берутся ручки
@@ -32,6 +33,9 @@ import vault_common
 vault_common.load_env()
 
 OLLAMA = os.environ.get("MARA_LLM_URL") or None
+# Т0.9 п. 5: тот же общий секрет, что у `call_asr`, — текст расшифровки уходит
+# только узлу, доказавшему секрет, а «обязательства» без подписи не принимаются
+СЕКРЕТ_УЗЛА = os.environ.get("MARA_NODE_SECRET") or None
 MODEL = os.environ.get("MARA_EXTRACT_MODEL", "qwen3.5:9b")
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))
 REVIEW_MIN = float(os.environ.get("MARA_REVIEW_MIN", 0.60))
@@ -338,11 +342,8 @@ def ask_model(text, base_url=None, model=None):
     }, ensure_ascii=False).encode("utf-8")
     адрес = base_url or OLLAMA or vault_common.нужен_адрес(
         "MARA_LLM_URL", "коробка с ollama")
-    req = urllib.request.Request(адрес + "/api/generate", data=body,
-                                 method="POST")
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-        d = json.loads(r.read())
+    d = json.loads(node_agent.к_узлу(адрес + "/api/generate", body, "application/json",
+                                     секрет=СЕКРЕТ_УЗЛА, таймаут=HTTP_TIMEOUT))
     return json.loads(strip_fence(d.get("response") or "{}"))
 
 
