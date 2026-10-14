@@ -49,7 +49,7 @@ doctor спрашивает `/mara/hello` со своим номером, и а�
     python node_agent.py --new-secret   # новый общий секрет для doctor и узла
     python node_agent.py --self-check
 """
-import argparse, hashlib, hmac, json, os, re, secrets, shutil, subprocess, sys
+import argparse, hashlib, hmac, http.client, json, os, re, secrets, shutil, subprocess, sys
 import threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -203,9 +203,19 @@ def отправить(url, token, тело):
 ОКНО_С = 300                  # терпимое расхождение часов doctor и узла
 ПРИВЕТ = "/mara/hello"
 ПРИВЕТ_С = 60                 # доказательство узла doctor помнит минуту
-ТЕЛО_МАКС = 64 << 20          # кусок ASR — около 800 КБ, запрос к модели — килобайты
-ПЕРЕСЫЛКА_С = 600             # дольше шага doctor не ждёт и сам (`HTTP_TIMEOUT`)
+ТЕЛО_МАКС = 8 << 20           # кусок ASR — около 800 КБ, запрос к модели — килобайты
+# Не короче самого долгого шага doctor: у `call_extract` ожидание модели —
+# 900 с (`HTTP_TIMEOUT`), и прокси не должен рвать генерацию раньше шага
+ПЕРЕСЫЛКА_С = 1200
+ЧТЕНИЕ_С = 60                 # тишина сокета, после которой соединение рвётся, как у contextd
+СОЕДИНЕНИЙ = 8                # одновременных; лишние закрываются сразу, без потока
 НОМЕР = re.compile(r"[0-9a-f]{32}\Z")
+ПОДПИСЬ = re.compile(r"[0-9a-f]{64}\Z")
+ЧИСЛО = re.compile(r"[0-9]{1,12}\Z")
+# Что прокси вообще пересылает — только то, чем ходят шаги doctor. Утёкший
+# секрет не открывает ни `/api/pull|create|delete` Ollama, ни голос маски на
+# той же службе, что STT
+РАЗРЕШЕНО = {("POST", "/transcribe"), ("POST", "/api/generate")}
 
 
 def _json(obj):
@@ -244,7 +254,24 @@ def подпись_привета(секрет, номер):
     return _подпись(секрет, "hello", номер)
 
 
-_доказано = {}                # база узла → monotonic последнего привета
+def _знак(заголовки):
+    """Подпись из заголовка — ровно 64 шестнадцатеричных знака, иначе пусто:
+    `compare_digest` на не-ASCII строке бросает `TypeError`, а не говорит
+    «не сошлось»."""
+    знак = заголовки.get("X-Mara-Sig") or ""
+    return знак if ПОДПИСЬ.match(знак) else ""
+
+
+class _БезПереходов(urllib.request.HTTPRedirectHandler):
+    """Редирект — не ответ узла: иначе посредник отправил бы привет к живому
+    bigpc дешевле, чем пересылкой."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_открыть = urllib.request.build_opener(_БезПереходов).open
+_доказано = {}                # база узла → monotonic последнего проверенного ответа
 
 
 def привет(база, секрет, таймаут=ТАЙМАУТ):
@@ -252,68 +279,135 @@ def привет(база, секрет, таймаут=ТАЙМАУТ):
     аудио или текст. Сеть упала — исключение сети, как и без подписи."""
     номер = secrets.token_hex(16)
     try:
-        with urllib.request.urlopen("%s%s?nonce=%s" % (база, ПРИВЕТ, номер),
-                                    timeout=таймаут) as r:
-            знак = r.headers.get("X-Mara-Sig") or ""
-    except urllib.error.HTTPError:
+        with _открыть("%s%s?nonce=%s" % (база, ПРИВЕТ, номер), timeout=таймаут) as r:
+            знак = _знак(r.headers)
+    except urllib.error.HTTPError as e:
+        e.close()
         знак = ""
     if not hmac.compare_digest(знак, подпись_привета(секрет, номер)):
-        raise ЧужойУзел("узел не подтвердил общий секрет — аудио и текст ему не отданы")
+        raise ЧужойУзел("узел не подтвердил общий секрет — аудио и текст ему не отданы "
+                        "(MARA_ASR_URL и MARA_LLM_URL — на прокси агента узла? "
+                        "секреты на doctor и узле совпадают?)")
+
+
+def _с_причиной(e):
+    """Отказ прокси с его причиной (401: время, подпись, повтор) — иначе в
+    `last_error` шага было бы голое «Unauthorized». Причина — печатные
+    знаки, не длиннее 200: тело пишет кто угодно на адресе узла."""
+    try:
+        причина = json.loads(e.read(1 << 16) or b"{}").get("error")
+    except (ValueError, AttributeError, OSError):
+        причина = None
+    finally:
+        e.close()
+    if not (isinstance(причина, str) and причина):
+        return e
+    причина = "".join(c for c in причина if c.isprintable())[:200]
+    return urllib.error.HTTPError(e.url, e.code, "%s — %s" % (e.msg, причина), e.hdrs, None)
 
 
 def к_узлу(url, тело, тип, секрет=None, таймаут=300):
     """POST шага doctor в сервис узла; тело ответа. Без секрета — как раньше,
     напрямую. С секретом — привет (раз в `ПРИВЕТ_С` на узел), подписанный
-    запрос и проверка подписи ответа: неверная — `ЧужойУзел`, ответ не
-    принят. Отказ сервиса (4xx/5xx) — `HTTPError`, как и без подписи."""
-    req = urllib.request.Request(url, data=тело, method="POST")
-    req.add_header("Content-Type", тип)
+    запрос без редиректов и проверка подписи ответа: неверная — `ЧужойУзел`,
+    ответ не принят. Доказательство узла живёт, только пока он отвечает
+    подписанным: любой другой исход — следующий запрос снова с привета.
+    Отказ сервиса (4xx/5xx) — `HTTPError`, как и без подписи, но с причиной."""
     if not секрет:
+        req = urllib.request.Request(url, data=тело, method="POST")
+        req.add_header("Content-Type", тип)
         with urllib.request.urlopen(req, timeout=таймаут) as r:
             return r.read()
     ч = urllib.parse.urlsplit(url)
     база = "%s://%s" % (ч.scheme, ч.netloc)
-    if time.monotonic() - _доказано.get(база, float("-inf")) > ПРИВЕТ_С:
-        привет(база, секрет)
+    # `http.server` сворачивает `//путь` в `/путь`: подписываем тот же, иначе
+    # хвостовая `/` в MARA_ASR_URL давала бы вечный 401
+    путь = "/" + ч.path.lstrip("/") + ("?" + ч.query if ч.query else "")
+    проверено = False
+    try:
+        if time.monotonic() - _доказано.get(база, float("-inf")) > ПРИВЕТ_С:
+            привет(база, секрет)
+            _доказано[база] = time.monotonic()
+        заголовки = подписать_запрос(секрет, "POST", путь, тело)
+        req = urllib.request.Request(база + путь, data=тело, method="POST")
+        req.add_header("Content-Type", тип)
+        for k, v in заголовки.items():
+            req.add_header(k, v)
+        try:
+            with _открыть(req, timeout=таймаут) as r:
+                ответ, код, знак = r.read(), r.status, _знак(r.headers)
+        except urllib.error.HTTPError as e:
+            raise _с_причиной(e)
+        if not hmac.compare_digest(знак, подпись_ответа(секрет, заголовки["X-Mara-Nonce"],
+                                                         код, ответ)):
+            raise ЧужойУзел("ответ узла без верной подписи — не принят")
+        проверено = True
         _доказано[база] = time.monotonic()
-    заголовки = подписать_запрос(секрет, "POST", ч.path + ("?" + ч.query if ч.query else ""),
-                                 тело)
-    for k, v in заголовки.items():
-        req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=таймаут) as r:
-        ответ, код, знак = r.read(), r.status, r.headers.get("X-Mara-Sig") or ""
-    if not hmac.compare_digest(знак, подпись_ответа(секрет, заголовки["X-Mara-Nonce"],
-                                                     код, ответ)):
-        _доказано.pop(база, None)
-        raise ЧужойУзел("ответ узла без верной подписи — не принят")
-    return ответ
+        return ответ
+    finally:
+        if not проверено:
+            _доказано.pop(база, None)
 
 
 class Прокси(ThreadingHTTPServer):
     """Прокси сервисов узла: пересылает только подписанное общим секретом и
     подписывает ответ (см. шапку). Одноразовые номера помнит `2 × ОКНО_С`:
-    повтор запроса в пределах окна времени — 401."""
+    повтор запроса в пределах окна времени — 401. Ресурсы до проверки
+    подписи не тратятся: заголовки — до тела, тело — порциями с таймаутом
+    сокета, соединений не больше `СОЕДИНЕНИЙ`."""
     daemon_threads = True
+    # на Windows SO_REUSEADDR молча пускает второй процесс на тот же порт:
+    # два агента делили бы соединения и память номеров
+    allow_reuse_address = os.name != "nt"
 
-    def __init__(self, адрес, секрет, asr=None, llm=None):
+    def __init__(self, адрес, секрет, asr=None, llm=None, соединений=СОЕДИНЕНИЙ):
         super().__init__(адрес, _ПроксиОбработчик)
         self.секрет, self.asr, self.llm = секрет, asr, llm
         self.номера, self.замок = {}, threading.Lock()
+        self.места = threading.BoundedSemaphore(соединений)
 
-    def беда_запроса(self, метод, путь, тело, заголовки):
-        """Почему запрос не пересылать, или None."""
+    def process_request(self, request, client_address):
+        if not self.места.acquire(blocking=False):
+            self.shutdown_request(request)        # занято — ни потока, ни памяти
+            return
         try:
-            когда = int(заголовки.get("X-Mara-Ts") or "")
-        except ValueError:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.места.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.места.release()
+
+    def handle_error(self, request, client_address):
+        # без адреса клиента и трассы с путями: журнал узла может уехать в
+        # чат, а путь профиля Windows несёт логин
+        лог("прокси: запрос упал — %s" % sys.exc_info()[0].__name__)
+
+    def беда_заголовков(self, заголовки, сейчас=None):
+        """Почему запрос не стоит даже читать, или None: подписи нет или она
+        не той формы, время вне окна. Проверяется до тела."""
+        когда = заголовки.get("X-Mara-Ts") or ""
+        if not (ЧИСЛО.match(когда) and НОМЕР.match(заголовки.get("X-Mara-Nonce") or "")
+                and ПОДПИСЬ.match(заголовки.get("X-Mara-Sig") or "")):
             return "нет подписи"
-        номер = заголовки.get("X-Mara-Nonce") or ""
-        if not НОМЕР.match(номер):
-            return "нет подписи"
-        сейчас = time.time()
-        if abs(сейчас - когда) > ОКНО_С:
+        if abs((time.time() if сейчас is None else сейчас) - int(когда)) > ОКНО_С:
             return "время запроса вне окна — часы doctor и узла расходятся?"
-        ждём = подписать_запрос(self.секрет, метод, путь, тело, когда, номер)["X-Mara-Sig"]
-        if not hmac.compare_digest(заголовки.get("X-Mara-Sig") or "", ждём):
+        return None
+
+    def беда_запроса(self, метод, путь, тело, заголовки, сейчас=None):
+        """Почему запрос не пересылать, или None."""
+        беда = self.беда_заголовков(заголовки, сейчас)
+        if беда:
+            return беда
+        сейчас = time.time() if сейчас is None else сейчас
+        номер = заголовки["X-Mara-Nonce"]
+        ждём = подписать_запрос(self.секрет, метод, путь, тело, заголовки["X-Mara-Ts"],
+                                номер)["X-Mara-Sig"]
+        if not hmac.compare_digest(заголовки["X-Mara-Sig"], ждём):
             return "подпись не сходится"
         with self.замок:
             for н, t in list(self.номера.items()):
@@ -331,21 +425,39 @@ class Прокси(ThreadingHTTPServer):
 class _ПроксиОбработчик(BaseHTTPRequestHandler):
     server_version = "mara-node-proxy"
     protocol_version = "HTTP/1.1"
+    timeout = ЧТЕНИЕ_С
 
     def log_message(self, *a):
         pass            # без адресов и путей: журнал узла может уехать в чат
 
-    def _ответ(self, код, тело, тип="application/json", номер=None):
+    def _ответ(self, код, тело, тип="application/json", номер=None, закрыть=False):
+        if закрыть:
+            # тело запроса не дочитано: в keep-alive оно стало бы следующим запросом
+            self.close_connection = True
         self.send_response(код)
         self.send_header("Content-Type", тип)
         self.send_header("Content-Length", str(len(тело)))
+        if закрыть:
+            self.send_header("Connection", "close")
         if номер:
             self.send_header("X-Mara-Sig", подпись_ответа(self.server.секрет, номер, код, тело))
         self.end_headers()
         self.wfile.write(тело)
 
-    def _беда(self, код, текст):
-        self._ответ(код, _json({"error": текст}))
+    def _беда(self, код, текст, закрыть=True):
+        self._ответ(код, _json({"error": текст}), закрыть=закрыть)
+
+    def _читать(self, n):
+        """Тело порциями по мегабайту: память растёт с пришедшим, а не с
+        объявленным; молчащий клиент рвётся таймаутом сокета."""
+        куски, осталось = [], n
+        while осталось:
+            кусок = self.rfile.read(min(осталось, 1 << 20))
+            if not кусок:
+                break
+            куски.append(кусок)
+            осталось -= len(кусок)
+        return b"".join(куски)
 
     def do_GET(self):
         ч = urllib.parse.urlsplit(self.path)
@@ -353,7 +465,7 @@ class _ПроксиОбработчик(BaseHTTPRequestHandler):
             return self._переслать("GET")
         номер = urllib.parse.parse_qs(ч.query).get("nonce", [""])[0]
         if not НОМЕР.match(номер):
-            return self._беда(400, "нужен nonce — 32 шестнадцатеричных знака")
+            return self._беда(400, "нужен nonce — 32 шестнадцатеричных знака", закрыть=False)
         self.send_response(200)
         self.send_header("Content-Length", "0")
         self.send_header("X-Mara-Sig", подпись_привета(self.server.секрет, номер))
@@ -363,21 +475,29 @@ class _ПроксиОбработчик(BaseHTTPRequestHandler):
         self._переслать("POST")
 
     def _переслать(self, метод):
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
+        if self.headers.get("Transfer-Encoding"):
+            return self._беда(411, "нужен Content-Length")
+        длина = self.headers.get("Content-Length") or "0"
+        if not ЧИСЛО.match(длина):
             return self._беда(400, "кривой Content-Length")
-        if n < 0 or n > ТЕЛО_МАКС:
-            self.close_connection = True
+        n = int(длина)
+        if n > ТЕЛО_МАКС:
             return self._беда(413, "тело больше %d МиБ" % (ТЕЛО_МАКС >> 20))
-        тело = self.rfile.read(n) if n else b""
+        беда = self.server.беда_заголовков(self.headers)
+        if беда:
+            return self._беда(401, беда)
+        тело = self._читать(n)
+        if len(тело) < n:
+            self.close_connection = True          # клиент ушёл посреди тела
+            return
         беда = self.server.беда_запроса(метод, self.path, тело, self.headers)
         if беда:
             return self._беда(401, беда)
         номер = self.headers["X-Mara-Nonce"]
-        цель = self.server.куда(urllib.parse.urlsplit(self.path).path)
-        if not цель:
-            return self._ответ(404, _json({"error": "сервиса на узле не задано"}), номер=номер)
+        путь = urllib.parse.urlsplit(self.path).path
+        цель = self.server.куда(путь)
+        if (метод, путь) not in РАЗРЕШЕНО or not цель:
+            return self._ответ(404, _json({"error": "этого прокси не пересылает"}), номер=номер)
         req = urllib.request.Request(цель.rstrip("/") + self.path, data=тело or None, method=метод)
         if self.headers.get("Content-Type"):
             req.add_header("Content-Type", self.headers["Content-Type"])
@@ -386,20 +506,30 @@ class _ПроксиОбработчик(BaseHTTPRequestHandler):
                 код, ответ, тип = r.status, r.read(), r.headers.get("Content-Type") or "application/json"
         except urllib.error.HTTPError as e:
             код, ответ, тип = e.code, e.read(), e.headers.get("Content-Type") or "application/json"
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             код, ответ, тип = 502, _json({"error": "сервис узла не ответил"}), "application/json"
         self._ответ(код, ответ, тип, номер=номер)
 
 
 def запустить_прокси(env):
-    """Прокси в потоке, если заданы секрет и порт; иначе None."""
+    """Прокси в потоке, если заданы секрет и порт; иначе None. Кривой порт —
+    `ValueError`."""
     секрет, порт = env.get("MARA_NODE_SECRET"), env.get("MARA_NODE_PROXY_PORT")
     if not (секрет and порт):
         return None
+    if not (порт.isdigit() and int(порт) <= 65535):
+        raise ValueError("MARA_NODE_PROXY_PORT — число от 0 до 65535")
     сервер = Прокси((env.get("MARA_NODE_PROXY_BIND") or "0.0.0.0", int(порт)), секрет,
                     asr=env.get("MARA_NODE_ASR_URL"), llm=env.get("MARA_NODE_LLM_URL"))
     threading.Thread(target=сервер.serve_forever, daemon=True).start()
     return сервер
+
+
+def выходить_ли(код, прокси):
+    """Отказ doctor в сердцебиении (401/403) кончает агента — если он не
+    держит прокси: тяжёлые шаги doctor идут через прокси, и с отозванным
+    токеном сердцебиения расшифровка вставала бы заодно."""
+    return код in (401, 403) and прокси is None
 
 
 def лог(текст):
@@ -420,21 +550,25 @@ def main(argv=None):
         print(secrets.token_hex(32))
         return 0
     url, token = os.environ.get("MARA_URL"), os.environ.get("MARA_NODE_TOKEN")
-    if not (url and token):
-        лог("нужны MARA_URL и MARA_NODE_TOKEN (contextd.py --pair-node <узел>)")
-        return 2
+    прокси = None
     if not a.once:
         try:
             прокси = запустить_прокси(os.environ)
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, OverflowError) as e:
             # занятый или кривой порт — без прокси doctor не получит ни
             # одного ответа узла; сердцебиение при этом идёт, а молчать нельзя
             лог("прокси не поднялся: %s" % type(e).__name__)
-            прокси = None
         if прокси:
             лог("прокси сервисов узла слушает порт %d" % прокси.server_address[1])
         elif os.environ.get("MARA_NODE_SECRET"):
             лог("секрет задан, а прокси нет — нужен MARA_NODE_PROXY_PORT")
+    if not (url and token):
+        лог("нужны MARA_URL и MARA_NODE_TOKEN (contextd.py --pair-node <узел>)")
+        if прокси is None:
+            return 2
+        # прокси без сердцебиения: шаги doctor ходят через него и так
+        while True:
+            time.sleep(3600)
     while True:
         try:
             тело = собрать()
@@ -455,7 +589,8 @@ def main(argv=None):
             "да" if тело["minecraft_active"] else "нет"))
         if код in (401, 403):
             лог("токен не принят — перевыпустить: contextd.py --pair-node <узел>")
-            return 1
+            if a.once or выходить_ли(код, прокси):
+                return 1
         if код == 409:
             лог("doctor не принял: строка узла записана под другим id")
         if a.once:
