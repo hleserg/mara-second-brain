@@ -846,20 +846,33 @@ class Сущности(unittest.TestCase):
 
     def test_миграция_9_отмена_и_путь_вниз(self):
         """Т7.6, ADR-0010 решение 8: `jobs.cancel_requested`. Отменённую
-        работу `claim_job` не берёт; откат 9 → 8 безусловный."""
+        работу `claim_job` не берёт. Откат 9 → 8: старый код `cancelled` не
+        знает, а его сверка поставила бы отменённое заново — отменённые и
+        недоведённые просьбы уходят в `dlq` с причиной, открытая попытка
+        недоведённой — брошенная; прочие работы не трогаются (ревью #165)."""
         self.база_v1()
         con = mi.migrate(self.dir)
-        eid, _ = mi.put_event(con, {"kind": "call", "source": "phone",
-                                    "source_id": "c9", "payload": {}})
-        jid = mi.add_job(con, eid, "asr")
+        работа = lambda sid, вид: mi.add_job(con, mi.put_event(con, {
+            "kind": "call", "source": "phone", "source_id": sid, "payload": {}})[0], вид)
+        jid = работа("c9", "asr")
         self.assertEqual(mi.отменить(con, jid), "отменена")
         self.assertIsNone(mi.claim_job(con))
+        идёт = работа("c10", "extract")
+        взята = mi.claim_job(con)
+        self.assertEqual(mi.отменить(con, идёт), "запрошена")
+        живая = работа("c11", "project")
         con.close()
         con = mi.migrate(self.dir, 8)
         self.assertNotIn("cancel_requested",
                          {r[1] for r in con.execute("pragma table_info(jobs)")})
-        self.assertEqual(con.execute("select state from jobs where id=?", (jid,)).fetchone()[0],
-                         "cancelled", "строка осталась, старый код её не возьмёт")
+        строка = lambda j: tuple(con.execute("select state, last_error from jobs where id=?",
+                                             (j,)).fetchone())
+        for j in (jid, идёт):
+            self.assertEqual(строка(j), ("dlq", "отменена (Т7.6), откат миграции 9"))
+        self.assertEqual(строка(живая), ("ready", None))
+        self.assertEqual(tuple(con.execute(
+            "select outcome, finished from job_attempts where job_id=? and attempt=?",
+            (идёт, взята["attempt"])).fetchone()), ("lease_expired", None))
         self.assertEqual(self.версия(), 8)
         con.close()
         mi.migrate(self.dir).close()
