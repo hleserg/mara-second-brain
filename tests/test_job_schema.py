@@ -12,6 +12,7 @@ sys.path.insert(0, СКРИПТЫ)
 import mara_ingest as mi
 import contextd
 import contextd_reconcile as cr
+import node_agent
 import vault_common
 
 БЕЗ_ПРОКСИ = {k: "" for k in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
@@ -20,8 +21,8 @@ import vault_common
 
 def сердце(**kw):
     d = {"capabilities": ["asr", "llm"], "checked": ["asr", "llm"],
-         "models": [vault_common.МОДЕЛЬ_ИЗВЛЕЧЕНИЯ], "accept_jobs": True,
-         "minecraft_active": False, "interval_s": 60}
+         "models": [vault_common.МОДЕЛЬ_ИЗВЛЕЧЕНИЯ], "models_complete": True,
+         "accept_jobs": True, "minecraft_active": False, "interval_s": 60}
     d.update(kw)
     return d
 
@@ -145,28 +146,65 @@ class Модель(_База):
         self.отчитаться(models=["bge-m3:latest", vault_common.МОДЕЛЬ_ИЗВЛЕЧЕНИЯ])
         self.assertEqual(contextd.недоступные(self.con), {"asr": None, "extract": None})
 
-    def test_без_тега_это_latest(self):
-        os.environ["MARA_EXTRACT_MODEL"] = "bge-m3"
-        self.отчитаться(models=["bge-m3:latest"])
-        self.assertIsNone(contextd.недоступные(self.con)["extract"])
+    def test_имена_как_у_ollama(self):
+        """Ревью Т7, P1-1(б): имя сравнивается так, как его разрешит Ollama —
+        без регистра, без `registry.ollama.ai/` и `library/`, `:latest` у имени
+        без тега (двоеточие порта реестра — не тег)."""
+        for нужна, на_узле in (("bge-m3", "bge-m3:latest"), ("llama3:latest", "llama3"),
+                               ("Qwen3.5:9B", "qwen3.5:9b"),
+                               ("library/qwen3.5:9b", "qwen3.5:9b"),
+                               ("registry.ollama.ai/library/qwen3.5:9b", "qwen3.5:9b"),
+                               ("registry.example.org:5000/team/ext",
+                                "registry.example.org:5000/team/ext:latest")):
+            with self.subTest(нужна=нужна):
+                os.environ["MARA_EXTRACT_MODEL"] = нужна
+                self.отчитаться(models=[на_узле])
+                self.assertIsNone(contextd.недоступные(self.con)["extract"])
         os.environ["MARA_EXTRACT_MODEL"] = "llama3:latest"
-        self.отчитаться(models=["llama3"])
-        self.assertIsNone(contextd.недоступные(self.con)["extract"])
         self.отчитаться(models=["llama3:8b"])
         self.assertEqual(contextd.недоступные(self.con)["extract"], "node_no_model:bigpc")
 
     def test_не_знаю_не_держит(self):
-        """Пустой список (сервис не отдал), обрезанный (агент шлёт не больше
-        `МОДЕЛЕЙ_МАКС`), непроверенный сервис — «не знаю», работа идёт."""
-        for kw in ({"models": []},
-                   {"models": ["m%02d" % i for i in range(contextd.МОДЕЛЕЙ_МАКС)]},
+        """Список не назван полным (сервис не ответил, имя отброшено, список
+        обрезан, агент старше Т7.1), сервис не проверен, имя модели не из тех,
+        что агент прислал бы, — «не знаю», работа идёт."""
+        for kw in ({"models": [], "models_complete": False},
+                   {"models": ["llama3:8b"], "models_complete": False},
                    {"models": ["llama3:8b"], "checked": ["asr"]}):
             with self.subTest(kw=kw):
                 self.отчитаться(**kw)
                 self.assertIsNone(contextd.недоступные(self.con)["extract"])
+        for модель in ("x" * 81, "qwen3.5@sha256:" + "a" * 64):
+            with self.subTest(модель=модель):
+                os.environ["MARA_EXTRACT_MODEL"] = модель
+                self.отчитаться(models=["llama3:8b"])
+                self.assertIsNone(contextd.недоступные(self.con)["extract"])
+        os.environ.pop("MARA_EXTRACT_MODEL")
         # сервис не ответил — это «сервиса нет», а не «модели нет»
         self.отчитаться(models=["llama3:8b"], capabilities=["asr"])
         self.assertEqual(contextd.недоступные(self.con)["extract"], "node_no_capability:bigpc")
+
+    def test_пустая_ollama_моделей_нет(self):
+        """Ревью Т7, P2-1: Ollama ответила пустым списком — моделей нет вовсе,
+        и извлечение ждёт, а не уходит ретраями в DLQ."""
+        self.отчитаться(models=[], models_complete=True)
+        self.assertEqual(contextd.недоступные(self.con)["extract"], "node_no_model:bigpc")
+
+    def test_пустая_модель_не_держит(self):
+        """Ревью Т7, P3-5: задана пустой — шаг пойдёт с пустым именем и упадёт
+        видно; ожидание спрятало бы поломку настройки."""
+        os.environ["MARA_EXTRACT_MODEL"] = ""
+        self.отчитаться(models=["llama3:8b"])
+        self.assertIsNone(contextd.нужная_модель("MARA_EXTRACT_MODEL"))
+        self.assertIsNone(contextd.недоступные(self.con)["extract"])
+        os.environ.pop("MARA_EXTRACT_MODEL")
+        with open(self.env_file, "w") as fh:
+            fh.write("MARA_EXTRACT_MODEL=\n")
+        self.assertIsNone(contextd.нужная_модель("MARA_EXTRACT_MODEL"))
+        with mock.patch.object(vault_common, "МОДЕЛЬ_ИЗВЛЕЧЕНИЯ", "проба:1"):
+            os.remove(self.env_file)
+            self.assertEqual(contextd.нужная_модель("MARA_EXTRACT_MODEL"), "проба:1",
+                             "умолчание — из `vault_common`, не литералом")
 
     def test_модель_из_файла_как_у_шага(self):
         with open(self.env_file, "w") as fh:
@@ -188,6 +226,60 @@ class Модель(_База):
         self.assertEqual(self.строка(расшифровка)[0], "done")
 
 
+class Агент(_База):
+    """Ревью Т7, P1-1(а) и P2-1: агент говорит, полон ли список моделей, —
+    через настоящий `node_agent.модели`."""
+
+    def модели(self, ответ):
+        with mock.patch.object(node_agent, "отвечает", lambda *a: ответ):
+            return node_agent.модели("http://x")
+
+    def список(self, имена):
+        return (True, json.dumps({"models": [{"name": и} for и in имена]}).encode())
+
+    def test_полнота(self):
+        длинное = "hf.co/" + "u" * 40 + "/" + "r" * 40 + "-GGUF:Q4_K_M"
+        self.assertEqual(self.модели(self.список(["qwen3.5:9b", длинное, "bge-m3:latest"])),
+                         (["bge-m3:latest", "qwen3.5:9b"], False), "имя отброшено")
+        имена = ["m%02d" % i for i in range(node_agent.МОДЕЛЕЙ_МАКС + 1)]
+        self.assertEqual(self.модели(self.список(имена)),
+                         (имена[:node_agent.МОДЕЛЕЙ_МАКС], False), "обрезан")
+        for n in (node_agent.МОДЕЛЕЙ_МАКС, node_agent.МОДЕЛЕЙ_МАКС - 1, 0):
+            self.assertEqual(self.модели(self.список(имена[:n])), (имена[:n], True), n)
+        граница = "m" * 80
+        self.assertEqual(self.модели(self.список([граница])), ([граница], True), "80 знаков")
+        self.assertEqual(self.модели(self.список([граница + "x"])), ([], False), "81 — отброшено")
+        for ответ in ((False, b""), (True, b"not json"), (True, b'{"models": null}')):
+            self.assertEqual(self.модели(ответ), ([], False), ответ)
+        self.assertEqual(node_agent.МОДЕЛЕЙ_МАКС, contextd.МОДЕЛЕЙ_МАКС)
+
+    def test_длинное_имя_на_узле_не_держит(self):
+        длинное = "hf.co/" + "u" * 40 + "/" + "r" * 40 + "-GGUF:Q4_K_M"
+        os.environ["MARA_EXTRACT_MODEL"] = длинное
+        модели, полный = self.модели(self.список([длинное, "bge-m3:latest"]))
+        self.отчитаться(models=модели, models_complete=полный)
+        self.assertIsNone(contextd.недоступные(self.con)["extract"])
+
+    def test_разбор_полноты_и_предела(self):
+        for плохо in ({"models": ["m%02d" % i for i in range(contextd.МОДЕЛЕЙ_МАКС + 1)]},
+                      {"models_complete": "да"}):
+            with self.subTest(плохо=плохо):
+                self.assertIsNone(contextd.разобрать_сердцебиение(плохо)[0])
+
+    def test_испорченная_строка_не_роняет_такт(self):
+        """Ревью Т7, P3-6: сохранённое сердцебиение разбирается заново, и
+        испорченная строка — «сердцебиения нет», а не падение оборота."""
+        self.отчитаться()
+        row = self.con.execute("select capabilities_json from compute_nodes "
+                               "where id='bigpc'").fetchone()
+        d = json.loads(row[0])
+        d["models"] = "не список"
+        self.con.execute("update compute_nodes set capabilities_json=? where id='bigpc'",
+                         (json.dumps(d),))
+        self.assertIsNone(contextd.сердцебиение_узла(self.con, "bigpc"))
+        self.assertEqual(contextd.недоступные(self.con), {"asr": None, "extract": None})
+
+
 class Застава(_База):
     """Т7.4: застава игры — по сердцебиению узла, а не по расписанию."""
 
@@ -197,6 +289,15 @@ class Застава(_База):
         self.assertEqual(contextd.под_заставой(), set())
         os.environ["MARA_GAME_GUARD"] = " bigpc, gtr ,"
         self.assertEqual(contextd.под_заставой(), {"bigpc", "gtr"})
+        os.environ["MARA_GAME_GUARD"] = "BigPC; GTR"
+        self.assertEqual(contextd.под_заставой(), {"bigpc", "gtr"})
+        os.environ["MARA_GAME_GUARD"] = "bigpс"            # «с» кириллицей
+        contextd._незнакомые.discard("bigpс")
+        вывод = io.StringIO()
+        with contextlib.redirect_stdout(вывод):
+            self.assertEqual(contextd.под_заставой(), {"bigpс"})
+            contextd.под_заставой()
+        self.assertEqual(вывод.getvalue().count("MARA_GAME_GUARD"), 1, "сказано один раз")
 
     def test_игра_держит(self):
         os.environ["MARA_GAME_GUARD"] = "bigpc"
@@ -262,8 +363,11 @@ class Застава(_База):
 
 class Сверка(_База):
     def test_находка_называет_причину(self):
-        тексты = {"node_no_model": "модели", "node_gaming": "игра идёт",
-                  "node_no_heartbeat": "сердцебиения от него нет"}
+        тексты = {"node_no_model": "поправить MARA_EXTRACT_MODEL",
+                  "node_gaming": "MARA_GAME_PROCESSES",
+                  "node_no_heartbeat": "включить коробку",
+                  "node_paused": "снять паузу на узле",
+                  "node_no_capability": "поднять сервис на узле"}
         for причина, слово in тексты.items():
             jid = self.работа("extract", причина)
             когда = (datetime.now(mi.TZ) - timedelta(hours=30)).isoformat(timespec="seconds")
@@ -271,7 +375,7 @@ class Сверка(_База):
                              "where id=?", (причина + ":bigpc", когда, jid))
         contextd.отметить_узел(self.con, contextd.ВОРКЕР, "core")
         находки = cr.узел_молчит(self.con, hours=24)
-        self.assertEqual([н["check"] for н in находки], ["узел-не-берёт"] * 3)
+        self.assertEqual([н["check"] for н in находки], ["узел-не-берёт"] * 5)
         for н, слово in zip(находки, [тексты[k] for k in sorted(тексты)]):
             self.assertIn(слово, н["detail"])
         self.assertEqual(cr.очередь_стоит(self.con, hours=1), [])

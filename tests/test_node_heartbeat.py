@@ -31,7 +31,7 @@ class Разбор(unittest.TestCase):
                                                    "лишнее": "x" * 10 ** 5})
         self.assertIsNone(беда)
         self.assertEqual(с, {"capabilities": ["asr", "llm"], "checked": [], "models": [],
-                             "versions": {},
+                             "models_complete": False, "versions": {},
                              "minecraft_active": False, "accept_jobs": True,
                              "interval_s": contextd.СЕРДЦЕ_ИНТЕРВАЛ_С})
 
@@ -223,7 +223,7 @@ class Агент(unittest.TestCase):
 
     def test_кривой_ответ_ollama(self):
         with mock.patch.object(node_agent, "отвечает", lambda *a: (True, b'{"models": null}')):
-            self.assertEqual(node_agent.модели("http://x"), [])
+            self.assertEqual(node_agent.модели("http://x"), ([], False))
 
     def test_сбой_оборота_не_роняет(self):
         with mock.patch.dict(os.environ, {"MARA_URL": "http://127.0.0.1:9",
@@ -318,8 +318,8 @@ class Сеть(unittest.TestCase):
                "MARA_NODE_INTERVAL": "30"}
         тело = node_agent.собрать(env=env, имена={"javaw.exe"})
         self.assertEqual((тело["capabilities"], тело["checked"], тело["models"],
-                          тело["minecraft_active"]),
-                         (["llm"], ["llm"], ["bge-m3", "qwen3.5:9b"], True))
+                          тело["models_complete"], тело["minecraft_active"]),
+                         (["llm"], ["llm"], ["bge-m3", "qwen3.5:9b"], True, True))
         self.assertEqual(node_agent.отправить(self.url, self.токен_узла, тело), 200)
         с = contextd.сердцебиение_узла(self.con, "bigpc")
         self.assertEqual((с["capabilities"], с["interval_s"], с["minecraft_active"]),
