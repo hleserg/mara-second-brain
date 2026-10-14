@@ -102,9 +102,11 @@ class Публичность(unittest.TestCase):
                                cwd=корень, capture_output=True, text=True).stdout.split()
         if not файлы:
             self.skipTest("не git-клон")
+        def слово(*коды):
+            return "".join(map(chr, коды))
         формы = re.compile("|".join(map(re.escape, [
-            "Серг", "Серёг",
-            "Серёж", "сергей",
+            слово(0x421, 0x435, 0x440, 0x433), слово(0x421, 0x435, 0x440, 0x451, 0x433),
+            слово(0x421, 0x435, 0x440, 0x451, 0x436), слово(0x421, 0x435, 0x440, 0x435, 0x436),
             "s" + "ergey"])), re.I)
         нашлось = []
         for f in файлы:
