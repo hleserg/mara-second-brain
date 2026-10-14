@@ -7,7 +7,7 @@
 молчит. Проверяем, что теперь не молчит — во всех трёх местах, где вопрос
 задавался.
 """
-import glob, json, os, sys, shutil, subprocess, tempfile, unittest
+import glob, io, json, os, sys, shutil, subprocess, tempfile, unittest
 import unittest.mock
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -124,9 +124,14 @@ class Прогон(unittest.TestCase):
         self.боевая_отметка = mi.ОТМЕТКА_НОСИТЕЛЕЙ
         self.отметка = os.path.join(self.tmp, "state", "core-targets.json")
         mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.отметка
+        # и отметка учения (Т9.1): удавшееся учение пишет её туда же
+        self.боевое_учение = mi.ОТМЕТКА_УЧЕНИЯ
+        self.учение = os.path.join(self.tmp, "state", "core-drill.json")
+        mi.ОТМЕТКА_УЧЕНИЯ = self.учение
 
     def tearDown(self):
         mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.боевая_отметка
+        mi.ОТМЕТКА_УЧЕНИЯ = self.боевое_учение
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
@@ -183,10 +188,42 @@ class Прогон(unittest.TestCase):
         # носитель, на который не легло ничего, обязан в ней отсутствовать.
         self.assertEqual(list(json.load(open(self.отметка, encoding="utf-8"))),
                          [цель])
+        # учение прошло — отметка учения на носителе учения (Т9.1, §15.1)
+        self.assertEqual(json.load(open(self.учение, encoding="utf-8"))["target"], цель)
         # Права ставятся временному файлу, до переименования: если сверка
         # переедет, легко потерять и chmod.
         лежит = os.path.join(цель, r["архив"])
         self.assertEqual(os.stat(лежит).st_mode & 0o777, 0o600)
+
+    def test_отметка_учения_только_за_удачным_учением(self):
+        """Т9.1, ревью P2-1: отметка учения — след удачного учения, и ничего
+        больше. Без учения и при упавшем учении её нет; сбой её записи ночь
+        не роняет — ротация и итог доходят."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        цель = os.path.join(self.tmp, "target")
+        work = os.path.join(self.tmp, "work")
+        self.cb.прогон(root, [цель], пароль, keep=2, work=work, аудио=False, drill=False)
+        self.assertFalse(os.path.exists(self.учение), "отметка без учения")
+        with unittest.mock.patch.object(self.cb, "проверка",
+                                        side_effect=RuntimeError("не сошлось")):
+            with self.assertRaises(RuntimeError):
+                self.cb.прогон(root, [цель], пароль, keep=2, work=work, аудио=False,
+                               drill=True)
+        self.assertFalse(os.path.exists(self.учение), "отметка при упавшем учении")
+        self.cb.прогон(root, [цель], пароль, keep=2, work=work, аудио=False, drill=True)
+        self.assertEqual(os.stat(self.учение).st_mode & 0o777, 0o600)
+        # отметке некуда лечь — прогон всё равно доходит до ротации и итога
+        файл = os.path.join(self.tmp, "не-каталог")
+        open(файл, "w").close()
+        mi.ОТМЕТКА_УЧЕНИЯ = os.path.join(файл, "core-drill.json")
+        with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            r = self.cb.прогон(root, [цель], пароль, keep=1, work=work, аудио=False,
+                               drill=True)
+        self.assertIn("отметка учения не записана", err.getvalue())
+        self.assertEqual(r["носители"], [цель])
+        self.assertEqual(len(glob.glob(os.path.join(цель, "core-*.tar.gz.gpg"))), 1,
+                         "ротация по keep=1 не дошла")
 
     def test_отказ_уборки_не_валит_прогон(self):
         """Носитель ушёл в read-only той же бедой, что испортила копию.

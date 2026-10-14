@@ -313,7 +313,9 @@ class Манифест(unittest.TestCase):
         with unittest.mock.patch.object(self.мод, "мелочь", подмена), \
                 unittest.mock.patch.dict(os.environ, {"MARA_BACKUP_ALLOW_SAME_DEV": "1"}), \
                 unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_НОСИТЕЛЕЙ",
-                                           os.path.join(self.tmp, "state", "core-targets.json")):
+                                           os.path.join(self.tmp, "state", "core-targets.json")), \
+                unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_УЧЕНИЯ",
+                                           os.path.join(self.tmp, "state", "core-drill.json")):
             os.makedirs(os.path.join(self.tmp, "state"), exist_ok=True)
             r = self.мод.прогон(self.root, [self.цель], self.пароль, 7,
                                 os.path.join(self.tmp, "work"), аудио=False, drill=True)
@@ -347,7 +349,9 @@ class Манифест(unittest.TestCase):
         with unittest.mock.patch.object(self.мод, "архив", подмена), \
                 unittest.mock.patch.dict(os.environ, {"MARA_BACKUP_ALLOW_SAME_DEV": "1"}), \
                 unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_НОСИТЕЛЕЙ",
-                                           os.path.join(self.tmp, "state", "core-targets.json")):
+                                           os.path.join(self.tmp, "state", "core-targets.json")), \
+                unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_УЧЕНИЯ",
+                                           os.path.join(self.tmp, "state", "core-drill.json")):
             os.makedirs(os.path.join(self.tmp, "state"), exist_ok=True)
             r = self.мод.прогон(self.root, [self.цель], self.пароль, 7,
                                 os.path.join(self.tmp, "work"), аудио=False, drill=True)
