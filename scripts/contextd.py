@@ -97,6 +97,16 @@ GPU = threading.Semaphore(1)
 ПРОБА_С = 60
 ПРОБА_ТАЙМАУТ = 3
 ВОРКЕР = "doctor"                       # строка сердцебиения воркера в `compute_nodes`
+# Т7.2, ADR-0010 решение 5: сердцебиение — с узла на doctor. Узел шлёт его
+# своим токеном (`--pair-node`): устройство с именем `node:<узел>` и единственным
+# разрешённым видом `heartbeat`. Узел берётся из токена, а не из тела: чужим
+# токеном за bigpc не отчитаться.
+ПУТЬ_СЕРДЦА = "/v1/node/heartbeat"
+УЗЕЛ_ПРЕФИКС = "node:"
+# какая возможность узла нужна тяжёлому шагу (решение 1)
+ВОЗМОЖНОСТЬ = {"asr": "asr", "extract": "llm"}
+СЕРДЦЕ_ИНТЕРВАЛ_С = 60                  # если узел своего не назвал
+СЕРДЦЕ_ПРОПУСКОВ = 3                    # живой, пока моложе трёх интервалов
 _пробы = {}                             # адрес → (monotonic, жив)
 OPEN_PATHS = ("/healthz",)              # мануал велит проверять его с телефона
 # /metrics без токена отдаётся только с петли, и /healthz из локалки отдаёт
@@ -300,6 +310,24 @@ def revoke(con, device_id):
                 (mi.now_iso(), device_id))
     return con.execute("select revoked_at from devices where id=?",
                        (device_id,)).fetchone()
+
+
+def pair_node(con, узел):
+    """Токен узла для сердцебиения (Т7.2): устройство `node:<узел>` с
+    allowlist `heartbeat` — событий им не прислать, пакета не прочитать
+    (`authed`). Имя узла — как в `ТЯЖЁЛЫЕ` и `compute_nodes.id`."""
+    if not (isinstance(узел, str) and ВИД.match(узел)):
+        raise ValueError("имя узла — строчные латинские, цифры и `_`, с буквы")
+    dev, token = pair(con, УЗЕЛ_ПРЕФИКС + узел)
+    set_scopes(con, dev, ["heartbeat"])
+    return dev, token
+
+
+def узел_устройства(con, device_id):
+    """Имя узла, если устройство — узел (`pair_node`), иначе None."""
+    row = con.execute("select name from devices where id=?", (device_id,)).fetchone()
+    имя = row["name"] if row else None
+    return имя[len(УЗЕЛ_ПРЕФИКС):] if имя and имя.startswith(УЗЕЛ_ПРЕФИКС) else None
 
 
 def device_of(con, header):
@@ -515,14 +543,26 @@ def metrics(con, root=None, vault=None):
     # Самую новую по времени: `max()` по строке врёт после смены пояса, а
     # голый `last_seen` рядом с `max()` SQLite берёт из той же строки, где
     # максимум.
+    # любая причина `node_…:<узел>`: молчит, на паузе, без нужной возможности
     ждут = dict(con.execute(
-        "select substr(queued_reason, length('node_offline:') + 1), count(*) from jobs "
-        "where state='ready' and queued_reason like 'node_offline:%' group by 1"))
+        "select substr(queued_reason, instr(queued_reason, ':') + 1), count(*) from jobs "
+        "where state='ready' and queued_reason like 'node\\_%:%' escape '\\' group by 1"))
     видели = dict(con.execute("select id, last_seen from compute_nodes"))
     тяжёлые = sorted({у for у, _ in ТЯЖЁЛЫЕ.values()} | set(ждут))
     ждут_узел = [(у, ждут.get(у, 0)) for у in тяжёлые]
     # свежесть — и у воркера (`ВОРКЕР`): его сердцебиение пишет `такт`
     узлы = [(у, age_of(видели.get(у))) for у in sorted(set(тяжёлые) | set(видели))]
+    # сердцебиение с узла (Т7.2) — отдельно от `last_seen`, который пишет и
+    # проба с doctor: −1 — узел не отчитывался ни разу
+    def сердце_возраст(у):
+        row = con.execute("select capabilities_json from compute_nodes where id=?",
+                          (у,)).fetchone()
+        try:
+            с = json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            с = {}
+        return age_of(с.get("heartbeat_at")) if isinstance(с, dict) else -1
+    сердца = [(у, сердце_возраст(у)) for у in тяжёлые]
     devices = [(n, age_of(t)) for n, t, _ in con.execute(
         "select name, last_seen, max(%s) from devices where revoked_at is null "
         "group by name order by name" % mi.секунды("last_seen"))]
@@ -611,6 +651,7 @@ def metrics(con, root=None, vault=None):
         # `ТЯЖЁЛЫЕ`, с нулём: пустая серия не отличалась бы от пропавшей
         *[('mara_jobs_waiting_node{node="%s"}' % метка(у), n) for у, n in ждут_узел],
         *[('mara_node_last_seen_seconds{node="%s"}' % метка(у), a) for у, a in узлы],
+        *[('mara_node_heartbeat_seconds{node="%s"}' % метка(у), a) for у, a in сердца],
         # Семантика (хвост #39, Т3.1): «записей обещано, но тела ещё нет».
         # Считаются события в `new` с объявленным `blob_sha256` — телефон
         # прислал событие звонка и заявил хеш, а `/v1/ingest/audio` до
@@ -826,8 +867,18 @@ class Handler(BaseHTTPRequestHandler):
         # телефон владельца, и запирать его заодно — это отказ в обслуживании
         # своими руками.
         ждать = под_замком(adr, False)
-        if device_of(self.con(), self.headers.get("Authorization")):
+        dev = device_of(self.con(), self.headers.get("Authorization"))
+        if dev:
             под_замком(adr, True)
+            # Токен узла живёт на чужой машине (bigpc, GTR) и годится только
+            # для сердцебиения: утёкший, он не должен читать пакет
+            # обязательств (`/v1/context/bootstrap`) или слать события. И
+            # наоборот: сердцебиение — только от узла, иначе телефон мог бы
+            # отчитаться за bigpc.
+            if (узел_устройства(self.con(), dev) is None) == (path == ПУТЬ_СЕРДЦА):
+                self.отлуп(403, "сердцебиение — только токеном узла (--pair-node), "
+                                "и токен узла годится только для него")
+                return False
             return True
         if ждать:
             self.отлуп(429, "слишком много попыток", {"Retry-After": str(ждать)})
@@ -1000,6 +1051,13 @@ class Handler(BaseHTTPRequestHandler):
             # `5` и `[]` — валидный json, но дальше по коду сплошь data.get,
             # и обработчик падал без ответа
             return self.say(400, {"error": "не json"})
+        if p.path == ПУТЬ_СЕРДЦА:
+            узел = узел_устройства(con, device_of(con, self.headers.get("Authorization")))
+            сердце, беда = разобрать_сердцебиение(data)
+            if беда:
+                return self.say(400, {"error": беда})
+            принять_сердцебиение(con, узел, сердце)
+            return self.say(200, {"node": узел, "interval_s": сердце["interval_s"]})
         if p.path in ("/v1/ingest/event", "/v1/ingest/message", "/v1/ingest/email"):
             kind = {"/v1/ingest/message": "message",
                     "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
@@ -1853,6 +1911,87 @@ def адрес_шага(перем):
     return vault_common.прочитать_env().get(перем) or None
 
 
+def разобрать_сердцебиение(data):
+    """(сердцебиение, беда). Закрытый список полей (§13.2): возможности,
+    модели, свободная и полная VRAM, загрузка, версии, флаги политики и
+    интервал. Неизвестное отбрасывается, а не хранится: тело пишет чужая
+    машина, и в `capabilities_json` не должно лечь ничего сверх описанного."""
+    def строка(x, n=80):
+        return isinstance(x, str) and 0 < len(x) <= n and x.isprintable()
+
+    def целое(x, lo, hi):
+        return isinstance(x, int) and not isinstance(x, bool) and lo <= x <= hi
+    out = {}
+    cap = data.get("capabilities", [])
+    if not (isinstance(cap, list) and len(cap) <= 16 and all(
+            isinstance(c, str) and ВИД.match(c) for c in cap)):
+        return None, "capabilities — список видов (строчные латинские)"
+    out["capabilities"] = sorted(set(cap))
+    модели = data.get("models", [])
+    if not (isinstance(модели, list) and len(модели) <= 32 and all(map(строка, модели))):
+        return None, "models — список строк до 80 знаков"
+    out["models"] = list(модели)
+    for k in ("vram_free_mb", "vram_total_mb"):
+        if data.get(k) is not None:
+            if not целое(data[k], 0, 10 ** 7):
+                return None, "%s — целое число мегабайт" % k
+            out[k] = data[k]
+    if data.get("load") is not None:
+        if not (isinstance(data["load"], (int, float)) and not isinstance(data["load"], bool)
+                and 0 <= data["load"] <= 1000):
+            return None, "load — число от 0"
+        out["load"] = data["load"]
+    версии = data.get("versions", {})
+    if not (isinstance(версии, dict) and len(версии) <= 16 and all(
+            строка(k, 40) and строка(v) for k, v in версии.items())):
+        return None, "versions — словарь коротких строк"
+    out["versions"] = dict(версии)
+    for k, дефолт in (("minecraft_active", False), ("accept_jobs", True)):
+        v = data.get(k, дефолт)
+        if not isinstance(v, bool):
+            return None, "%s — true или false" % k
+        out[k] = v
+    интервал = data.get("interval_s", СЕРДЦЕ_ИНТЕРВАЛ_С)
+    if not целое(интервал, 10, 3600):
+        return None, "interval_s — целое от 10 до 3600"
+    out["interval_s"] = интервал
+    return out, None
+
+
+def принять_сердцебиение(con, узел, сердце):
+    """Сердцебиение — в `compute_nodes`: `last_seen` и `capabilities_json`
+    (с меткой времени самого сердцебиения: `last_seen` пишет и проба)."""
+    сейчас = mi.now_iso()
+    данные = json.dumps(dict(сердце, источник="сердцебиение", heartbeat_at=сейчас),
+                        ensure_ascii=False, sort_keys=True)
+    con.execute("insert into compute_nodes(id,name,role,last_seen,capabilities_json) "
+                "values(?,?,?,?,?) on conflict(id) do update set "
+                "last_seen=excluded.last_seen, capabilities_json=excluded.capabilities_json",
+                (узел, узел, "node", сейчас, данные))
+
+
+def сердцебиение_узла(con, узел, сейчас=None):
+    """Последнее сердцебиение узла, если оно свежее (моложе
+    `СЕРДЦЕ_ПРОПУСКОВ` его интервалов), иначе None. Запись пробы
+    (`отметить_узел`) сердцебиением не считается."""
+    row = con.execute("select capabilities_json from compute_nodes where id=?",
+                      (узел,)).fetchone()
+    try:
+        сердце = json.loads(row[0]) if row and row[0] else None
+    except ValueError:
+        return None
+    if not (isinstance(сердце, dict) and сердце.get("источник") == "сердцебиение"):
+        return None
+    try:
+        t = datetime.fromisoformat(сердце.get("heartbeat_at")).timestamp()
+    except (TypeError, ValueError):
+        return None
+    сейчас = time.time() if сейчас is None else сейчас
+    if сейчас - t > СЕРДЦЕ_ПРОПУСКОВ * int(сердце.get("interval_s") or СЕРДЦЕ_ИНТЕРВАЛ_С):
+        return None
+    return сердце
+
+
 def недоступные(con):
     """`{kind: причина или None}` по тяжёлым шагам. Адрес не задан или не
     разбирается — `None`: шаг сам упадёт на нём, и ошибка настройки
@@ -1861,6 +2000,16 @@ def недоступные(con):
     нему сверка судит, сколько он молчит."""
     причины, живые, свежие = {}, {}, set()
     for kind, (узел, перем) in sorted(ТЯЖЁЛЫЕ.items()):
+        # Сердцебиение (Т7.2) может только добавить причину ждать: узел сам
+        # сказал «не беру» или «сервиса нет». «Всё хорошо» от узла пробу не
+        # отменяет: шаг пойдёт к сервису с doctor, и дорогу проверяет doctor.
+        сердце = сердцебиение_узла(con, узел)
+        if сердце is not None and not сердце.get("accept_jobs", True):
+            причины[kind] = "node_paused:" + узел
+            continue
+        if сердце is not None and ВОЗМОЖНОСТЬ[kind] not in сердце.get("capabilities", []):
+            причины[kind] = "node_no_capability:" + узел
+            continue
         адрес = адрес_шага(перем)
         if not адрес:
             причины[kind] = None
@@ -2048,6 +2197,8 @@ def main(argv=None):
     ap.add_argument("--bind", default=bind_default())
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--pair", metavar="ИМЯ")
+    ap.add_argument("--pair-node", metavar="УЗЕЛ", dest="pair_node",
+                    help="токен сердцебиения узла (Т7.2): `--pair-node bigpc`")
     ap.add_argument("--revoke", metavar="ID")
     ap.add_argument("--scopes", metavar="ID", help="показать allowlist устройства")
     ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
@@ -2067,6 +2218,16 @@ def main(argv=None):
         con = mi.connect(a.root)
         dev, token = pair(con, a.pair)
         print("устройство: %s\nтокен (показывается один раз): %s" % (dev, token))
+        return 0
+    if a.pair_node:
+        con = mi.connect(a.root)
+        try:
+            dev, token = pair_node(con, a.pair_node)
+        except ValueError as e:
+            print("не завёл: %s" % e); return 1
+        print("узел: %s (%s)\nтокен (показывается один раз): %s\n"
+              "на узле: MARA_NODE_TOKEN=<токен> в окружении node_agent.py"
+              % (a.pair_node, dev, token))
         return 0
     if a.revoke:
         con = mi.connect(a.root)

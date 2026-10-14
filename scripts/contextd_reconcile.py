@@ -841,7 +841,7 @@ def очередь_стоит(con, hours=None, сейчас=None):
     # ждущие молчащий узел — не «никто не берёт»: воркер их не берёт
     # нарочно, о них говорит `узел_молчит`. Но только пока воркер жив: у
     # вставшего причина осталась от прошлого, и прятать её работы нельзя
-    ждут = ("and (queued_reason is null or queued_reason not like 'node_offline:%') "
+    ждут = ("and (queued_reason is null or queued_reason not like 'node\\_%:%' escape '\\') "
             if воркер_жив(con, сейчас) else "")
     rows = con.execute("select kind, count(*) as n, min(next_at) as t from jobs "
                        "where state='ready' and next_at < ? and lease_until < ? "
@@ -881,22 +881,43 @@ def воркер_жив(con, сейчас=None):
 
 
 def узел_молчит(con, hours=None, сейчас=None):
-    """Готовые работы ждут узел (`queued_reason = node_offline:<узел>`,
-    ADR-0010 решение 3), а он молчит дольше порога. Сколько молчит — по
-    `compute_nodes.last_seen` (его пишет проба воркера, когда узел ответил);
-    ни разу не отвечал — по самой старой ждущей работе. В DLQ такие работы
-    не уходят: включится коробка — возьмутся сами."""
+    """Готовые работы ждут узел дольше порога (ADR-0010 решение 3).
+
+    - `node_offline:<узел>` — узел молчит. Сколько — по
+      `compute_nodes.last_seen` (пишут проба воркера и сердцебиение узла);
+      ни разу не отвечал — по самой старой ждущей работе. Находка
+      `узел-молчит`.
+    - `node_paused:<узел>`, `node_no_capability:<узел>` — узел жив и сам
+      сказал «не беру» или «сервиса нет» (сердцебиение, Т7.2). Свежий
+      `last_seen` тут ничего не значит: мерится ожидание самой старой
+      работы. Находка `узел-не-берёт` — забытая пауза тоже забытая.
+
+    В DLQ такие работы не уходят: узел возьмёт их сам."""
     hours = УЗЕЛ_Ч if hours is None else hours
     сейчас = int(time.time()) if сейчас is None else int(сейчас)
     if not воркер_жив(con, сейчас):
         return []                       # причины не свежие — это `очередь-стоит`
     out = []
-    for узел, n, kinds, старейшая in con.execute(
-            "select substr(queued_reason, length('node_offline:') + 1) as узел, "
+    for причина, узел, n, kinds, старейшая in con.execute(
+            "select substr(queued_reason, 1, instr(queued_reason, ':') - 1), "
+            "substr(queued_reason, instr(queued_reason, ':') + 1) as узел, "
             "count(*), group_concat(distinct kind), "
             "min(cast(strftime('%s', created) as integer)) from jobs "
-            "where state='ready' and queued_reason like 'node_offline:%' "
-            "group by узел order by узел").fetchall():
+            "where state='ready' and queued_reason like 'node\\_%:%' escape '\\' "
+            "group by queued_reason order by queued_reason").fetchall():
+        шаги = ", ".join(sorted((kinds or "").split(",")))
+        if причина != "node_offline":
+            if старейшая is None or сейчас - старейшая <= hours * 3600:
+                continue
+            что = ("на паузе (accept_jobs: false)" if причина == "node_paused"
+                   else "жив, но нужного сервиса нет")
+            out.append(находка(
+                "узел-не-берёт", "warn",
+                "узел %s %s; ждут работ по шагам %s: %d, старейшая %d ч — снять "
+                "паузу или поднять сервис на узле; в DLQ они не уйдут"
+                % (узел, что, шаги, n, (сейчас - старейшая) // 3600),
+                count=n, node=узел))
+            continue
         видел = con.execute("select cast(strftime('%s', last_seen) as integer) "
                             "from compute_nodes where id=?", (узел,)).fetchone()
         # молчание — с последнего ответа, но не раньше самой старой ждущей
@@ -907,7 +928,6 @@ def узел_молчит(con, hours=None, сейчас=None):
             else (видел if видел is not None else старейшая)
         if с is None or сейчас - с <= hours * 3600:
             continue
-        шаги = ", ".join(sorted((kinds or "").split(",")))
         когда = ("не отвечает по шагам %s %d ч" % (шаги, (сейчас - с) // 3600)
                  if видел is not None
                  else "ни разу не отвечал по шагам %s, работы ждут %d ч"
