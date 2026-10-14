@@ -296,7 +296,7 @@ already exists» с `rc=128`, и под `&&` **вся цепочка встаё�
 часа (Т3б.5; снимок открывает базу напрямую, без `mi.connect`, и
 `SCHEMA` не трогает — но его фолбэк «read-only не открылось, беру на
 запись» теперь может случиться раз в час, не раз в сутки),
-`blob_retention.py` в 4:40.
+`blob_retention.py` в 4:40, `due_reminder.py` в 20:00 (Т-У.2).
 `context_pack.py` импортирует `mara_ingest`, но `connect()` не зовёт;
 `codex-usage.py` к базе не ходит вовсе (`grep -c "sqlite\|mara_ingest"` → 0),
 хотя первая редакция этого ранбука называла именно его.
@@ -492,7 +492,8 @@ checkout» перестаёт быть ложью: извлечённое и п�
 
 С Т2.1 `mara_ingest.connect()` схему не трогает: база старее кода — отказ
 с командой, новее — громкий отказ. Без этого шага contextd не поднимется,
-а три крона (`core-backup.py`, `blob_retention.py`, `contextd_reconcile.py`)
+а четыре крона (`core-backup.py`, `blob_retention.py`, `contextd_reconcile.py`,
+`due_reminder.py`)
 будут падать, пока кто-нибудь не сделает его руками.
 
 ```bash
