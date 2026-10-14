@@ -112,9 +112,43 @@ class ПоПроекту(unittest.TestCase):
         # `origin` списком — кривая шапка, а не ключ: `in` по множеству упал бы
         with open(os.path.join(v, "kb/commitments/список.md"), "w", encoding="utf-8") as fh:
             fh.write("---\ntitle: кривая\nstatus: open\norigin:\n  - call/e1\n---\n")
-        self.assertEqual(cp.про_проект(v, "Attadipa"), (1, cp.про_проект(v, "Attadipa")[1]))
-        self.assertEqual([п["title"] for п in cp.про_проект(v, "Attadipa")[1]],
-                         ["прислать смету"])
+        # `source_id:` строкой тела, а не шапки — предфильтр её видит, решает шапка
+        with open(os.path.join(v, "kb/conversations/тело.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\ntitle: x\n---\nsource_id: call/e1\nПроекты: Atta-dipa\n")
+        разговоров, пункты = cp.про_проект(v, "Attadipa")
+        self.assertEqual((разговоров, [п["title"] for п in пункты]), (1, ["прислать смету"]))
+
+    def test_строка_в_формате_писателя(self):
+        """Строку «Проекты:» пишет `call_project.projects_line` через
+        `canon_map` («последний выиграл»), и там бывают люди: «темы и
+        проекты» (ревью #173)."""
+        import call_project, vault_common
+        v = волт()
+        строка = call_project.projects_line(
+            {"projects_mentioned": ["Общее", "Анна", "Atta-dipa"]}, vault_common.canon_map(v))
+        self.assertIn("[[obshchee-2|Общее]]", строка, "писатель линкует последнего")
+        разговор(v, "2026-10-05-1400-pis.md", "call/e5", строка[len("Проекты: "):])
+        карточка(v, "w1.md", title="купить плитку", origin="call/e5", promised_to="Олег")
+        self.assertEqual(cp.про_проект(v, "Общее"), (0, []),
+                         "неоднозначной подписи и её ссылке не верим")
+        self.assertEqual(cp.про_проект(v, "Два")[0], 0, "цель ссылки с такой подписью — тоже")
+        self.assertEqual([п["title"] for п in cp.про_проект(v, "Atta-dipa")[1]],
+                         ["прислать смету", "купить плитку"])
+        паки, _ = cp.по_запросу(v, "Анна")
+        self.assertEqual([п["pack_type"] for п in паки], ["person"],
+                         "человек из строки «Проекты:» проектом не становится")
+        self.assertEqual(cp.про_проект(v, "[[anna]]"), (0, []),
+                         "цель ссылки — ключ, только если это канон проекта")
+
+    def test_шапки_чужих_разговоров_не_разбираются(self):
+        v = волт()
+        for i in range(5):
+            разговор(v, "2026-09-%02d-0900-x.md" % (i + 1), "call/old%d" % i, "Atta-dipa")
+        карточки = cp.открытые_карточки(v)
+        with mock.patch.object(cp.mb, "frontmatter", wraps=cp.mb.frontmatter) as разбор:
+            self.assertEqual(cp.про_проект(v, "Atta-dipa", карточки=карточки)[0], 1)
+        self.assertEqual(разбор.call_count, 3,
+                         "целиком — только разговоры с открытыми карточками (e1, e2, e3)")
 
 
 class ПоЗапросу(unittest.TestCase):
@@ -150,6 +184,22 @@ class ПоЗапросу(unittest.TestCase):
         self.assertEqual([(п["pack_type"], len(п["items"])) for п in паки], [("person", 2)],
                          "то же самое под словом — не второй пакет")
 
+    def test_слово_с_начала(self):
+        v = волт()
+        карточка(v, "c6.md", title="Ваня ждёт отчёт", origin="call/e9", promised_to="Олег")
+        self.assertEqual(cp.по_запросу(v, "Аня"), (cp.по_запросу(v, "Аня")[0], []))
+        self.assertEqual([п["pack_type"] for п in cp.по_запросу(v, "Аня")[0]], ["person"],
+                         "«Аня» не находит «Ваню»")
+        self.assertEqual([и["title"] for и in cp.по_запросу(v, "смет")[0][0]["items"]],
+                         ["прислать смету", "сверить смету <!-- mara:now -->"],
+                         "основа находит слово целиком")
+        self.assertEqual(cp.по_запросу(v, "мету"), ([], []), "с середины слова — нет")
+
+    def test_падеж_подсказан(self):
+        v = волт()
+        self.assertEqual(cp.по_запросу(v, "Анне"), ([], []))
+        self.assertIn("в именительном падеже", cp.оформить_запрос("Анне", []))
+
     def test_неоднозначное_имя_названо(self):
         v = волт()
         self.assertEqual(cp.по_запросу(v, "Петя"), ([], ["person"]))
@@ -158,6 +208,8 @@ class ПоЗапросу(unittest.TestCase):
         паки, неясно = cp.по_запросу(v, "[[petr-1|Петя]]")
         self.assertEqual(([п["pack_id"] for п in паки], неясно), (["person/petr-1"], []),
                          "явная ссылка узнаёт, и неоднозначности не называем")
+        self.assertEqual(cp.по_запросу(v, "[[petr-2|Петя]]"), ([], []),
+                         "у явной ссылки без пунктов — «открытого нет», а не «несколько»")
         self.assertEqual(cp.оформить_запрос("Петя", *cp.по_запросу(v, "Петя")),
                          "«Петя» в индексе сущностей — несколько людей: имя не узнаёт "
                          "никого, спроси точнее (полное имя, как записан в книге).",
@@ -232,6 +284,11 @@ class ПоЗапросу(unittest.TestCase):
         self.assertEqual([п["pack_type"] for п in паки], ["person"], "номер — ключ человека")
         self.assertNotIn("79990000000", "\n".join(cp.строка(it) for it in паки[0]["items"]),
                          "номер вместо имени в пункт не едет (ТЗ §11)")
+        текст = cp.оформить_запрос("+7 999 000-00-00", паки)
+        self.assertNotIn("999", текст, "и номер из about — в шапку")
+        self.assertIn("«этот номер»", текст)
+        self.assertIsNone(cp.поля({"title": "x", "promised_to": "[[ivan|+79990000000]]"})
+                          ["promised_to"], "номер под ссылкой — тоже номер")
 
 
 class Роут(unittest.TestCase):
@@ -285,6 +342,25 @@ class Роут(unittest.TestCase):
         self.assertEqual(len(строки), 1, вывод.getvalue())
         self.assertIn("-> 200 keys=about", строки[0])
         self.assertNotIn("Аня", вывод.getvalue(), "имя человека в журнал не идёт")
+
+    def test_суррогат_и_подпись(self):
+        код, d = self.post({"about": "\ud800 Attadipa"})
+        self.assertEqual(код, 200, "сырой суррогат не роняет ответ")
+        self.assertNotIn("\ud800", d["about"])
+        from datetime import datetime as настоящее
+
+        class Часы:
+            минута = 0
+
+            @classmethod
+            def now(cls, tz=None):
+                cls.минута += 1
+                return настоящее(2026, 10, 14, 12, cls.минута, tzinfo=tz)
+
+        with mock.patch.object(cp, "datetime", Часы):
+            первый, второй = self.post({"about": "Attadipa"})[1], self.post({"about": "Attadipa"})[1]
+        self.assertNotEqual(первый["text"], второй["text"], "минута сборки в шапке")
+        self.assertEqual(первый["sha256"], второй["sha256"], "подпись — от состава, не от минуты")
 
     def test_неоднозначное_и_пустое(self):
         код, d = self.post({"about": "Петя"})

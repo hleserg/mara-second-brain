@@ -1423,10 +1423,13 @@ class Handler(BaseHTTPRequestHandler):
             текст = context_pack.оформить_запрос(о_чём, паки, неоднозначные)
             # след чтения — без `about`: имя человека в журнал не идёт (ТЗ §18)
             print(log_line("POST", p.path, 200, data, клиент(self)), flush=True)
+            # версия — от содержания, как у `now` (ADR-0008, решения 2 и 4):
+            # минута сборки в шапке в подпись не входит
+            состав = context_pack.оформить_запрос(о_чём, паки, неоднозначные, когда="-")
             return self.say(200, {
-                "about": о_чём, "generated_at": mi.now_iso(),
-                # версия — от содержания, как у `now` (ADR-0008, решения 2 и 4)
-                "sha256": hashlib.sha256(текст.encode("utf-8")).hexdigest(),
+                # `about` — очищенным: сырой суррогат ронял `say` (ревью #173)
+                "about": context_pack.данные(о_чём, 200), "generated_at": mi.now_iso(),
+                "sha256": hashlib.sha256(состав.encode("utf-8")).hexdigest(),
                 "packs": [{k: п[k] for k in ("pack_id", "pack_type", "conversations")
                            if k in п} | {"items": len(п["items"])} for п in паки],
                 "ambiguous": неоднозначные, "text": текст})
