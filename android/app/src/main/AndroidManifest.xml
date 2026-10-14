@@ -2,8 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- RECORD_AUDIO здесь нет и не будет. Приложение не записывает звук:
-         запись создаёт штатный Huawei Phone/Recorder или выбранный владельцем
-         сторонний рекордер, мы подбираем готовый файл (ТЗ §6, спека 3). -->
+         запись создаёт сторонний рекордер (на Pura 70 Pro, EMUI 14.2,
+         системной записи звонков нет — ТЗ §7.1; рабочий — ACR Phone + APH,
+         §7.2), мы подбираем готовый файл (ТЗ §6, спека 3, ADR-0007). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
@@ -20,9 +21,12 @@
     <uses-permission android:name="android.permission.READ_SMS" />
 
     <!-- Android 11+ показывает чужие пакеты только объявленные здесь; без
-         этого «рекордер установлен» (Device.producers, здоровье Т4.2) всегда
-         было бы «нет». Список — тот же, что Device.КАНДИДАТЫ. -->
+         этого «рекордер установлен» (Device.рекордеры, здоровье Т4.2) всегда
+         было бы «нет». Список — Рекордеры.ПАКЕТЫ: профили §7.1 и прочие;
+         RecorderTest сверяет, что объявлены все. -->
     <queries>
+        <package android:name="com.nll.cb" />
+        <package android:name="com.catalinagroup.callrecorder" />
         <package android:name="com.huawei.soundrecorder" />
         <package android:name="com.android.soundrecorder" />
         <package android:name="com.huawei.contacts" />

@@ -125,13 +125,16 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                     Device.ext(job.recording()), job.producer, ZoneId.systemDefault(), м?.by,
                     job.idemKey)
                 val r = api.postEvent(body)
-                q.save(job.copy(state = JobFlow.next(job.state, r), eventId = r.eventId,
+                val дальше = JobFlow.next(job.state, r)
+                q.save(job.copy(state = дальше, eventId = r.eventId,
                     attempts = job.attempts + 1, error = ошибка(r)), now)
+                // дубль, чьё аудио на сервере уже лежит, — приём подтверждён
+                if (дальше == JobState.DONE) принято(ctx, s, job, r.eventId)
                 return r
             }
             JobState.POSTED -> {
                 // исчезнувший файл — это не «сети нет», повторять его бессмысленно
-                val поток = Device.open(ctx, job.recording())
+                val поток = Device.провайдерЗаписи(ctx, s, job.recording()).openRecording(job.recording())
                     ?: return null.also { q.save(job.copy(state = JobState.FAILED,
                         error = "файл исчез"), now) }
                 val r = api.putAudio(job.eventId!!, job.sizeBytes) { поток }
@@ -153,10 +156,28 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                 // `SecurityException`. Метка времени для экрана не имеет права
                 // откатить `DONE` в `POSTED` снимком, снятым до шага, — иначе
                 // весь разговор уедет заново.
-                if (дальше == JobState.DONE) runCatching { s.lastUploadMs = now }
+                if (дальше == JobState.DONE) {
+                    runCatching { s.lastUploadMs = now }
+                    принято(ctx, s, job, job.eventId)
+                }
                 return r
             }
             else -> return null
+        }
+    }
+
+    /**
+     * `acknowledge_ingested` (ТЗ §7.4, ADR-0007 «Последствия») — только
+     * после того, как сервер подтвердил приём: `DONE` уже в очереди.
+     * Нынешние провайдеры ничего не удаляют, но провайдер, который однажды
+     * станет убирать за собой, должен узнать о приёме ровно здесь, а не
+     * раньше. Строка в очереди уже `DONE`, и бросок отсюда откатил бы её
+     * снимком до шага — поэтому `runCatching`, как у метки времени выше.
+     */
+    private fun принято(ctx: Context, s: Settings, job: Job, квитанция: String?) {
+        runCatching {
+            Device.провайдерЗаписи(ctx, s, job.recording())
+                .acknowledgeIngested(job.recording(), квитанция ?: "")
         }
     }
 

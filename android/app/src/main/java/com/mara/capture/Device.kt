@@ -6,8 +6,10 @@ import android.content.pm.PackageManager
 import android.database.Cursor
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.provider.CallLog
 import android.provider.ContactsContract
+import android.provider.DocumentsContract
 import android.provider.Telephony
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
@@ -27,18 +29,21 @@ object Device {
     fun granted(ctx: Context, perm: String): Boolean =
         ctx.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
 
+    /** Разрешение на медиатеку: до 33 её открывало общее чтение хранилища,
+     *  с 33 — отдельное на аудио. */
+    val АУДИО: String = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+
     /**
-     * Способ 1 — медиатека. Если прошивка публикует запись сюда, мы узнаём о
-     * ней сразу и без обхода папок.
+     * Способ 1 — медиатека (`Медиатека`). Если прошивка публикует запись
+     * сюда, мы узнаём о ней сразу и без обхода папок.
      *
      * Путь не зашит: берём всё аудио и оставляем то, в чьём пути есть примета
      * (ТЗ §22 — не hardcode'ить recording path Huawei).
+     *
+     * null — провайдер не отдал курсор: это не «записей нет», здоровье
+     * (Т4.2) различает; сверке и мастеру хватает пустого списка.
      */
-    fun mediaStore(ctx: Context, sinceMs: Long = 0): List<Recording> =
-        mediaStoreOrNull(ctx, sinceMs) ?: emptyList()
-
-    /** null — провайдер не отдал курсор: это не «записей нет», здоровье
-     *  (Т4.2) различает; сверке и мастеру хватает пустого списка. */
     fun mediaStoreOrNull(ctx: Context, sinceMs: Long = 0): List<Recording>? {
         val out = mutableListOf<Recording>()
         val cols = arrayOf(
@@ -68,7 +73,7 @@ object Device {
     }
 
     /**
-     * Способ 2 — папка, выбранная владельцем один раз через SAF. За SAF-деревом
+     * Способ 2 — папка, выбранная владельцем один раз через SAF (`Папка`). За SAF-деревом
      * FileObserver следить не умеет, поэтому здесь только обход.
      *
      * Обход именно в глубину: ACR кладёт записи не в выбранную папку, а в
@@ -88,14 +93,36 @@ object Device {
             }
     }
 
-    /** Всё, что видно обоими способами. Один и тот же файл через MediaStore и
-     *  SAF даёт разные uri, но одинаковый sha256 — сервер отсеет дубль сам. */
+    /** Провайдеры этого телефона (ТЗ §7.4, ADR-0007 п.1): медиатека всегда,
+     *  папка — если владелец её выбрал. */
+    fun провайдеры(ctx: Context, s: Settings): List<RecorderProvider> =
+        listOfNotNull(Медиатека(ctx), s.folderUri.ifEmpty { null }?.let { Папка(ctx, it) })
+
+    /** Провайдер, через который видна запись, — по её uri: у медиатеки свой
+     *  (`content://media/`), всё прочее пришло из папки. Открывают оба
+     *  одинаково, по uri самой записи, так что сменённая потом папка запись
+     *  не теряет. */
+    fun провайдерЗаписи(ctx: Context, s: Settings, rec: Recording): RecorderProvider =
+        if (rec.id.startsWith(Recording.МЕДИАТЕКА)) Медиатека(ctx) else Папка(ctx, s.folderUri)
+
+    /**
+     * Всё, что видно обоими провайдерами. Один и тот же файл через MediaStore
+     * и SAF даёт разные uri, но одинаковый sha256 — сервер отсеет дубль сам.
+     *
+     * Медиатека — с `sinceMs`, папка — целиком: так было с первой версии, и
+     * архив, показанный владельцем через SAF, уезжает весь. Решения о
+     * бэкфилле никто не принимал, и менять его молча вместе с выносом
+     * провайдеров (Т4.1) нельзя — отсюда асимметрия в одном месте.
+     */
     fun scan(ctx: Context, s: Settings, sinceMs: Long = 0): List<Recording> =
-        (mediaStore(ctx, sinceMs) + folder(ctx, s.folderUri)).distinctBy { it.id }
+        ((Медиатека(ctx).listCandidates(sinceMs) ?: emptyList()) + изПапки(ctx, s)).distinctBy { it.id }
 
     /** То же, но `null`, если медиатека не отдала курсор — для здоровья (Т4.2). */
     fun scanOrNull(ctx: Context, s: Settings, sinceMs: Long = 0): List<Recording>? =
-        mediaStoreOrNull(ctx, sinceMs)?.let { (it + folder(ctx, s.folderUri)).distinctBy { r -> r.id } }
+        Медиатека(ctx).listCandidates(sinceMs)?.let { (it + изПапки(ctx, s)).distinctBy { r -> r.id } }
+
+    private fun изПапки(ctx: Context, s: Settings): List<Recording> =
+        if (s.folderUri.isEmpty()) emptyList() else Папка(ctx, s.folderUri).listCandidates(0)
 
     /** null — файла больше нет. `openInputStream` на исчезнувшей строке
      *  MediaStore не возвращает null, а бросает: без этого перехвата
@@ -226,20 +253,87 @@ object Device {
         return out
     }
 
-    /** Кандидаты в производители записи. Список перебираем, показываем найденное. */
-    /** Тот же список объявлен в `AndroidManifest.xml` `<queries>`: без этого
-     *  Android 11+ пакет не покажет, и он сойдёт за неустановленный. */
-    private val КАНДИДАТЫ = listOf(
-        "com.huawei.soundrecorder", "com.android.soundrecorder", "com.huawei.contacts",
-        "com.android.dialer", "com.google.android.dialer",
-        "com.nll.acr", "com.skvalex.callrecorder", "com.appstar.callrecorder",
-    )
+    /** Известные рекордеры, найденные на телефоне (§8.3: установлен,
+     *  включён, версия). Android 11+ показывает только пакеты из `<queries>`
+     *  манифеста — там тот же список, `Рекордеры.ПАКЕТЫ` (сверяет
+     *  `RecorderTest`). */
+    fun рекордеры(ctx: Context): List<Установлен> = Рекордеры.ИЗВЕСТНЫЕ.mapNotNull { р ->
+        р.пакеты.firstNotNullOfOrNull { p ->
+            runCatching {
+                @Suppress("DEPRECATION")
+                val i = ctx.packageManager.getPackageInfo(p, 0)
+                Установлен(р, i.versionName, i.applicationInfo?.enabled != false)
+            }.getOrNull()
+        }
+    }
 
-    fun producers(ctx: Context): List<String> = КАНДИДАТЫ.mapNotNull { p ->
+    /** Прочие пакеты из `Рекордеры.ПРОЧИЕ`, что стоят, — только для мастера. */
+    fun прочие(ctx: Context): List<String> = Рекордеры.ПРОЧИЕ.mapNotNull { p ->
         runCatching {
             @Suppress("DEPRECATION")
             val i = ctx.packageManager.getPackageInfo(p, 0)
             "$p ${i.versionName}"
         }.getOrNull()
     }
+}
+
+/**
+ * Медиатека как провайдер §7.4 (ADR-0007 п.1). Знает пакет-владельца файла
+ * (`OWNER_PACKAGE_NAME`), поэтому рекордер за ней опознаётся
+ * (`Рекордеры.чей`). Ничего не удаляет и не переименовывает.
+ */
+class Медиатека(private val ctx: Context) : RecorderProvider {
+    override val providerId = "mediastore"
+    override val providerVersion = 1
+
+    override fun capabilities() = Манифест.поКандидатам(providerId, providerVersion,
+        "mediastore", null, true, listCandidates(0) ?: emptyList(),
+        Рекордеры.вЗдоровье(Device.рекордеры(ctx)))
+
+    override fun health(): Проба =
+        if (Device.granted(ctx, Device.АУДИО)) Проба(true, "аудио в медиатеке читается")
+        else Проба(false, "нет разрешения " + Device.АУДИО.substringAfterLast('.'))
+
+    override fun listCandidates(sinceMs: Long): List<Recording>? = Device.mediaStoreOrNull(ctx, sinceMs)
+    override fun openRecording(candidate: Recording): InputStream? = Device.open(ctx, candidate)
+    override fun extractMetadata(candidate: Recording): String = Device.audioInfo(ctx, candidate)
+    override fun acknowledgeIngested(candidate: Recording, receipt: String) {}
+
+    override fun diagnostics(): List<String> {
+        val все = listCandidates(0) ?: return listOf("$providerId: курсор не отдан")
+        // пакеты — имена приложений, не людей: в отчёт можно
+        val поПакетам = все.groupingBy { it.producer ?: "?" }.eachCount()
+            .entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key} ${it.value}" }
+        return listOf("$providerId: записей ${все.size}" + (if (все.isEmpty()) "" else ", по пакетам: $поПакетам"))
+    }
+}
+
+/**
+ * Папка, выбранная владельцем через SAF, как провайдер §7.4 (ADR-0007 п.1).
+ * Владельца файла не сообщает — рекордер за ней не опознаётся, и манифест
+ * говорит `unknown`, а не догадку по пути. Грант только на чтение: ничего
+ * не удаляет.
+ */
+class Папка(private val ctx: Context, private val uri: String) : RecorderProvider {
+    override val providerId = "saf_folder"
+    override val providerVersion = 1
+
+    override fun capabilities() = Манифест(providerId, providerVersion, "folder",
+        runCatching { DocumentsContract.getTreeDocumentId(Uri.parse(uri)) }.getOrNull(),
+        false, emptyList())
+
+    override fun health(): Проба =
+        if (runCatching { DocumentFile.fromTreeUri(ctx, Uri.parse(uri))?.canRead() == true }
+                .getOrDefault(false)) Проба(true, "папка читается")
+        else Проба(false, "выбранная папка не читается — выбери её заново")
+
+    /** Обход SAF всегда целый (фильтра у провайдера нет), курсор режет уже
+     *  найденное. */
+    override fun listCandidates(sinceMs: Long): List<Recording> =
+        Device.folder(ctx, uri).filter { it.modifiedMs >= sinceMs }
+
+    override fun openRecording(candidate: Recording): InputStream? = Device.open(ctx, candidate)
+    override fun extractMetadata(candidate: Recording): String = Device.audioInfo(ctx, candidate)
+    override fun acknowledgeIngested(candidate: Recording, receipt: String) {}
+    override fun diagnostics(): List<String> = listOf("$providerId: записей ${listCandidates(0).size}")
 }

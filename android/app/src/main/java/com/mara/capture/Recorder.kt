@@ -1,0 +1,257 @@
+package com.mara.capture
+
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.InputStream
+
+/**
+ * Слой провайдеров записи (ТЗ §7.4, ADR-0007, Т4.1). Здесь два понятия, и
+ * путать их нельзя.
+ *
+ * Провайдер — способ, которым приложение видит файлы: медиатека или папка,
+ * выбранная владельцем через SAF. Называется по способу доступа, а не по
+ * приложению (ADR-0007 п.1): через SAF владелец файла не виден, и провайдер
+ * «ACR Phone» был бы догадкой. Реализации трогают Android и живут в
+ * `Device` (`Медиатека`, `Папка`).
+ *
+ * Рекордер — чужое приложение, которое пишет звонки (§7.1–7.2). Опознаётся
+ * по пакету-владельцу файла, когда медиатека его знает; заявленный статус,
+ * известный риск и зафиксированная конфигурация — данные, а не код: таблица
+ * §7.1 живёт в `Рекордеры`.
+ *
+ * Здесь — только то, что проверяется на JVM: контракт, профили рекордеров,
+ * манифест и опознание.
+ */
+interface RecorderProvider {
+    /** `provider_id` — по способу доступа: `mediastore`, `saf_folder`. */
+    val providerId: String
+
+    /** `provider_version` — версия адаптера, а не рекордера. */
+    val providerVersion: Int
+
+    /** `capabilities` — манифест §7.4: что видно этим способом и что
+     *  известно о рекордере за ним. Может обходить файлы — не с главного
+     *  потока. */
+    fun capabilities(): Манифест
+
+    /** `health()` — проба доступа: разрешение или грант и чтение. Это не
+     *  здоровье захвата: читаемая папка не доказывает, что запись идёт
+     *  (ADR-0007, «Альтернативы»), — его выносит `Здоровье.оценить`. */
+    fun health(): Проба
+
+    /** `list_candidates(since_cursor)`: курсор — mtime, файлы не старше
+     *  него. `null` — не прочиталось, и это не «записей нет» (Т4.2).
+     *  Кандидат — ещё не запись: записью он становится только после
+     *  сопоставления со звонком (ADR-0007 п.4). */
+    fun listCandidates(sinceMs: Long): List<Recording>?
+
+    /** `open_recording` — null, если файла больше нет. */
+    fun openRecording(candidate: Recording): InputStream?
+
+    /** `extract_metadata` — кодек, каналы, частота, длительность: строка
+     *  для мастера. */
+    fun extractMetadata(candidate: Recording): String
+
+    /** `acknowledge_ingested` — зовётся только после того, как сервер
+     *  подтвердил приём (`DONE`): провайдер, который однажды станет убирать
+     *  за собой файлы, обязан узнать о приёме не раньше (ADR-0007,
+     *  «Последствия»). Нынешние оба ничего не удаляют: грант — только на
+     *  чтение, а удаление — решение владельца. */
+    fun acknowledgeIngested(candidate: Recording, receipt: String)
+
+    /** `diagnostics()` — строки для отчёта мастера. Затирание номеров —
+     *  дело мастера (`Затирание.текст`), но имён контактов провайдер сюда
+     *  и не кладёт: только счёт и пакеты. */
+    fun diagnostics(): List<String>
+}
+
+/** Ответ `health()`: доступ есть или нет и почему — строкой для экрана. */
+data class Проба(val доступ: Boolean, val причина: String)
+
+/**
+ * Рекордер звонков — профиль из таблицы §7.1–7.2. Не обещает
+ * непроверенного (ADR-0007 п.2): `режимыПроверены` — только прошедшие
+ * полевую проверку (R01 не проводился — пусто), `готов` (`production_ready`)
+ * — только после R01, R05 и R06.
+ */
+data class Рекордер(
+    val id: String,
+    val имя: String,
+    /** Пакеты, по которым рекордер опознаётся: владелец файла в медиатеке
+     *  или установленное приложение. Сами по себе пути не доказывают
+     *  (ADR-0007 п.6). */
+    val пакеты: List<String>,
+    /** Заявленный статус §7.1: `degraded`, `unavailable`. */
+    val статус: String,
+    /** Известный риск одной строкой — на экран и в причину здоровья. */
+    val риск: String,
+    /** Пишет ли звонки на целевой прошивке: системный рекордер Huawei на
+     *  HBN-LX9 / EMUI 14.2 — нет (§7.1), и стоящий пакет его рекордером
+     *  звонков не делает. */
+    val пишетЗвонки: Boolean = true,
+    val нуженПомощник: Boolean = false,
+    /** reboot-unsafe (§7.2): после перезагрузки запись слетает. */
+    val перезагрузкаЛомает: Boolean = false,
+    val режимыПроверены: List<String> = emptyList(),
+    /** Куда пишет по зафиксированной конфигурации — подсказка владельцу,
+     *  какую папку выбрать, а не доверие пути. */
+    val папка: String? = null,
+    /** Зафиксированная конфигурация §7.2 — ожидаемая, а не прочитанная:
+     *  настроек чужого приложения не прочесть, их сверяет владелец. */
+    val настройки: Map<String, String> = emptyMap(),
+    /** `remote_report_protocol` (§7.3): не исследован — `unknown`. */
+    val протоколОтчёта: String = "unknown",
+    val готов: Boolean = false,
+)
+
+/** Рекордер, найденный на телефоне: версия и включён ли — §8.3, «provider
+ *  package installed/enabled/version». */
+data class Установлен(val рекордер: Рекордер, val версия: String?, val включён: Boolean)
+
+object Рекордеры {
+    /** §7.1–7.2: временно рабочий, `degraded / reboot-unsafe`. Пакет
+     *  `com.nll.cb` — ACR Phone; пакет помощника APH не заносим: его
+     *  состояние легальным API не читается (§8.3 — показывать `unknown`). */
+    val ACR_PHONE = Рекордер(
+        id = "acr_phone_aph",
+        имя = "ACR Phone + APH",
+        пакеты = listOf("com.nll.cb"),
+        статус = "degraded",
+        риск = "reboot-unsafe: после перезагрузки запись слетает, нужен контрольный звонок (§7.2)",
+        нуженПомощник = true,
+        перезагрузкаЛомает = true,
+        папка = "Documents/ACR/ACRPhone",
+        настройки = linkedMapOf(
+            "automatic_recording" to "on",
+            "delay_ms" to "500",
+            "quality" to "critical",
+            "bitrate_kbps" to "192",
+            "sample_rate_hz" to "48000",
+            "increase_volume" to "on",
+            "auto_speakerphone" to "off",
+            "autodelete" to "off",
+        ),
+    )
+
+    /** §7.1: технически пишет, но в трубке собеседник едва слышен. */
+    val CUBE_ACR = Рекордер(
+        id = "cube_acr",
+        имя = "Cube ACR",
+        пакеты = listOf("com.catalinagroup.callrecorder"),
+        статус = "degraded",
+        риск = "в трубке собеседник слышен плохо — годится только с громкой связью (§7.1)",
+    )
+
+    /** §7.1: на целевой прошивке системной записи звонков нет. */
+    val HUAWEI = Рекордер(
+        id = "huawei_system",
+        имя = "системный рекордер Huawei",
+        пакеты = listOf("com.huawei.soundrecorder"),
+        статус = "unavailable",
+        риск = "на HBN-LX9 / EMUI 14.2 звонки не пишет — использовать нельзя (§7.1)",
+        пишетЗвонки = false,
+    )
+
+    val ИЗВЕСТНЫЕ = listOf(ACR_PHONE, CUBE_ACR, HUAWEI)
+
+    /** Прочие пакеты для мастера: звонилки и рекордеры, у которых
+     *  профиля нет. Показываются, но ни в здоровье, ни в опознании не
+     *  участвуют: штатная звонилка Huawei стоит всегда, и считать её
+     *  рекордером значило бы зажечь ложный зелёный (§7.1). */
+    val ПРОЧИЕ = listOf(
+        "com.android.soundrecorder", "com.huawei.contacts",
+        "com.android.dialer", "com.google.android.dialer",
+        "com.nll.acr", "com.skvalex.callrecorder", "com.appstar.callrecorder",
+    )
+
+    /** Все пакеты, которые приложению нужно видеть: на Android 11+ —
+     *  только объявленные в `<queries>` манифеста. */
+    val ПАКЕТЫ: List<String> = ИЗВЕСТНЫЕ.flatMap { it.пакеты } + ПРОЧИЕ
+
+    /** Рекордер звонков, записавший файл, — по пакету-владельцу (его знает
+     *  только медиатека). Сперва среди установленных, потом среди всех
+     *  известных: файл мог пережить удалённое приложение. Рекордер, который
+     *  на этой прошивке звонков не пишет, записью звонка файл не делает —
+     *  null, как и неизвестный пакет. */
+    fun чей(r: Recording, установлены: List<Рекордер>): Рекордер? {
+        val пакет = r.producer ?: return null
+        return (установлены + ИЗВЕСТНЫЕ).firstOrNull { пакет in it.пакеты && it.пишетЗвонки }
+    }
+
+    /** Рекордеры звонков, которые здоровью есть смысл учитывать:
+     *  установлены, включены и пишут звонки. */
+    fun вЗдоровье(найдены: List<Установлен>): List<Рекордер> =
+        найдены.filter { it.включён && it.рекордер.пишетЗвонки }.map { it.рекордер }
+
+    /** Строка для экрана здоровья (§17.2: факты §7 — в интерфейсе). */
+    fun словами(найдены: List<Установлен>): String {
+        if (найдены.isEmpty())
+            return "ни одного известного рекордера звонков — системной записи на этой прошивке нет (§7.1)"
+        return найдены.joinToString("; ") { у ->
+            val р = у.рекордер
+            listOfNotNull(
+                р.имя + (у.версия?.let { " $it" } ?: ""),
+                "выключен".takeIf { !у.включён },
+                "${р.статус}: ${р.риск}",
+                "помощник: состояние не читается — unknown (§8.3)".takeIf { р.нуженПомощник },
+            ).joinToString(" — ")
+        }
+    }
+
+    /** Подсказка мастера: что сверить руками в настройках рекордера
+     *  (§8.3 «guided check», §8.6 п.5) — прочесть их программно нельзя. */
+    fun сверитьРуками(р: Рекордер): String? {
+        if (р.настройки.isEmpty() && р.папка == null) return null
+        val части = р.настройки.map { (k, v) -> "$k=$v" } +
+            listOfNotNull(р.папка?.let { "папка=$it" })
+        return "${р.имя}: проверь в настройках — " + части.joinToString(", ")
+    }
+}
+
+/**
+ * Манифест возможностей §7.4: что видит провайдер и что известно о
+ * рекордере за ним. Рекордеры — опознанные по файлам (`Рекордеры.чей`);
+ * у папки SAF их нет: владельца файла она не сообщает.
+ *
+ * Не обещает непроверенного (ADR-0007 п.2): конкретные значения полей
+ * рекордера — только когда опознан ровно один; иначе `unknown`, а
+ * `production_ready` — `true` лишь когда все опознанные готовы.
+ */
+data class Манифест(
+    val providerId: String,
+    val providerVersion: Int,
+    val storageMode: String,
+    val storagePath: String?,
+    val ownerKnown: Boolean,
+    val рекордеры: List<Рекордер>,
+) {
+    fun json(): JSONObject {
+        val один = рекордеры.singleOrNull()
+        val o = JSONObject()
+            .put("provider_id", providerId)
+            .put("provider_version", providerVersion)
+            .put("storage_mode", storageMode)
+            .put("storage_path", storagePath ?: "unknown")
+            .put("owner_known", ownerKnown)
+            .put("recorders", JSONArray(рекордеры.map { it.id }))
+            .put("status", один?.статус ?: "unknown")
+            .put("capture_modes_tested", JSONArray(один?.режимыПроверены ?: emptyList<String>()))
+            .put("requires_helper", один?.нуженПомощник ?: "unknown")
+            .put("requires_post_reboot_recovery", один?.перезагрузкаЛомает ?: "unknown")
+            .put("remote_report_protocol", один?.протоколОтчёта ?: "unknown")
+            .put("production_ready", рекордеры.isNotEmpty() && рекордеры.all { it.готов })
+        if (один != null && один.настройки.isNotEmpty())
+            o.put("config_expected", JSONObject(один.настройки))
+        return o
+    }
+
+    companion object {
+        /** Манифест по кандидатам: рекордеры — те, чьи файлы видны. */
+        fun поКандидатам(
+            providerId: String, providerVersion: Int, storageMode: String,
+            storagePath: String?, ownerKnown: Boolean,
+            кандидаты: List<Recording>, установлены: List<Рекордер>,
+        ) = Манифест(providerId, providerVersion, storageMode, storagePath, ownerKnown,
+            кандидаты.mapNotNull { Рекордеры.чей(it, установлены) }.distinct())
+    }
+}

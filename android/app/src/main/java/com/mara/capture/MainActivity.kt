@@ -124,6 +124,9 @@ class MainActivity : AppCompatActivity() {
         val оценка = HealthWorker.проверить(this, s)
         listOf(
             "состояние: " + Здоровье.словами(оценка),
+            // факты §7 — в интерфейсе (§17.2): заявленный статус и риск
+            // рекордера, состояние помощника не читается
+            "рекордер: " + Рекордеры.словами(Device.рекордеры(this)),
             "тревог «звонок был, записи нет»: ${s.alertCount}" +
                 (if (s.alertCallMs != 0L) ", одна открыта" else "") +
                 ", последняя закрыта: " + когда(s.alertRecoveredMs),
@@ -225,32 +228,45 @@ class MainActivity : AppCompatActivity() {
      * до того, как он покинул телефон (`Затирание`, Т3.5, М5 п.7).
      */
     private fun мастер() = фоном {
-        val медиатека = Device.mediaStore(this)
-        val папка = Device.folder(this, s.folderUri)
-        val последняя = (медиатека + папка).maxByOrNull { it.modifiedMs }
+        // провайдеры §7.4 (Т4.1): у каждого — проба доступа, счёт и манифест
+        val видно = Device.провайдеры(this, s).map { it to runCatching { it.listCandidates(0) }.getOrNull() }
+        val последняя = видно.flatMap { it.second.orEmpty() }.maxByOrNull { it.modifiedMs }
+        val чья = последняя?.let { Device.провайдерЗаписи(this, s, it) }
+        val найдены = Device.рекордеры(this)
         val журнал = Device.callLog(this, System.currentTimeMillis() - 7 * 24 * 3600_000L)
         val совпало = последняя?.let { CallLogMatcher.match(журнал, it.modifiedMs, it.подсказка()) }
-        Затирание.текст(listOf(
+        val строки = mutableListOf(
             "модель: ${Build.MODEL} (${Build.MANUFACTURER})",
             "сборка: ${Build.DISPLAY}, Android ${Build.VERSION.RELEASE}",
-            "рекордеры: " + Device.producers(this).joinToString("; ").ifEmpty { "ни одного из известных" },
-            "в медиатеке записей: ${медиатека.size}",
-            "в выбранной папке: " + if (s.folderUri.isEmpty()) "папка не выбрана" else "${папка.size}",
+            "рекордеры: " + Рекордеры.словами(найдены),
+            "прочие пакеты: " + Device.прочие(this).joinToString("; ").ifEmpty { "—" },
+        )
+        // настроек чужого рекордера не прочесть — что сверить руками (§8.3)
+        строки += найдены.mapNotNull { Рекордеры.сверитьРуками(it.рекордер) }
+        for ((п, список) in видно) {
+            строки += "провайдер ${п.providerId}: ${п.health().причина}, " +
+                (список?.let { "кандидатов ${it.size}" } ?: "не прочиталось")
+            строки += "манифест ${п.providerId}: " + runCatching { п.capabilities().json().toString() }
+                .getOrElse { "не собрался (${it.javaClass.simpleName})" }
+        }
+        if (s.folderUri.isEmpty()) строки += "папка не выбрана — смотрю только медиатеку"
+        строки += listOf(
             // имя файла — от рекордера, в нём бывает имя контакта: наружу форма
             "последний файл: " + (последняя?.let {
                 "${Затирание.файл(it.name)}, ${it.sizeBytes} Б, ${когда(it.modifiedMs)}"
             } ?: "нет"),
-            // `Device.open` ловит только «файла нет»; отозванное разрешение
-            // и отвалившийся SAF-грант бросают `SecurityException` — и здесь
-            // это законный ответ «нет», а не повод потерять весь отчёт.
-            // Выше по стеку его ловит `фоном`, заменяя целиком на
-            // «не собралось» — ровно тогда, когда владелец отчёт и собирает.
-            "читается: " + (последняя?.let {
-                runCatching { Device.open(this, it)?.use { true } == true }
+            // `openRecording` (`Device.open`) ловит только «файла нет»;
+            // отозванное разрешение и отвалившийся SAF-грант бросают
+            // `SecurityException` — и здесь это законный ответ «нет», а не
+            // повод потерять весь отчёт. Выше по стеку его ловит `фоном`,
+            // заменяя целиком на «не собралось» — ровно тогда, когда
+            // владелец отчёт и собирает.
+            "читается: " + (последняя?.let { р ->
+                runCatching { чья?.openRecording(р)?.use { true } == true }
                     .fold({ if (it) "да" else "нет" },
                           { "нет (${it.javaClass.simpleName})" })
             } ?: "-"),
-            "звук: " + (последняя?.let { Device.audioInfo(this, it) } ?: "-"),
+            "звук: " + (последняя?.let { чья?.extractMetadata(it) } ?: "-"),
             "звонков в журнале за неделю: ${журнал.size}",
             "сопоставился с: " + Затирание.контакт(совпало?.entry, совпало?.by),
             "SMS в провайдере за неделю: " + (Device.sms(this, 0, System.currentTimeMillis() - 7 * 24 * 3600_000L)
@@ -259,7 +275,8 @@ class MainActivity : AppCompatActivity() {
             // сойдётся ли с именем файла экспорта — вопрос к полю, не к коду;
             // сам заголовок — имя собеседника, наружу идёт только длина
             "последняя беседа WhatsApp по уведомлению: " + Затирание.беседа(s.lastChatTitle),
-        ).joinToString("\n"))
+        )
+        Затирание.текст(строки.joinToString("\n"))
     }
 
     /** Скан медиатеки, обход SAF и разбор кодека — не на главном потоке. */
