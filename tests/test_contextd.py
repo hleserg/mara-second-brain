@@ -259,16 +259,19 @@ class Api(unittest.TestCase):
                          "подпись нужна клиенту, чтобы молчать, когда не изменилось")
         self.assertIn("прислать смету", d["now"]["text"])
         self.assertNotIn("тело карточки", d["now"]["text"])
-    def test_запрос_контекста_отдаёт_то_что_есть_а_не_обещание(self):
-        import context_pack
+    def test_запрос_контекста_ищет_а_не_отдаёт_now(self):
+        """Т6.2: справка ищет по `about` — здесь словом заголовка (полный
+        разбор — `tests/test_context_query.py`), а не отдаёт пакет `now`,
+        как заглушка до неё."""
         with open(os.path.join(self.vault, "kb/commitments", "b.md"), "w",
                   encoding="utf-8") as fh:
             fh.write("---\ntitle: позвонить в банк\nstatus: open\n---\n")
-        context_pack.build_now(self.vault)
-        code, d = self.post("/v1/context/query", {"text": "что там с банком"})
+        code, d = self.post("/v1/context/query", {"about": "банк"})
         self.assertEqual(code, 200)
-        self.assertEqual(len(d["packs"]), 1, "пакет ровно один и это now")
-        self.assertIn("позвонить в банк", d["packs"][0]["text"])
+        self.assertEqual([п["pack_type"] for п in d["packs"]], ["query"])
+        self.assertIn("позвонить в банк", d["text"])
+        code, d = self.post("/v1/context/query", {"about": "что там с банком"})
+        self.assertEqual((code, d["packs"]), (200, []), "фраза — не слово заголовка")
     def test_событие_телефона_принимается_как_есть(self):
         """Общий фикс контракта: его же шлёт Kotlin-тест приложения.
 

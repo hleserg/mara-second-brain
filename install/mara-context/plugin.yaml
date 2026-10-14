@@ -1,8 +1,9 @@
 name: mara-context
-version: 1.1.0
-description: "Открытые обязательства владельца приезжают в ход Мары до первого вызова инструмента; правка обязательств её словами — инструментом mara_correction."
+version: 1.2.0
+description: "Открытые обязательства владельца приезжают в ход Мары до первого вызова инструмента; правка обязательств её словами — инструментом mara_correction, справка по человеку, проекту или слову — инструментом mara_context."
 author: "Клод"
 provides_hooks:
   - pre_llm_call
 provides_tools:
   - mara_correction
+  - mara_context
