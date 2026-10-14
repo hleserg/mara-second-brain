@@ -925,16 +925,23 @@ def add_job(con, event_id, kind):
     return row["id"] if row else None
 
 
-def claim_job(con, kinds=None, now=None):
+def claim_job(con, kinds=None, now=None, первыми=()):
     """Взять работу в аренду. Аренда, а не флаг: воркер может умереть посреди
-    часового транскрипта, и работа должна вернуться в очередь сама."""
+    часового транскрипта, и работа должна вернуться в очередь сама.
+    `первыми` — виды, которые берутся раньше остальных готовых, сколько бы
+    те ни ждали (напоминание устаревает за час, расшифровка — нет)."""
     now = int(time.time()) if now is None else int(now)
     q = "select * from jobs where state='ready' and next_at<=? and lease_until<? "
     args = [now, now]
     if kinds:
         q += "and kind in (%s) " % ",".join("?" * len(kinds))
         args += list(kinds)
-    q += "order by next_at limit 1"
+    if первыми:
+        q += "order by kind not in (%s), " % ",".join("?" * len(первыми))
+        args += list(первыми)
+    else:
+        q += "order by "
+    q += "next_at limit 1"
     row = con.execute(q, args).fetchone()
     if not row:
         return None

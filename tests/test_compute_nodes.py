@@ -119,6 +119,15 @@ class Такт(unittest.TestCase):
         взята = self.такт()
         self.assertEqual((взята["kind"], self.шаги), ("project", ["project"]))
 
+    def test_напоминание_раньше_тяжёлых(self):
+        """Т-У.4: шаг `nudge` устаревает за час — воркер берёт его раньше
+        работы, стоявшей в очереди дольше."""
+        os.environ.pop("MARA_ASR_URL", None)
+        eid, _ = mi.put_event(self.con, {"kind": "message", "source": "telegram",
+                                         "source_id": "n3", "payload": {}})
+        mi.add_job(self.con, eid, "nudge")
+        self.assertEqual([self.такт()["kind"], self.такт()["kind"]], ["nudge", "asr"])
+
     def test_узел_ответил_работа_взята(self):
         os.environ["MARA_ASR_URL"] = мёртвый_адрес(self)
         отмечено = [None, None]
