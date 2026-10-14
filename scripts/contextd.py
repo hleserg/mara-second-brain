@@ -1406,12 +1406,30 @@ class Handler(BaseHTTPRequestHandler):
             print(log_line("POST", p.path, 200, data), flush=True)
             return self.say(200, ответ)
         if p.path == "/v1/context/query":
-            # пакетов по сущностям нет и не заводится, пока now.md влезает в
-            # бюджет (docs/superpowers/specs/2026-09-02-context-broker-design.md).
-            # Отдаём единственный существующий, чтобы клиент не гадал.
-            пакет = now_pack(self.server.vault)
-            return self.say(200, {"packs": [пакет] if пакет else [], "entities": [],
-                                  "note": "пакет один — now; по сущностям их нет"})
+            # Т6.2: пакеты по сущности — по запросу, инструментом Мары
+            # `mara_context` (ADR-0008, решение 1 с правкой 2026-10-14): кто
+            # или что такое `about` — человек, проект или слово заголовка — и
+            # что по нему открыто. В ход хуком едет только `now`. Содержимое
+            # — одним текстом с той же очисткой, что у `now`; в JSON — только
+            # опись пакетов, сырые поля карточек в ответ не идут
+            о_чём = data.get("about")
+            if not isinstance(о_чём, str) or not о_чём.strip() or len(о_чём) > 200:
+                return self.say(400, {"error": "about — имя человека или проекта или "
+                                               "слово, до 200 знаков"})
+            import context_pack, vault_common
+            о_чём = о_чём.strip()
+            паки, неоднозначные = context_pack.по_запросу(
+                self.server.vault, о_чём, владелец=vault_common.владелец())
+            текст = context_pack.оформить_запрос(о_чём, паки, неоднозначные)
+            # след чтения — без `about`: имя человека в журнал не идёт (ТЗ §18)
+            print(log_line("POST", p.path, 200, data, клиент(self)), flush=True)
+            return self.say(200, {
+                "about": о_чём, "generated_at": mi.now_iso(),
+                # версия — от содержания, как у `now` (ADR-0008, решения 2 и 4)
+                "sha256": hashlib.sha256(текст.encode("utf-8")).hexdigest(),
+                "packs": [{k: п[k] for k in ("pack_id", "pack_type", "conversations")
+                           if k in п} | {"items": len(п["items"])} for п in паки],
+                "ambiguous": неоднозначные, "text": текст})
         return self.say(404, {"error": "нет такого пути"})
 
 
