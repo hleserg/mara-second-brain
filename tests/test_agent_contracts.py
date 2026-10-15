@@ -299,6 +299,17 @@ class Живьём(unittest.TestCase):
                 код, d = self.запрос(к["path"], тело)
                 self.assertEqual(код, 400)
                 self.assertIn("source_id", d["error"])
+        # и source: без него происхождение правки — NULL, а объект ронял
+        # вставку в базу — обрыв вместо 400 (Codex по #176, круг 2)
+        for источник in (None, "", "   ", 5, {"a": 1}, [1]):
+            with self.subTest(source=источник):
+                тело = {"kind": "correction", "source_id": "s-ист",
+                        "payload": {"item": "x", "status": "done"}}
+                if источник is not None:
+                    тело["source"] = источник
+                код, d = self.запрос(к["path"], тело)
+                self.assertEqual(код, 400)
+                self.assertIn("source", d["error"])
         код, d = self.запрос(к["path"], сырое=b'{"kind": "correction", "source": "mara", '
                                              b'"source_id": "u-1", "payload": '
                                              b'{"item": "\\udcff", "status": "done"}}')

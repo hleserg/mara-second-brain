@@ -1388,6 +1388,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self.say(400, {"error": "source_id — непустая строка: "
                                                    "по нему узнаётся повтор правки"},
                                     поля=data)
+                if not (isinstance(data.get("source"), str) and data["source"].strip()):
+                    # вторая половина того же ключа: без неё происхождение
+                    # правки — NULL, а объект ронял вставку в базу — обрыв
+                    # вместо 400 (Codex по #176, круг 2)
+                    return self.say(400, {"error": "source — непустая строка "
+                                                   "(у правки Мары — mara)"}, поля=data)
                 try:
                     # `"\udcff"` — валидный json, но не UTF-8: строка с
                     # одиночным суррогатом роняла запись в базу, и Мара
