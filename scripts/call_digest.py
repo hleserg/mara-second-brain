@@ -77,7 +77,8 @@ SECTIONS = [("requests", "Попросили"), ("commitments", "Ты обеща
             ("open_questions", "Неясно")]
 
 
-КЛЮЧИ = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL")
+КЛЮЧИ = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL", "MARA_BUTTONS_TOKEN",
+         "MARA_BUTTONS_BOT_TOKEN", "MARA_BUTTONS_URL", "MARA_CONTEXT_URL")
 
 
 def env(path=None):
@@ -218,10 +219,13 @@ def приватный_чат(chat_id):
     return s.isascii() and s.isdigit() and int(s) > 0
 
 
-def deliver(text, token, chat_id):
+def deliver(text, token, chat_id, кнопки=None):
     """Отправить или честно сказать, что транспорта нет. Текст не теряется.
     Кривой токен — тоже «транспорта нет»: под демоном stderr успешного шага
-    выбрасывается, и видна причина в сверке (`дайджест_не_доставлен`)."""
+    выбрасывается, и видна причина в сверке (`дайджест_не_доставлен`).
+
+    `кнопки` — ряды inline-клавиатуры Bot API (Т-У.5, утро с кнопками):
+    телеграм без них шлёт обычное сообщение, как раньше."""
     if not token or not chat_id:
         return "no-transport"
     if not приватный_чат(chat_id):
@@ -241,8 +245,12 @@ def deliver(text, token, chat_id):
         print("call_digest: TELEGRAM_BOT_TOKEN не похож на токен бота "
               "(пробел, комментарий в строке?) — не отправляю", file=sys.stderr)
         return "no-transport"
-    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text,
-                                   "disable_web_page_preview": "true"}).encode()
+    поля = {"chat_id": chat_id, "text": text,
+            "disable_web_page_preview": "true"}
+    if кнопки:
+        поля["reply_markup"] = json.dumps({"inline_keyboard": кнопки},
+                                          ensure_ascii=False)
+    data = urllib.parse.urlencode(поля).encode()
     req = urllib.request.Request(API % token, data=data, method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
         ok = json.loads(r.read() or b"{}").get("ok", False)
@@ -258,8 +266,12 @@ def _отправитель(e):
     кривом `TELEGRAM_HOME_CHANNEL`, после починки обязана уйти в
     починенный чат, а не снова упереться в старый (Codex по #120, P1)."""
     def отправить(kind, payload):
-        return deliver(payload["text"], e.get("TELEGRAM_BOT_TOKEN"),
-                       e.get("TELEGRAM_HOME_CHANNEL"))
+        # кнопки — только у утра (Т-У.5): без них зов прежний, трёхаргументный
+        # (его мокают тесты дайджеста)
+        args = (payload["text"], e.get("TELEGRAM_BOT_TOKEN"),
+                e.get("TELEGRAM_HOME_CHANNEL"))
+        кнопки = payload.get("buttons")
+        return deliver(*args, кнопки=кнопки) if кнопки else deliver(*args)
     return отправить
 
 

@@ -87,7 +87,7 @@
       "payload": "object"
     },
     "payload": {
-      "item": "str",
+      "item?": "str",
       "status?": "str",
       "due?": "str",
       "note?": "str",

@@ -293,6 +293,8 @@ doctor описаны файлами с версиями и sha256 каждог�
 | Токен бота Telegram для дайджестов | `/etc/mara/contextd.env` | contextd |
 | `OPENROUTER_API_KEY` | `~/.config/mara/env` (`MARA_ENV_FILE`) | queue-worker, daily-summary |
 | `MARA_CONTEXT_TOKEN` | окружение Hermes | плагин `install/mara-context` |
+| `MARA_BUTTONS_TOKEN` — токен устройства «кнопки утра» (Т-У.5) | `/etc/mara/contextd.env`; в `contextd.db` — хеш | `telegram_buttons.py`, contextd |
+| `MARA_BUTTONS_BOT_TOKEN` — токен бота утра (Т-У.5, бот свой — не Hermes) | `/etc/mara/contextd.env` | `morning_send.py`, `telegram_buttons.py` |
 | Ключ TLS contextd (Т0.9 п. 2) | `contextd.key` в каталоге `--tls-new` (например, `~/.config/mara/tls`), права 600; путь — `MARA_TLS_KEY` в `/etc/mara/contextd.env` | contextd |
 | Сессия TDLib | `/etc/mara/tdlib.env` и каталог `tdlib/` ядра | tdlib-ingest |
 | OAuth Gmail | `gmail/token.json` ядра (`gmail_ingest.py:484`) | gmail_ingest |
