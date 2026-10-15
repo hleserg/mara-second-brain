@@ -704,16 +704,22 @@ def check_correction(payload):
     return None
 
 
+ВЕРСИЯ_ЗНАКОВ = 18          # цифр в строке `expected_version`: дальше `int()` не зовём
+
+
 def _целое(v):
     """Версия из недоверенного аргумента: целое ≥ 1 или None.
 
     `isdecimal`, а не `isdigit`: у «²» второе истинно, а `int()` падает —
-    обрыв без ответа (ревью PR #118)."""
+    обрыв без ответа (ревью PR #118). Длина — до `ВЕРСИЯ_ЗНАКОВ`: строку
+    длиннее 4300 цифр `int()` не переводит вовсе (предел питона), и обрыв
+    вместо 400 возвращался бы (Codex по #176)."""
     if isinstance(v, bool):
         return None
     if isinstance(v, int):
         return v if v >= 1 else None
-    if isinstance(v, str) and v.isdecimal() and int(v) >= 1:
+    if (isinstance(v, str) and v.isdecimal() and len(v) <= ВЕРСИЯ_ЗНАКОВ
+            and int(v) >= 1):
         return int(v)
     return None
 

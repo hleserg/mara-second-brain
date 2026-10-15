@@ -99,7 +99,8 @@
       "note": 500,
       "open_titles": 15,
       "ambiguous_titles": 15,
-      "idempotency_key": 128
+      "idempotency_key": 128,
+      "expected_version_digits": 18
     },
     "response": {
       "contract": "str",

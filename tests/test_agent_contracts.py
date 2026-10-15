@@ -81,7 +81,8 @@ class Фикстур(unittest.TestCase):
                                   "note": call_project.ЗАМЕТКА_МАКС,
                                   "open_titles": call_project.СПИСОК_МАКС,
                                   "ambiguous_titles": call_project.СПИСОК_МАКС,
-                                  "idempotency_key": contextd.КЛЮЧ_МАКС})
+                                  "idempotency_key": contextd.КЛЮЧ_МАКС,
+                                  "expected_version_digits": call_project.ВЕРСИЯ_ЗНАКОВ})
 
     def test_пример_пакета_как_настоящий(self):
         """Текст пакета едет в ход с маркерами — пример тоже с ними."""
@@ -253,6 +254,20 @@ class Живьём(unittest.TestCase):
         for поле in (applied["text"], applied["current"]["status"]):
             self.assertNotIn("<!--", поле)
             self.assertNotIn("«да»", поле)
+
+    def test_длинная_версия_строкой_400(self):
+        """Строку длиннее 4300 цифр `int()` не переводит: без предела длины
+        обработчик падал, и клиент получал обрыв вместо 400 (Codex по #176)."""
+        self.карточка("v.md", "сдать отчёт")
+        for версия in ("9" * 5000, "1" * 19):
+            with self.subTest(знаков=len(версия)):
+                код, d = self.правка({"item": "сдать отчёт", "status": "done",
+                                      "expected_version": версия}, "v-%d" % len(версия))
+                self.assertEqual(код, 400)
+                self.assertIn("expected_version", d["error"])
+        код, _ = self.правка({"item": "сдать отчёт", "status": "done",
+                              "expected_version": "1" * 18}, "v-18")
+        self.assertEqual(код, 200)
 
     def test_пределы_запроса(self):
         self.карточка("l.md", "я" * 200)
