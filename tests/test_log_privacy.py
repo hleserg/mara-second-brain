@@ -49,6 +49,13 @@ class Обезличить(unittest.TestCase):
         s = mi.обезличить("kb/commitments/прислать смету Олегу.md: конфликт")
         self.assertNotIn("смету", s)
         self.assertEqual(s, "kb/commitments/…: конфликт")
+        # знаки препинания в имени — тоже имя (Codex, круг 3)
+        s = mi.обезличить("kb/commitments/Send invoice, urgent to Olegu.md: спор")
+        self.assertNotIn("urgent", s)
+        self.assertEqual(s, "kb/commitments/…: спор")
+        # два пути в одной строке режутся по отдельности
+        self.assertEqual(mi.обезличить("спор: kb/commitments/a.md, kb/commitments/b.md"),
+                         "спор: kb/commitments/…, kb/commitments/…")
 
     def test_карточка_человека_тоже(self):
         """`call_project.person_card` пишет `entities/people/<slug(имени)>.md`
