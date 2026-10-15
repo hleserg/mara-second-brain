@@ -299,9 +299,10 @@ class Живьём(unittest.TestCase):
                 код, d = self.запрос(к["path"], тело)
                 self.assertEqual(код, 400)
                 self.assertIn("source_id", d["error"])
-        # и source: без него происхождение правки — NULL, а объект ронял
-        # вставку в базу — обрыв вместо 400 (Codex по #176, круг 2)
-        for источник in (None, "", "   ", 5, {"a": 1}, [1]):
+        # и source: без него происхождение правки — NULL, объект ронял
+        # вставку, а не-mara делал из того же source_id второе событие —
+        # правка применялась бы дважды (Codex по #176, круги 2 и 4)
+        for источник in (None, "", "   ", 5, {"a": 1}, [1], "phone", "mara "):
             with self.subTest(source=источник):
                 тело = {"kind": "correction", "source_id": "s-ист",
                         "payload": {"item": "x", "status": "done"}}

@@ -1388,12 +1388,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.say(400, {"error": "source_id — непустая строка: "
                                                    "по нему узнаётся повтор правки"},
                                     поля=data)
-                if not (isinstance(data.get("source"), str) and data["source"].strip()):
-                    # вторая половина того же ключа: без неё происхождение
-                    # правки — NULL, а объект ронял вставку в базу — обрыв
-                    # вместо 400 (Codex по #176, круг 2)
-                    return self.say(400, {"error": "source — непустая строка "
-                                                   "(у правки Мары — mara)"}, поля=data)
+                if data.get("source") != "mara":
+                    # вторая половина того же ключа дедупа, и ровно `mara`
+                    # по контракту: другой source делал бы из того же
+                    # source_id второе событие — та же правка применялась бы
+                    # дважды, с ложным происхождением (Codex по #176,
+                    # круги 2 и 4). Панель волны 8 придёт со своим контрактом
+                    # и своим source — это решение того контракта, не лазейка
+                    # этого.
+                    return self.say(400, {"error": "source правки — mara"}, поля=data)
                 if not isinstance(data.get("occurred_at"), (str, type(None))):
                     # `{}` в occurred_at доезжал до вставки и ронял её —
                     # обрыв вместо 400 (Codex по #176, круг 3)
