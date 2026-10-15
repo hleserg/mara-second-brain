@@ -53,9 +53,17 @@ class Обезличить(unittest.TestCase):
         s = mi.обезличить("kb/commitments/Send invoice, urgent to Olegu.md: спор")
         self.assertNotIn("urgent", s)
         self.assertEqual(s, "kb/commitments/…: спор")
-        # два пути в одной строке режутся по отдельности
+        # «.md » в середине имени: жадность до последнего .md (Codex, круг 4)
+        s = mi.обезличить("kb/commitments/Send.md backup to Olegu.md — спор")
+        self.assertNotIn("backup", s)
+        self.assertEqual(s, "kb/commitments/… — спор")
+        # жадность не пересекает начало следующего пути: два пути в одной
+        # строке режутся по отдельности, диагностика между ними остаётся
         self.assertEqual(mi.обезличить("спор: kb/commitments/a.md, kb/commitments/b.md"),
                          "спор: kb/commitments/…, kb/commitments/…")
+        self.assertEqual(
+            mi.обезличить("kb/commitments/a.md — строки нет (ключ vault:kb/commitments/a.md)"),
+            "kb/commitments/… — строки нет (ключ vault:kb/commitments/…)")
 
     def test_карточка_человека_тоже(self):
         """`call_project.person_card` пишет `entities/people/<slug(имени)>.md`
