@@ -482,6 +482,24 @@ class ЧувствительныйРежим(unittest.TestCase):
         self.assertNotIn("smetu", поток.getvalue())
         self.assertIn("kb/commitments/…", поток.getvalue())
 
+    def test_имя_с_переводом_строки_не_рвёт_предупреждение(self):
+        """Линукс позволяет \n в имени файла: `_скажи` делает предупреждение
+        однострочным, и срез съедает имя целиком — иначе хвост имени жил бы
+        отдельной строкой журнала без префикса пути (Codex, круг 5)."""
+        import ledger_import as li
+        прежний = mi.ROOT
+        mi.ROOT = self.root
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                li._скажи("ledger_import: kb/commitments/Send\ninvoice to Olegu.md"
+                          " несёт id a, в реестре b — верю реестру")
+        finally:
+            mi.ROOT = прежний
+        self.assertNotIn("invoice", err.getvalue())
+        self.assertIn("kb/commitments/…", err.getvalue())
+        self.assertEqual(err.getvalue().count("\n"), 1, "одна строка журнала")
+
     def test_перенос_предупреждает_через_скажи(self):
         """Сквозной: карточка без фронтматтера в прогоне `run` — в журнале
         путь срезан. Мутант «печать мимо _скажи» этот тест роняет."""
