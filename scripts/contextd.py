@@ -16,13 +16,24 @@ MARA_BIND. На doctor стоит 0.0.0.0: телефон приходит по 
 bind. Но из локалки он виден, и это осознанный размен. Без токена отдаются
 только /healthz, и наружу он отдаёт один `ok` — счётчики видны лишь с петли,
 как и /metrics целиком. Там не секреты, но имена устройств и время последнего
-синка каждого канала: по этим числам читается распорядок дня. Сам токен едет
-по проводу открытым текстом — шифрует его участок VPN, а не протокол.
+синка каждого канала: по этим числам читается распорядок дня.
+
+По открытому порту токен едет по проводу открытым текстом — шифрует его
+участок VPN, а не протокол. С сертификатом (`MARA_TLS_CERT`, `MARA_TLS_KEY`;
+Т0.9 п. 2) демон слушает ещё и TLS на `MARA_TLS_PORT` (8789) по адресу
+`MARA_BIND`, а открытый порт — `MARA_PLAIN_BIND`, если он задан: когда все
+клиенты переехали на TLS, `MARA_PLAIN_BIND=127.0.0.1` оставляет открытый
+только местным скриптам. Сертификат самоподписанный (`--tls-new`), клиенты
+сверяют его отпечаток (`MARA_CONTEXT_PIN`), а не цепочку до CA: адрес
+doctor — номер в локалке, и имени, на которое выпускают сертификаты, у него
+нет.
 
 Логи санитарные (ТЗ §18): в них идут метод, путь, код, id события и размеры.
 Тела сообщений, транскрипты и токены не логируются никогда.
 
     python3 scripts/contextd.py --serve
+    python3 scripts/contextd.py --tls-new ~/.config/mara/tls
+    python3 scripts/contextd.py --tls-pin ~/.config/mara/tls/contextd.crt
     python3 scripts/contextd.py --pair "телефон владельца"
     python3 scripts/contextd.py --revoke dev_ab12...
     python3 scripts/contextd.py --scopes dev_ab12...
@@ -58,7 +69,7 @@ bind. Но из локалки он виден, и это осознанный �
 `--allow ID call message`, а не `@history`: месяц без звонков снял бы `call`,
 и звонки получили бы 403 — для телефона это окончательный отказ.
 """
-import os, sys, io, re, json, time, glob, socket, hashlib, secrets, argparse, math
+import os, sys, io, re, json, time, glob, socket, hashlib, secrets, argparse, math, ssl
 import unicodedata
 import threading, subprocess, sqlite3
 from datetime import datetime, timedelta
@@ -193,6 +204,10 @@ _отказы = {}                            # код -> сколько отд�
 _заливки = {}                           # устройство -> сколько льёт (#39)
 _заперто = {"http": 0, "worker": 0}     # где -> сколько раз база занята (Т2.1б)
 _упало = {"http": 0}                    # обработчик упал, клиент ушёл без ответа (#96)
+_сорвалось = {"tls": 0}                 # TLS-рукопожатие не сложилось (Т0.9 п. 2)
+# соединения открытого порта не с петли: из локалки (`lan`) и от доверенного
+# прокси (`proxy`, KeenDNS на роутере) — по ним видно, кто ещё ходит без TLS
+_открытым = {"lan": 0, "proxy": 0}
 # старт процесса — в `/metrics`: по нему сверка отличает рестарт демона от
 # счётчика, который после рестарта догнал прежнее значение (#96)
 _СТАРТ = int(time.time())
@@ -666,6 +681,15 @@ def metrics(con, root=None, vault=None):
     Считает он ровно те отказы, которые мы отдали сами, через `say`. Мимо
     идут `send_error` самого `BaseHTTPRequestHandler` (кривая строка запроса,
     метод без `do_*`) и оборванная загрузка, где ответа нет вовсе.
+
+    Тоже из памяти (Т0.9 п. 2): `mara_tls_handshake_failures_total` —
+    рукопожатия TLS, которые не сложились (`http://` на порт TLS, сканер,
+    обрыв), и `mara_http_plain_remote_connections_total{from}` — соединения
+    открытого порта не с петли: `proxy` — от доверенного прокси
+    (`MARA_TRUSTED_PROXY`), `lan` — все остальные, включая `/healthz` без
+    токена, сканеры и KeenDNS, если `MARA_TRUSTED_PROXY` не задан. Пока
+    `lan` растёт, кто-то ходит открытым портом, и закрывать его
+    (`MARA_PLAIN_BIND`) рано; кто именно — журнал.
     """
     root = root or mi.ROOT
     q = lambda sql, *a: con.execute(sql, a).fetchone()[0]
@@ -683,6 +707,8 @@ def metrics(con, root=None, vault=None):
         отказы = sorted(_отказы.items())
         заперто = sorted(_заперто.items())
         упало = _упало["http"]
+        сорвалось = _сорвалось["tls"]
+        открытым = sorted(_открытым.items())
     # mara_mobile_* берёт любое устройство, и Gmail-крон раз в 10 минут его
     # всегда «освежит» — телефон виден только поимённо.
     #
@@ -925,6 +951,9 @@ def metrics(con, root=None, vault=None):
         *[('mara_http_errors_total{code="%d"}' % k, n) for k, n in отказы],
         *[('mara_db_locked_total{where="%s"}' % k, n) for k, n in заперто],
         ("mara_http_crashes_total", упало),
+        ("mara_tls_handshake_failures_total", сорвалось),
+        *[('mara_http_plain_remote_connections_total{from="%s"}' % k, n)
+          for k, n in открытым],
         ("mara_process_start_time_seconds", _СТАРТ),
     ]
     return "".join("%s %s\n" % (k, v) for k, v in rows)
@@ -2040,6 +2069,92 @@ def bind_default():
     return os.environ.get("MARA_BIND") or "127.0.0.1"
 
 
+# --- TLS (Т0.9 п. 2, threat-model п. 3) -------------------------------------
+
+TLS_ПОРТ = 8789
+# Столько поток ждёт рукопожатия. Открыл соединение и молчит — держит только
+# свой поток, и не дольше этого (см. `TLSСервер`)
+РУКОПОЖАТИЕ_С = 10
+
+
+def tls_настройка(env=None):
+    """(сертификат, ключ, порт) из окружения или None — TLS не включали.
+
+    Половина пары — ошибка настройки, а не «без TLS»: владелец его включал,
+    и демон, молча слушающий только открытый порт, оставил бы токены на
+    проводе, ничего об этом не сказав.
+    """
+    env = os.environ if env is None else env
+    cert, key = env.get("MARA_TLS_CERT") or "", env.get("MARA_TLS_KEY") or ""
+    if not (cert or key):
+        return None
+    if not (cert and key):
+        raise ValueError("TLS включают двое: MARA_TLS_CERT и MARA_TLS_KEY")
+    порт = env.get("MARA_TLS_PORT") or str(TLS_ПОРТ)
+    if not (порт.isascii() and порт.isdigit()) or not 0 < int(порт) < 65536:
+        raise ValueError("MARA_TLS_PORT — номер порта, а не %r" % порт)
+    return cert, key, int(порт)
+
+
+def tls_контекст(cert, key):
+    """Контекст сервера: не ниже TLS 1.2, сертификат и ключ — сразу, чтобы
+    битый файл ронял старт, а не первое соединение."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(cert, key)
+    return ctx
+
+
+def пин_сертификата(путь):
+    """`sha256:<hex>` первого сертификата PEM-файла — то, что клиенты сверяют
+    сразу после рукопожатия (`MARA_CONTEXT_PIN`): отпечаток всего
+    сертификата в DER, как его печатает `openssl x509 -fingerprint -sha256`."""
+    # latin-1, не ascii: PEM с UTF-8 комментарием или «Bag Attributes» рядом
+    # с сертификатом openssl принимает — и пин обязан считаться (ревью)
+    with open(путь, encoding="latin-1") as fh:
+        pem = fh.read()
+    m = re.search(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", pem, re.S)
+    if not m:
+        raise ValueError("в файле нет сертификата PEM")
+    return "sha256:" + hashlib.sha256(ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest()
+
+
+def tls_новый(каталог, дней=3650):
+    """Самоподписанный сертификат и ключ для contextd: (сертификат, ключ, пин).
+
+    Выпускает `openssl` — в stdlib выпуска сертификатов нет. Ключ заводится
+    пустым с правами 0600 раньше, чем в него пишет openssl: права не зависят
+    ни от umask, ни от версии openssl. Существующие файлы не трогаются:
+    старый пин живёт в клиентах, и молча сменённый сертификат отрезал бы их
+    всех разом. Срок — десять лет: клиенты верят пину, а не сроку, а
+    истёкший сертификат на ровном месте — лишняя поломка.
+    """
+    каталог = os.path.abspath(os.path.expanduser(каталог))
+    os.makedirs(каталог, mode=0o700, exist_ok=True)
+    cert = os.path.join(каталог, "contextd.crt")
+    key = os.path.join(каталог, "contextd.key")
+    for путь in (cert, key):
+        if os.path.lexists(путь):
+            raise FileExistsError("уже есть %s — новый пин отрезал бы клиентов; "
+                                  "меняешь сертификат — сначала убери старый руками" % путь)
+    os.close(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    try:
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec",
+                        "-pkeyopt", "ec_paramgen_curve:prime256v1", "-sha256",
+                        "-days", str(дней), "-nodes", "-subj", "/CN=mara-contextd",
+                        "-keyout", key, "-out", cert],
+                       check=True, capture_output=True, timeout=60)
+    except BaseException:
+        for путь in (cert, key):
+            try:
+                os.unlink(путь)
+            except OSError:
+                pass
+        raise
+    os.chmod(key, 0o600)
+    return cert, key, пин_сертификата(cert)
+
+
 def обрыв(беда, адрес):
     """Строка про ушедшего клиента. Одна на оба места, где его ловят."""
     return "%s обрыв %s from=%s" % (mi.now_iso(), type(беда).__name__, адрес)
@@ -2063,19 +2178,35 @@ class Сервер(ThreadingHTTPServer):
     `log_message`, у нас пустой. Ловят его поэтому в `do_POST`, по месту.
     """
 
+    tls = None                          # контекст у `TLSСервер`
+
+    def finish_request(self, request, client_address):
+        # кто ходит открытым портом не с петли — `/metrics` (Т0.9 п. 2): пока
+        # из локалки ходят, закрывать его рано
+        адрес = client_address[0] if client_address else None
+        if адрес not in LOOPBACK:
+            with _замок:
+                _открытым["proxy" if адрес in TRUSTED_PROXY else "lan"] += 1
+        super().finish_request(request, client_address)
+
+    # Разрыв связи, а не поломка обработчика. На открытом порту `ssl.SSLError`
+    # ушедшим клиентом не бывает — он мог бы прийти только от исходящего TLS
+    # внутри обработчика, а это настоящая поломка; у `TLSСервер` список шире
+    ОБРЫВЫ = (ConnectionError,)
+
     def handle_error(self, request, client_address):
         беда = sys.exc_info()[1]
         if база_занята(беда):
             # Считаем, но трейсбек оставляем: по нему видно, какой запрос
             # не дождался базы. Клиент ответа не получит и повторит сам.
             счесть_занятость("http")
-        elif not isinstance(беда, ConnectionError):
+        elif not isinstance(беда, self.ОБРЫВЫ):
             # Поломка обработчика: «500» мы не отдаём, клиент уходит без
             # ответа, и `_отказы` (их считает `say`) её не видят. Без этого
             # счёта сверка узнавала о ней только из журнала (#96, ревью)
             with _замок:
                 _упало["http"] += 1
-        if isinstance(беда, ConnectionError):
+        if isinstance(беда, self.ОБРЫВЫ):
             # Адрес сокетный: заголовков в `handle_error` уже нет, так что
             # за прокси здесь будет адрес прокси, а не телефона.
             print(обрыв(беда, client_address[0]), flush=True)
@@ -2083,8 +2214,52 @@ class Сервер(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def make_server(root, port=8788, vault=None, host="127.0.0.1"):
-    srv = Сервер((host, port), Handler)
+class TLSСервер(Сервер):
+    """Тот же `Сервер` за TLS (Т0.9 п. 2). Нужен Python с исправлением
+    CVE-2023-40217 (3.11.5+/3.12, у doctor 3.12): серверный `wrap_socket`
+    в потоке на нём безопасен. По TLS порча записи и обрыв посреди запроса
+    приходят `ssl.SSLError` — это тот же ушедший клиент (`ОБРЫВЫ`).
+
+    Рукопожатие — в потоке соединения, а не в `accept`: обёрнутый целиком
+    слушающий сокет жмёт руку в главном потоке, и клиент, открывший
+    соединение и замолчавший, держал бы приём всех остальных. Здесь он держит
+    только свой поток и не дольше `РУКОПОЖАТИЕ_С`; дальше — обычный
+    `Handler.timeout`. Несложившееся рукопожатие — строка журнала с причиной
+    (`HTTP_REQUEST` — `http://` на порт TLS) и счёт в `/metrics`, без
+    трейсбека: это сканер или ошибка адреса, а не поломка демона.
+    """
+
+    ОБРЫВЫ = (ConnectionError, ssl.SSLError)
+
+    def finish_request(self, request, client_address):
+        request.settimeout(РУКОПОЖАТИЕ_С)
+        try:
+            канал = self.tls.wrap_socket(request, server_side=True)
+        except OSError as беда:              # ssl.SSLError — тоже OSError
+            # строка — до счёта: тест ждёт счётчик и читает вывод (ревью)
+            print("%s tls-рукопожатие %s from=%s" % (
+                mi.now_iso(), getattr(беда, "reason", None) or type(беда).__name__,
+                client_address[0]), flush=True)
+            with _замок:
+                _сорвалось["tls"] += 1
+            return
+        try:
+            self.RequestHandlerClass(канал, client_address, self)
+        finally:
+            # исходный сокет уже отдан каналу (`wrap_socket` его отвязал), и
+            # `shutdown_request` базового класса закрывает пустышку — канал
+            # закрываем сами, тем же порядком
+            try:
+                канал.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            канал.close()
+
+
+def make_server(root, port=8788, vault=None, host="127.0.0.1", tls=None):
+    """`tls` — контекст `tls_контекст`: с ним сервер говорит только TLS."""
+    srv = (TLSСервер if tls else Сервер)((host, port), Handler)
+    srv.tls = tls
     srv.root = root
     srv.vault = vault or VAULT
     srv.daemon_threads = True
@@ -2774,13 +2949,43 @@ def закрыть_работу(con, job, ok, err):
     return "ок" if ok else "сбой"
 
 
-def serve(root, port, host="127.0.0.1"):
+def serve(root, port, host="127.0.0.1", tls=None):
+    """`tls` — (сертификат, ключ, порт) из `tls_настройка` или None.
+
+    С TLS слушателей два: TLS — на `host` (`MARA_BIND`), открытый — на
+    `MARA_PLAIN_BIND`, если он задан, иначе там же; `MARA_PLAIN_BIND`
+    действует и без TLS — это просто адрес открытого порта. Битый
+    сертификат или занятый порт TLS — отказ стартовать, а не тихий
+    открытый порт: не ради токенов (клиенты с пином сами откажут), а чтобы
+    невыполненная настройка владельца была видна сразу — циклом рестартов
+    в журнале, а не тишиной.
+    """
     con = mi.connect(root)
     con.close()
+    tsrv = None
+    if tls and port and tls[2] == port:
+        # открытый и TLS на одном порту не встанут, а упасть на втором bind —
+        # трейсбек вместо причины
+        print("contextd: MARA_TLS_PORT совпал с портом открытого (%d) — не стартую"
+              % port, flush=True)
+        return 2
+    if tls:
+        try:
+            # пин — до bind: отказ на пине не оставляет поднятый TLS-сокет
+            пин = пин_сертификата(tls[0])
+            tsrv = make_server(root, tls[2], host=host, tls=tls_контекст(tls[0], tls[1]))
+        except (OSError, ValueError) as e:
+            print("contextd: TLS не поднялся (%s: %s) — не стартую" % (
+                type(e).__name__, getattr(e, "reason", None) or e), flush=True)
+            return 2
+    открытый = os.environ.get("MARA_PLAIN_BIND") or host
     stop = threading.Event()
     threading.Thread(target=worker, args=(stop, root), daemon=True).start()
-    srv = make_server(root, port, host=host)
-    print("contextd: слушаю %s:%d, блобы в %s" % (host, port, root), flush=True)
+    srv = make_server(root, port, host=открытый)
+    print("contextd: слушаю %s:%d, блобы в %s" % (открытый, port, root), flush=True)
+    if tsrv:
+        threading.Thread(target=tsrv.serve_forever, daemon=True).start()
+        print("contextd: TLS на %s:%d, пин %s" % (host, tls[2], пин), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -2825,6 +3030,16 @@ def self_check():
             os.environ["MARA_BIND"] = v
         assert bind_default() == want, "MARA_BIND=%r дал %s" % (v, bind_default())
     os.environ.pop("MARA_BIND", None)
+    # TLS (Т0.9 п. 2): без сертификата не включается, половина пары — ошибка
+    assert tls_настройка({}) is None
+    assert tls_настройка({"MARA_TLS_CERT": "c", "MARA_TLS_KEY": "k"}) == ("c", "k", TLS_ПОРТ)
+    for env in ({"MARA_TLS_CERT": "c"}, {"MARA_TLS_CERT": "c", "MARA_TLS_KEY": "k",
+                                         "MARA_TLS_PORT": "порт"}):
+        try:
+            tls_настройка(env)
+            raise AssertionError("кривая настройка TLS принята: %r" % env)
+        except ValueError:
+            pass
     print("contextd self-check: ок")
     return 0
 
@@ -2888,10 +3103,43 @@ def main(argv=None):
                          "`--allow ID` снимает ограничение (и только так); "
                          "`--allow ID @history` берёт виды из событий за 30 "
                          "дней, а при пустой истории ничего не меняет")
+    ap.add_argument("--tls-new", metavar="КАТАЛОГ", dest="tls_new",
+                    help="выпустить самоподписанный сертификат и ключ для TLS "
+                         "(Т0.9 п. 2): contextd.crt и contextd.key в КАТАЛОГ, "
+                         "пин — клиентам")
+    ap.add_argument("--tls-pin", metavar="СЕРТИФИКАТ", dest="tls_pin",
+                    help="пин сертификата для клиентов: MARA_CONTEXT_PIN=sha256:…")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args(argv)
     if a.self_check:
         return self_check()
+    if a.tls_new:
+        try:
+            cert, key, пин = tls_новый(a.tls_new)
+        except subprocess.CalledProcessError as e:
+            # сам openssl говорит почему — без stderr осталась бы одна
+            # строка «returned non-zero exit status» (ревью)
+            print("не выпустил: %s\n%s" % (e, (e.stderr or b"").decode(errors="replace")))
+            return 1
+        except (OSError, subprocess.SubprocessError) as e:
+            print("не выпустил: %s" % e)
+            return 1
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            print("внимание: выпущено под root — ключ должен уметь читать "
+                  "пользователь из User= юнита (chown)")
+        порт = os.environ.get("MARA_TLS_PORT") or str(TLS_ПОРТ)
+        print("сертификат: %s\nключ (0600): %s\nпин: %s\n\n"
+              "в /etc/mara/contextd.env:\n  MARA_TLS_CERT=%s\n  MARA_TLS_KEY=%s\n"
+              "клиентам: адрес https://<doctor>:%s и MARA_CONTEXT_PIN=%s"
+              % (cert, key, пин, cert, key, порт, пин))
+        return 0
+    if a.tls_pin:
+        try:
+            print(пин_сертификата(a.tls_pin))
+        except (OSError, ValueError) as e:
+            print("не прочёл сертификат: %s" % e)
+            return 1
+        return 0
     mi.ROOT = a.root
     if a.pair:
         con = mi.connect(a.root)
@@ -2964,7 +3212,12 @@ def main(argv=None):
         print("%s: %s" % (dev, val if val is not None else "без ограничения (null)"))
         return 0
     if a.serve:
-        return serve(a.root, a.port, a.bind)
+        try:
+            tls = tls_настройка()
+        except ValueError as e:
+            print("contextd: %s — не стартую" % e, flush=True)
+            return 2
+        return serve(a.root, a.port, a.bind, tls=tls)
     ap.print_help()
     return 0
 

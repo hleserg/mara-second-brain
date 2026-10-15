@@ -47,16 +47,27 @@
 
 Токен устройства — из настроек или окружения, в репозиторий не попадает.
 
+TLS (Т0.9 п. 2): с адресом `https://<doctor>:8789` и пином сертификата в
+`MARA_CONTEXT_PIN` (`contextd.py --tls-pin`) плагин сверяет сертификат doctor
+сразу после рукопожатия и только потом шлёт токен (`ПинHTTPS`). Цепочка до
+CA и имя не проверяются: сертификат самоподписанный, адрес — номер в
+локалке; доверие держит пин. Пин с адресом `http://` — отказ без похода в
+сеть: токен уехал бы открытым текстом. Без пина — как раньше.
+
     python3 install/mara-context/__init__.py --demo
 """
 import hashlib
+import http.client
 import json
 import logging
 import os
+import re
+import ssl
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -69,6 +80,8 @@ TTL = 60.0           # свежесть пакета; звонок пересо�
 # MARA_CONTEXT_URL, рядом с MARA_CONTEXT_TOKEN: адреса своей сети в публичном
 # репозитории не держим.
 URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
+# Пин сертификата doctor (Т0.9 п. 2) — там же, MARA_CONTEXT_PIN; читается на
+# каждый поход, как и токен
 
 ОПИСАНИЕ = ("Владелец поправил обязательство словами: «сделал», «это тоже задача, "
             "срок пятница», «отмени», «перенеси на среду». Зови сразу, без "
@@ -152,6 +165,97 @@ def _чужой(data, вид):
 log = logging.getLogger(__name__)
 
 
+# ── TLS с пином сертификата (Т0.9 п. 2) ──────────────────────────────────
+#
+# Тот же кусок, что в `scripts/node_agent.py`: плагин ставится на мак один,
+# без `scripts/`. Сверяет их `tests/test_tls.py`.
+
+class ЧужойСертификат(OSError):
+    """Сертификат сервера — не тот, что назван пином, или с пином позвали
+    не-TLS. Запрос не ушёл."""
+
+
+class _ТолькоTLS(urllib.request.HTTPHandler):
+    """С пином открытого HTTP не существует: и прямой `http://`, и редирект
+    на него — отказ до байта."""
+
+    def http_open(self, req):
+        raise ЧужойСертификат("пин задан, а запрос ушёл бы по http:// — не отправлен")
+
+
+class _БезРедиректов(urllib.request.HTTPRedirectHandler):
+    """С пином редирект — не ответ doctor: содержимое уехало бы по адресу,
+    который пин не защищает."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+class НастройкаПина(Exception):
+    """Пин кривой или стоит при адресе не `https://`. В сеть не ходили.
+    Не ValueError: справка ловит его как «ответ не JSON»."""
+
+
+def нормальный_пин(пин):
+    """64 знака hex из любой записи отпечатка: `sha256:…` (`contextd.py
+    --tls-pin`), `sha256 Fingerprint=AB:CD:…` (`openssl x509 -fingerprint
+    -sha256`), hex с двоеточиями или без. Кривой — ValueError: пустить
+    соединение без сверки значило бы отдать токен любому, кто ответит."""
+    s = re.sub(r"(?i)^\s*sha-?256(\s*fingerprint)?\s*[:=]?", "", str(пин or ""))
+    s = re.sub(r"[\s:]", "", s).lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", s):
+        raise ValueError("пин — отпечаток sha256 сертификата, 64 знака hex")
+    return s
+
+
+class _ПоПину(http.client.HTTPSConnection):
+    """HTTPS, где доверие — пин, а не цепочка до CA и имя. Сверка — сразу
+    после рукопожатия, до первого байта запроса: чужому серверу не уходит ни
+    токен, ни тело."""
+
+    def __init__(self, *a, пин, **kw):
+        super().__init__(*a, **kw)
+        self.пин = пин
+
+    def connect(self):
+        super().connect()
+        der = self.sock.getpeercert(binary_form=True)
+        if not der or hashlib.sha256(der).hexdigest() != self.пин:
+            self.sock.close()
+            self.sock = None
+            raise ЧужойСертификат("сертификат сервера не совпал с пином")
+
+
+class ПинHTTPS(urllib.request.HTTPSHandler):
+    """Обработчик `https://` для `build_opener`: соединение `_ПоПину`.
+    Проверку цепочки и имени выключает сам контекст — её заменяет пин."""
+
+    def __init__(self, пин):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        super().__init__(context=ctx)
+        self.пин = нормальный_пин(пин)
+
+    def https_open(self, req):
+        return self.do_open(_ПоПину, req, context=self._context, пин=self.пин)
+
+
+def беда_пина(url, пин):
+    """Почему с такими адресом и пином в сеть нельзя, или None. Пин без
+    `https://` — токен уехал бы открытым текстом."""
+    if not пин:
+        return None
+    try:
+        нормальный_пин(пин)
+    except ValueError as e:
+        return "MARA_CONTEXT_PIN: %s" % e
+    if urllib.parse.urlsplit(url or "").scheme.lower() != "https":
+        return "пин задан, а адрес не https:// — токен ушёл бы открытым текстом"
+    return None
+
+
 def _в_истории(text, history):
     """Пакет уже лежит в истории сессии? Смотрим `content` и `api_content`
     каждого сообщения; content бывает списком частей — тогда их `text`."""
@@ -180,6 +284,12 @@ def _причина(e):
     401 — токен, 5xx — doctor, отказ соединения — сеть."""
     if isinstance(e, urllib.error.HTTPError):
         return "HTTP %s" % e.code
+    if isinstance(e, НастройкаПина):
+        return str(e)                   # свой текст: в нём ни токена, ни адреса
+    if isinstance(e, ЧужойСертификат):
+        return str(e)                   # `_ТолькоTLS`: с пином позвали http://
+    if isinstance(e, urllib.error.URLError) and isinstance(e.reason, ЧужойСертификат):
+        return "сертификат doctor не совпал с MARA_CONTEXT_PIN — запрос не ушёл"
     if isinstance(e, urllib.error.URLError) and isinstance(e.reason, OSError):
         return "%s: %s" % (type(e.reason).__name__, e.reason.strerror or type(e.reason).__name__)
     return type(e).__name__
@@ -191,15 +301,15 @@ class Брокер:
 
     def __init__(self, url=URL, token=None, ttl=TTL, timeout=TIMEOUT,
                  timeout_правки=TIMEOUT_ПРАВКИ, open_url=None,
-                 timeout_справки=TIMEOUT_СПРАВКИ):
+                 timeout_справки=TIMEOUT_СПРАВКИ, pin=None):
         base = url.rstrip("/")
         self.url = base + "/v1/context/bootstrap"
         self.url_событий = base + "/v1/ingest/event"
         self.url_справки = base + "/v1/context/query"
-        self.token = token
+        self.token, self.pin = token, pin
         self.ttl, self.timeout, self.timeout_правки = ttl, timeout, timeout_правки
         self.timeout_справки = timeout_справки
-        self._open = open_url or urllib.request.urlopen
+        self._open = open_url or self._сеть
         self._lock = threading.Lock()
         self._свежесть = None       # когда последний раз ходили в сеть
         self._пакет = None          # последний удачный, живёт и после сбоя
@@ -209,6 +319,21 @@ class Брокер:
         # плагинов в Hermes не гарантирован, а промах при регистрации был бы
         # молчаливым — предупреждения плагинов в gateway.log не доезжают
         return self.token or os.environ.get("MARA_CONTEXT_TOKEN")
+
+    def _сеть(self, req, timeout=None):
+        """Поход в сеть. С пином — только `https://` и только к сертификату с
+        этим отпечатком (Т0.9 п. 2); пин, как и токен, читается на каждый
+        поход. Без пина — как раньше."""
+        пин = self.pin or os.environ.get("MARA_CONTEXT_PIN")
+        if not пин:
+            return urllib.request.urlopen(req, timeout=timeout)
+        беда = беда_пина(req.full_url, пин)
+        if беда:
+            raise НастройкаПина(беда)
+        # `_ТолькоTLS` и `_БезРедиректов` — на случай редиректа с запиненного
+        # сервера: инвариант «пин — только TLS» держит сам opener (ревью)
+        return urllib.request.build_opener(
+            ПинHTTPS(пин), _ТолькоTLS(), _БезРедиректов()).open(req, timeout=timeout)
 
     def _запрос(self, url, тело=None):
         req = urllib.request.Request(
@@ -382,7 +507,7 @@ def register(ctx) -> None:
     # MARA_CONTEXT_URL — шов для проверки: подставляем заглушку и смотрим, что
     # непустой пакет действительно доезжает до модели, не трогая живой волт
     брокер = Брокер(ctx.get_config("url") or os.environ.get("MARA_CONTEXT_URL") or URL,
-                    ctx.get_config("token"))
+                    ctx.get_config("token"), pin=ctx.get_config("pin"))
 
     def hook(**kw):
         # из хука наружу не летит ничего: сбой брокера — это отсутствие
@@ -592,6 +717,17 @@ def _demo():
     assert класс["tools"]["mara_correction"]["schema"]["parameters"]["required"] == ["item"]
     assert класс["tools"]["mara_context"]["schema"]["parameters"]["required"] == ["about"]
     assert класс["hook"][1](conversation_history=None) == "" or True, "хук не падает без истории"
+
+    # Т0.9 п. 2: пин с адресом http:// и кривой пин — отказ до похода в сеть
+    п = "ab" * 32
+    б = Брокер("http://127.0.0.1:9", token="t", pin=п)
+    assert "не https" in б.справка({"about": "Анна"}), б.справка({"about": "Анна"})
+    assert "не https" in б.правка({"item": "x", "status": "done"})
+    assert б.контекст() == ""
+    б = Брокер("https://127.0.0.1:9", token="t", pin="sha256:" + "z" * 64)
+    assert "64 знака" in б.справка({"about": "Анна"}), б.справка({"about": "Анна"})
+    assert беда_пина("https://doctor:8789", "SHA256 Fingerprint=" + ":".join(
+        п[i:i + 2].upper() for i in range(0, 64, 2))) is None
     print("mara-context demo: ок")
     return 0
 

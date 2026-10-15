@@ -20,7 +20,9 @@
 - `interval_s` — свой интервал: doctor считает узел живым три интервала.
 
 Настройка — окружение (адреса, токен и секрет в репозиторий не кладутся, Г7):
-  MARA_URL            адрес contextd на doctor, например http://<doctor>:8788
+  MARA_URL            адрес contextd на doctor, например http://<doctor>:8788,
+                      с TLS — https://<doctor>:8789
+  MARA_CONTEXT_PIN    пин сертификата contextd (`contextd.py --tls-pin`), с TLS
   MARA_NODE_TOKEN     токен из `contextd.py --pair-node <узел>`
   MARA_NODE_ASR_URL   локальный STT-сервис (необязательно)
   MARA_NODE_LLM_URL   локальная Ollama (необязательно)
@@ -45,12 +47,19 @@ doctor спрашивает `/mara/hello` со своим номером, и а�
 можно спросить мимо прокси. Подслушивания внутри сети подпись не снимает:
 это TLS, Т0.9 п. 2.
 
+TLS до doctor (Т0.9 п. 2): с `https://` в `MARA_URL` и пином сертификата в
+`MARA_CONTEXT_PIN` сердцебиение идёт по TLS, и токен уходит только после
+того, как сертификат doctor сошёлся с пином (`ПинHTTPS`). Цепочка до CA и
+имя не проверяются: сертификат самоподписанный, адрес doctor — номер в
+локалке; доверие держит пин. Пин без `https://` — отказ стартовать: токен
+уехал бы открытым текстом, а владелец просил обратного.
+
     python node_agent.py            # раз в интервал, пока не остановят
     python node_agent.py --once     # одно сердцебиение и выход
     python node_agent.py --new-secret   # новый общий секрет для doctor и узла
     python node_agent.py --self-check
 """
-import argparse, hashlib, hmac, http.client, json, os, re, secrets, shutil, subprocess, sys
+import argparse, hashlib, hmac, http.client, json, os, re, secrets, shutil, ssl, subprocess, sys
 import threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -63,9 +72,103 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ИГРА = ("javaw.exe", "Minecraft.Windows.exe", "MinecraftLauncher.exe")
 
 
-def _без_прокси():
-    # узел и doctor — в одной сети; системный прокси Windows сюда не нужен
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _без_прокси(пин=None):
+    # узел и doctor — в одной сети; системный прокси Windows сюда не нужен.
+    # С пином `https://` идёт через `ПинHTTPS`, а `http://` и редиректы
+    # запрещены самим opener'ом (Т0.9 п. 2, ревью): инвариант «пин — только
+    # TLS» держит не вызывающий код, который можно забыть, а дорога в сеть.
+    # Редирект с запиненного сервера на `http://` иначе уносил бы токен
+    # открытым текстом.
+    обработчики = [urllib.request.ProxyHandler({})]
+    if пин:
+        обработчики += [ПинHTTPS(пин), _ТолькоTLS(), _БезРедиректов()]
+    return urllib.request.build_opener(*обработчики)
+
+
+# ── TLS до doctor с пином сертификата (Т0.9 п. 2) ─────────────────────────
+#
+# Такой же кусок живёт в плагине `install/mara-context`: он ставится на мак
+# один, без `scripts/`. Сверяет их `tests/test_tls.py`.
+
+class ЧужойСертификат(OSError):
+    """Сертификат сервера — не тот, что назван пином, или с пином позвали
+    не-TLS. Запрос не ушёл."""
+
+
+class _ТолькоTLS(urllib.request.HTTPHandler):
+    """С пином открытого HTTP не существует: и прямой `http://`, и редирект
+    на него — отказ до байта."""
+
+    def http_open(self, req):
+        raise ЧужойСертификат("пин задан, а запрос ушёл бы по http:// — не отправлен")
+
+
+class _БезРедиректов(urllib.request.HTTPRedirectHandler):
+    """С пином редирект — не ответ doctor: содержимое уехало бы по адресу,
+    который пин не защищает."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def нормальный_пин(пин):
+    """64 знака hex из любой записи отпечатка: `sha256:…` (`contextd.py
+    --tls-pin`), `sha256 Fingerprint=AB:CD:…` (`openssl x509 -fingerprint
+    -sha256`), hex с двоеточиями или без. Кривой — ValueError: пустить
+    соединение без сверки значило бы отдать токен любому, кто ответит."""
+    s = re.sub(r"(?i)^\s*sha-?256(\s*fingerprint)?\s*[:=]?", "", str(пин or ""))
+    s = re.sub(r"[\s:]", "", s).lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", s):
+        raise ValueError("пин — отпечаток sha256 сертификата, 64 знака hex")
+    return s
+
+
+class _ПоПину(http.client.HTTPSConnection):
+    """HTTPS, где доверие — пин, а не цепочка до CA и имя. Сверка — сразу
+    после рукопожатия, до первого байта запроса: чужому серверу не уходит ни
+    токен, ни тело."""
+
+    def __init__(self, *a, пин, **kw):
+        super().__init__(*a, **kw)
+        self.пин = пин
+
+    def connect(self):
+        super().connect()
+        der = self.sock.getpeercert(binary_form=True)
+        if not der or hashlib.sha256(der).hexdigest() != self.пин:
+            self.sock.close()
+            self.sock = None
+            raise ЧужойСертификат("сертификат сервера не совпал с пином")
+
+
+class ПинHTTPS(urllib.request.HTTPSHandler):
+    """Обработчик `https://` для `build_opener`: соединение `_ПоПину`.
+    Проверку цепочки и имени выключает сам контекст — её заменяет пин."""
+
+    def __init__(self, пин):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        super().__init__(context=ctx)
+        self.пин = нормальный_пин(пин)
+
+    def https_open(self, req):
+        return self.do_open(_ПоПину, req, context=self._context, пин=self.пин)
+
+
+def беда_пина(url, пин):
+    """Почему с такими адресом и пином в сеть нельзя, или None. Пин без
+    `https://` — токен уехал бы открытым текстом."""
+    if not пин:
+        return None
+    try:
+        нормальный_пин(пин)
+    except ValueError as e:
+        return "MARA_CONTEXT_PIN: %s" % e
+    if urllib.parse.urlsplit(url or "").scheme.lower() != "https":
+        return "пин задан, а адрес не https:// — токен ушёл бы открытым текстом"
+    return None
 
 
 def отвечает(адрес, путь="", таймаут=ТАЙМАУТ):
@@ -192,17 +295,27 @@ def интервал(env):
         return ИНТЕРВАЛ
 
 
-def отправить(url, token, тело):
-    """Код ответа doctor; 0 — не достучались."""
+def отправить(url, token, тело, пин=None):
+    """Код ответа doctor; 0 — не достучались. С пином `https://` сверяет
+    сертификат doctor до того, как уйдёт токен."""
     req = urllib.request.Request(url.rstrip("/") + "/v1/node/heartbeat", method="POST",
                                  data=json.dumps(тело).encode("utf-8"))
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", "Bearer " + token)
     try:
-        with _без_прокси().open(req, timeout=10) as r:
+        with _без_прокси(пин).open(req, timeout=10) as r:
             return r.status
     except urllib.error.HTTPError as e:
         return e.code
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ЧужойСертификат):
+            лог("сертификат doctor не совпал с пином — токен не отправлен; "
+                "сверь MARA_CONTEXT_PIN с `contextd.py --tls-pin`")
+        return 0
+    except ЧужойСертификат as e:
+        # `_ТолькоTLS`: с пином позвали `http://` (редирект или прямой адрес)
+        лог(str(e))
+        return 0
     except (OSError, ValueError):
         # ValueError — и кривой токен (не латиница: заголовок не кодируется)
         return 0
@@ -561,6 +674,8 @@ def main(argv=None):
         print(secrets.token_hex(32))
         return 0
     url, token = os.environ.get("MARA_URL"), os.environ.get("MARA_NODE_TOKEN")
+    пин = os.environ.get("MARA_CONTEXT_PIN") or None
+    беда = беда_пина(url, пин)
     прокси = None
     if not a.once:
         try:
@@ -573,8 +688,10 @@ def main(argv=None):
             лог("прокси сервисов узла слушает порт %d" % прокси.server_address[1])
         elif os.environ.get("MARA_NODE_SECRET"):
             лог("секрет задан, а прокси нет — нужен MARA_NODE_PROXY_PORT")
-    if not (url and token):
-        лог("нужны MARA_URL и MARA_NODE_TOKEN (contextd.py --pair-node <узел>)")
+    if беда or not (url and token):
+        # кривой пин — как отсутствие MARA_URL: сердцебиения нет, но прокси
+        # живёт — иначе опечатка в пине вставала бы и расшифровке (ревью)
+        лог(беда or "нужны MARA_URL и MARA_NODE_TOKEN (contextd.py --pair-node <узел>)")
         if прокси is None:
             return 2
         # прокси без сердцебиения: шаги doctor ходят через него и так
@@ -583,7 +700,7 @@ def main(argv=None):
     while True:
         try:
             тело = собрать()
-            код = отправить(url, token, тело)
+            код = отправить(url, token, тело, пин)
         except Exception as e:
             # сбой одного оборота (чужой ответ на порту сервиса, обрыв
             # посреди чтения) — не смерть агента: планировщик упавшего не
@@ -638,6 +755,18 @@ def self_check():
     finally:
         п.server_close()
     assert подпись_привета("k", "0" * 32) != подпись_ответа("k", "0" * 32, 200, b"")
+    п = "ab" * 32
+    for запись in ("sha256:" + п, "SHA256 Fingerprint=" + ":".join(
+            п[i:i + 2].upper() for i in range(0, 64, 2)), п.upper()):
+        assert нормальный_пин(запись) == п, запись
+    for кривой in ("", "sha256:", п[:-1], п + "0", "zz" * 32):
+        try:
+            нормальный_пин(кривой)
+            raise AssertionError("кривой пин принят: %r" % кривой)
+        except ValueError:
+            pass
+    assert беда_пина("http://doctor:8788", п) and беда_пина("https://doctor:8789", "x")
+    assert беда_пина("https://doctor:8789", п) is None and беда_пина("http://x", None) is None
     print("node_agent self-check: ок")
     return 0
 
