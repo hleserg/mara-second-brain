@@ -33,6 +33,16 @@ class Settings(ctx: Context) {
         get() = prefs.getString("token", "") ?: ""
         set(v) = prefs.edit().putString("token", v.trim()).apply()
 
+    /** Пин сертификата contextd (Т0.9 п. 2), 64 знака hex; пусто — без пина.
+     *  Кривая запись — бросок, а не тихое «без пина»: `Адрес.беда` отбивает
+     *  её раньше, бросок сторожит будущие вызовы мимо проверки. */
+    var pin: String
+        get() = prefs.getString("pin", "") ?: ""
+        set(v) = prefs.edit().putString("pin",
+            if (v.isBlank()) ""
+            else Пин.нормальный(v) ?: throw IllegalArgumentException("кривой пин")
+        ).apply()
+
     /** Папка, выбранная владельцем через SAF, если автопоиск не справился. */
     var folderUri: String
         get() = prefs.getString("folder", "") ?: ""

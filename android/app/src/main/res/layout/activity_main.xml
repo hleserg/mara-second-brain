@@ -25,6 +25,14 @@
             android:inputType="textPassword"
             android:autofillHints="" />
 
+        <EditText
+            android:id="@+id/pin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_pin"
+            android:inputType="text|textNoSuggestions"
+            android:autofillHints="" />
+
         <Button
             android:id="@+id/save"
             android:layout_width="match_parent"
