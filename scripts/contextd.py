@@ -47,11 +47,15 @@ bind. Но из локалки он виден, и это осознанный �
 это не вид, а дозагрузка к уже принятому событию, и телефону в список пишется
 `call`.
 
-Плюс одно слово, которое не вид, а право: `context` — читать контекст
+Плюс слова, которые не виды, а права: `context` — читать контекст
 владельца, пакет `now` (`/v1/context/bootstrap`) и справку
-(`/v1/context/query`; Т6.4). Со списком читать можно, только если в нём есть
-`context` или `correction`: правка словами называет пункт по коду из пакета,
-и без чтения она слепа. Событием `context` не бывает — приём его не берёт.
+(`/v1/context/query`; Т6.4), и `heartbeat` — сердцебиение узла (Т7.2). Со
+списком читать контекст можно, только если в нём есть `context` или
+`correction`: правка словами называет пункт по коду из пакета, и без чтения
+она слепа. Событиями такие слова не бывают — приём их не берёт, и
+`@history` их не собирает. Телефону список задаётся явно —
+`--allow ID call message`, а не `@history`: месяц без звонков снял бы `call`,
+и звонки получили бы 403 — для телефона это окончательный отказ.
 """
 import os, sys, io, re, json, time, glob, socket, hashlib, secrets, argparse, math
 import unicodedata
@@ -448,8 +452,15 @@ def scope_ok(con, device_id, kind):
 # Т6.4 (ADR-0009, правка решения 4): право читать контекст владельца —
 # псевдовид в том же allowlist, а не новая колонка и не таблица прав
 ЧТЕНИЕ = "context"
-ОТКАЗ_ЧТЕНИЯ = ("устройству не разрешено читать контекст: в allowlist нужен "
-                "«context» (--allow ID … context)")
+# Права, что лежат в allowlist рядом с видами, но событиями не бывают:
+# `context` — чтение (Т6.4), `heartbeat` — сердцебиение узла (Т7.2). Приём
+# их не берёт, и `@history` из истории их не собирает: иначе строка, легшая
+# до этого запрета, превратилась бы в право (ревью #175)
+ПСЕВДОВИДЫ = (ЧТЕНИЕ, "heartbeat")
+# `--allow` заменяет список целиком: совет «допиши» — а не «запиши», иначе
+# плагин, исполнив его буквально, потерял бы `correction`
+ОТКАЗ_ЧТЕНИЯ = ("устройству не разрешено читать контекст: допиши «context» к его "
+                "списку (`--scopes ID` покажет текущий)")
 
 
 def можно_читать(con, device_id):
@@ -462,10 +473,12 @@ def можно_читать(con, device_id):
     `correction`, а `@history` другого ему и не даст: `context` — не вид
     события. Телефону со списком `call message …` пакет обязательств не
     нужен, и украденный телефон его больше не отдаёт (threat-model, сц. 2).
-    Нет устройства — нет права, как у `scope_ok`."""
+    Нет устройства или оно отозвано — нет права: проверка не должна
+    держаться на том, что вызывающий нашёл устройство заново."""
     if not device_id:
         return False
-    row = con.execute("select scopes from devices where id=?", (device_id,)).fetchone()
+    row = con.execute("select scopes from devices where id=? and revoked_at is null",
+                      (device_id,)).fetchone()
     if not row:
         return False
     if row["scopes"] is None:
@@ -474,11 +487,14 @@ def можно_читать(con, device_id):
 
 
 def scopes_from_history(con, device_id, days=30):
-    """Виды, которые устройство слало за `days` дней. Пусто — истории нет."""
+    """Виды, которые устройство слало за `days` дней. Пусто — истории нет.
+    Псевдовиды (`ПСЕВДОВИДЫ`) не собираются, даже если такие строки легли
+    в реестр до запрета: история — о том, что устройство шлёт, а не о
+    правах."""
     since = mi.в_utc(datetime.now(mi.TZ) - timedelta(days=days))
     return sorted({r["kind"] for r in con.execute(
         "select distinct kind from events where device_id=? and received_utc>=?",
-        (device_id, since)) if r["kind"]})
+        (device_id, since)) if r["kind"] and r["kind"] not in ПСЕВДОВИДЫ})
 
 
 ВИД = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
@@ -1118,6 +1134,9 @@ class Handler(BaseHTTPRequestHandler):
         if p.path == "/v1/context/bootstrap":
             if not можно_читать(con, device_of(con, self.headers.get("Authorization"))):
                 return self.say(403, {"error": ОТКАЗ_ЧТЕНИЯ})
+            # след чтения (Т6.4): плагин ходит не чаще раза в TTL (60 с), и
+            # строка — единственный признак, что пакет читает чужой токен
+            print(log_line("GET", p.path, 200, None, клиент(self)), flush=True)
             return self.say(200, bootstrap(con, self.server.vault))
         return self.say(404, {"error": "нет такого пути"})
 
@@ -1296,11 +1315,11 @@ class Handler(BaseHTTPRequestHandler):
                 # список из истории, а `set_scopes` такой вид не принимает —
                 # не записывается ничего, включая настоящие виды (#29).
                 return self.say(400, {"error": беда}, поля=data)
-            if kind == ЧТЕНИЕ:
-                # иначе право чтения в списке открывало бы и запись событий
-                # такого вида, а `@history` превращал бы её обратно в право
-                return self.say(400, {"error": "«%s» — право чтения, а не вид события"
-                                               % ЧТЕНИЕ}, поля=data)
+            if kind in ПСЕВДОВИДЫ:
+                # иначе право в списке открывало бы и запись событий такого
+                # вида, а `@history` превращал бы её обратно в право
+                return self.say(400, {"error": "«%s» — право, а не вид события"
+                                               % kind}, поля=data)
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
             # Ключ дедупа считает сервер по полям самого события. Присланный

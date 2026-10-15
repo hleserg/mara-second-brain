@@ -2140,13 +2140,52 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(ош.exception.code, 403, "не 400 за пустой about")
         ош.exception.read()
 
-    def test_context_не_вид_события(self):
-        self.assertEqual(self.послать("context", "s1"), 400, "даже при null")
+    def test_права_не_виды_события(self):
+        for вид in contextd.ПСЕВДОВИДЫ:
+            with self.subTest(вид=вид):
+                self.assertEqual(self.послать(вид, "s-" + вид), 400, "даже при null")
         contextd.set_scopes(self.con, self.dev, ["context"])
         self.assertEqual(self.послать("context", "s2"), 400,
                          "право чтения не открывает запись")
         self.assertEqual(self.послать("call", "s3"), 403, "и других видов не даёт")
-        self.assertEqual(contextd.scopes_from_history(self.con, self.dev), [])
+
+    def test_история_не_собирает_права(self):
+        """Строки `context` и `heartbeat`, легшие в реестр до запрета, `@history`
+        в право не превращает (ревью #175)."""
+        with mi.транзакция(self.con):
+            for i, вид in enumerate(("call", "context", "heartbeat")):
+                mi.put_event(self.con, {"kind": вид, "source": "phone",
+                                        "source_id": "h%d" % i, "device_id": self.dev})
+        self.assertEqual(contextd.scopes_from_history(self.con, self.dev), ["call"])
+
+    def test_отозванный_не_читает(self):
+        self.assertTrue(contextd.можно_читать(self.con, self.dev))
+        contextd.revoke(self.con, self.dev)
+        self.assertFalse(contextd.можно_читать(self.con, self.dev),
+                         "право не держится на том, что устройство найдут заново")
+
+    def test_плагин_читает_правом_правки_и_не_читает_телефоном(self):
+        """Сквозь настоящий `Брокер` плагина: токен со списком `correction`
+        получает текст пакета, со списком телефона — пустоту (403)."""
+        import importlib.util
+        import context_pack
+        os.makedirs(os.path.join(self.srv.vault, "kb/commitments"), exist_ok=True)
+        os.makedirs(os.path.join(self.srv.vault, ".git"), exist_ok=True)   # флок волта
+        with open(os.path.join(self.srv.vault, "kb/commitments", "p.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("---\ntitle: вернуть ключи\nstatus: open\n---\n")
+        context_pack.build_now(self.srv.vault)
+        spec = importlib.util.spec_from_file_location(
+            "mara_context", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                                         "install", "mara-context", "__init__.py"))
+        плагин = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(плагин)
+        for виды, видит in ((["correction"], True), (["call", "message"], False)):
+            with self.subTest(виды=виды):
+                contextd.set_scopes(self.con, self.dev, виды)
+                брокер = плагин.Брокер(url=self.base, token=self.token)
+                текст = брокер.контекст([])
+                self.assertEqual("вернуть ключи" in текст, видит, текст)
 
     def test_null_пускает_всё(self):
         self.assertEqual(self.послать("call", "s1"), 200)
