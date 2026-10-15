@@ -39,6 +39,17 @@ class Обезличить(unittest.TestCase):
         self.assertIn("kb/commitments/…", s)
         self.assertIn("Permission denied", s, "причина остаётся")
 
+    def test_имя_с_пробелами_режется_целиком(self):
+        """Файл, названный рукой, несёт пробелы — хвост названия не течёт
+        («kb/commitments/… invoice …» был бы утечкой, Codex по #182)."""
+        s = mi.обезличить("спор: 'kb/commitments/Send invoice to Olegu.md' и ещё")
+        self.assertNotIn("invoice", s)
+        self.assertNotIn("Olegu", s)
+        self.assertEqual(s, "спор: 'kb/commitments/…' и ещё")
+        s = mi.обезличить("kb/commitments/прислать смету Олегу.md: конфликт")
+        self.assertNotIn("смету", s)
+        self.assertEqual(s, "kb/commitments/…: конфликт")
+
     def test_карточка_человека_тоже(self):
         """`call_project.person_card` пишет `entities/people/<slug(имени)>.md`
         тем же шагом `project`."""
