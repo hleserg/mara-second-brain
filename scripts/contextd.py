@@ -3091,6 +3091,10 @@ def main(argv=None):
                          "пин — клиентам")
     ap.add_argument("--tls-pin", metavar="СЕРТИФИКАТ", dest="tls_pin",
                     help="пин сертификата для клиентов: MARA_CONTEXT_PIN=sha256:…")
+    ap.add_argument("--sensitive-logs", type=int, metavar="МИНУТ",
+                    dest="sensitive_logs", default=None,
+                    help="журналы с содержимым на МИНУТ (потолок — сутки; "
+                         "0 — выключить); секреты маскируются всё равно")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args(argv)
     if a.self_check:
@@ -3123,6 +3127,17 @@ def main(argv=None):
             return 1
         return 0
     mi.ROOT = a.root
+    if a.sensitive_logs is not None:
+        # gated sensitive mode журналов (ТЗ §15.1): явное включение на срок,
+        # с предупреждением здесь и в каждой строке журнала
+        срок = mi.включить_чувствительные(a.root, a.sensitive_logs)
+        if срок is None:
+            print("чувствительный режим журналов выключен")
+        else:
+            print("внимание: до %s журналы несут содержимое (пути карточек); "
+                  "секреты маскируются всё равно; выключить раньше — "
+                  "--sensitive-logs 0" % срок.isoformat(timespec="minutes"))
+        return 0
     if a.pair:
         con = mi.connect(a.root)
         try:

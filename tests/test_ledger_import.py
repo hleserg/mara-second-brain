@@ -434,7 +434,10 @@ class Перенос(_СтендПереноса):
         r, = self.строки("commitments")
         self.assertIsNone(r["confidence"])
         self.assertEqual(итог["спорных"], 0, "одно поле — не повод ронять прогон")
-        self.assertIn("2026-09-03-smeta.md", поток.getvalue())
+        # предупреждение идёт через `_скажи`: в журнале (stderr — не терминал)
+        # путь карточки срезан до каталога (ТЗ §15.1, Т9.1), причина остаётся
+        self.assertIn("kb/commitments/…", поток.getvalue())
+        self.assertNotIn("smeta", поток.getvalue())
         self.assertIn("высокая", поток.getvalue())
 
 

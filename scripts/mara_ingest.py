@@ -641,6 +641,64 @@ def обезличить(текст):
     return текст
 
 
+# Gated sensitive mode журналов (ТЗ §15.1): для диагностики владелец явно
+# включает режим на срок, и строки журнала несут содержимое (путь карточки) —
+# с предупреждением в каждой строке; секреты маскируются всё равно. Срок — в
+# файле под корнем реестра: его видят и демон, и кроны, без рестарта, а
+# «включил и забыл» режет потолок суток. Включение — `contextd.py
+# --sensitive-logs МИНУТ` (0 — выключить).
+ЧУВСТВ_ФАЙЛ = "sensitive-logs-until"
+ЧУВСТВ_ПОТОЛОК_С = 24 * 3600
+
+
+def чувствительно(root=None, now=None):
+    """Срок включённого sensitive mode (`datetime`) или None.
+
+    Кривой или истёкший файл — None: журнал не то место, ради которого
+    стоит падать, а молчаливое «выключено» — безопасная сторона."""
+    p = os.path.join(root or ROOT, ЧУВСТВ_ФАЙЛ)
+    try:
+        with open(p, encoding="utf-8") as fh:
+            срок = datetime.fromisoformat(fh.read().strip())
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if срок.tzinfo is None:
+        срок = срок.replace(tzinfo=TZ)
+    return срок if (now or datetime.now(TZ)) < срок else None
+
+
+def включить_чувствительные(root=None, минут=0, now=None):
+    """Включить sensitive mode на `минут` (потолок — сутки) или выключить
+    (`минут` ≤ 0). Возвращает срок или None."""
+    p = os.path.join(root or ROOT, ЧУВСТВ_ФАЙЛ)
+    if минут <= 0:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        return None
+    срок = ((now or datetime.now(TZ))
+            + timedelta(seconds=min(минут * 60, ЧУВСТВ_ПОТОЛОК_С)))
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(срок.isoformat(timespec="seconds"))
+    return срок
+
+
+def для_журнала(текст, root=None, now=None):
+    """Строка для журнала (journald, лог крона): по умолчанию `обезличить`;
+    при включённом sensitive mode содержимое остаётся, секреты маскируются
+    всё равно, и строка несёт явное предупреждение (ТЗ §15.1)."""
+    срок = чувствительно(root, now)
+    if срок is None:
+        return обезличить(текст)
+    from redact import SECRETS
+    текст = текст or ""
+    for rx, repl in SECRETS:
+        текст = rx.sub(repl, текст)
+    return "[чувствительный журнал до %s] %s" % (
+        срок.isoformat(timespec="minutes"), текст)
+
+
 def в_utc(когда):
     """`datetime` со сдвигом → строка в формате вычисляемых колонок
     миграции 7, для сравнения с `received_utc`/`occurred_utc`."""
