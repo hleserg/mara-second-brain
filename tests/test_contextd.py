@@ -2112,11 +2112,12 @@ class ТестScopes(unittest.TestCase):
         return коды
 
     def test_чтение_контекста_по_списку(self):
-        """Т6.4: пакет и справку читает `null`, `context` или `correction`;
+        """Т6.4: пакет и справку читает `null`, `memory:read` или `correction`;
         список без них — 403 (украденный телефон обязательств не отдаёт)."""
         self.assertEqual(self.читать(), [200, 200], "null — как раньше")
         for виды, можно in ((["call", "message"], False), (["correction"], True),
-                            (["context"], True), (["call", "context"], True),
+                            (["memory:read"], True), (["call", "memory:read"], True),
+                            (["health:read"], False),
                             (["heartbeat"], False)):
             with self.subTest(виды=виды):
                 contextd.set_scopes(self.con, self.dev, виды)
@@ -2125,7 +2126,7 @@ class ТестScopes(unittest.TestCase):
                     self.assertEqual(коды, [200, 200])
                 else:
                     self.assertEqual([к[0] for к in коды], [403, 403], коды)
-                    self.assertIn("context", коды[0][1], "отказ говорит, что дописать")
+                    self.assertIn("memory:read", коды[0][1], "отказ говорит, что дописать")
         self.assertFalse(contextd.можно_читать(self.con, "dev_нет"), "нет устройства")
         self.assertFalse(contextd.можно_читать(self.con, None))
 
@@ -2141,19 +2142,30 @@ class ТестScopes(unittest.TestCase):
         ош.exception.read()
 
     def test_права_не_виды_события(self):
-        for вид in contextd.ПСЕВДОВИДЫ:
+        for вид in contextd.ПСЕВДОВИДЫ + contextd.ПРАВА_ЧТЕНИЯ:
             with self.subTest(вид=вид):
                 self.assertEqual(self.послать(вид, "s-" + вид), 400, "даже при null")
-        contextd.set_scopes(self.con, self.dev, ["context"])
-        self.assertEqual(self.послать("context", "s2"), 400,
+        contextd.set_scopes(self.con, self.dev, ["memory:read"])
+        self.assertEqual(self.послать("memory:read", "s2"), 400,
                          "право чтения не открывает запись")
         self.assertEqual(self.послать("call", "s3"), 403, "и других видов не даёт")
 
+    def test_словарь_прав_закрыт(self):
+        """В список ложатся виды по форме и права словаря ADR-0011 — и только
+        они: опечатка в праве не должна молча стать «ничего не разрешено»."""
+        found, val = contextd.set_scopes(self.con, self.dev,
+                                          ["call"] + list(contextd.ПРАВА_ЧТЕНИЯ))
+        self.assertTrue(found)
+        self.assertEqual(set(val.split()), {"call"} | set(contextd.ПРАВА_ЧТЕНИЯ))
+        for плохо in ("memory:write", "memory:reed", "foo:read", "context:read"):
+            with self.subTest(плохо=плохо), self.assertRaises(ValueError):
+                contextd.set_scopes(self.con, self.dev, [плохо])
+
     def test_история_не_собирает_права(self):
-        """Строки `context` и `heartbeat`, легшие в реестр до запрета, `@history`
-        в право не превращает (ревью #175)."""
+        """Строка `heartbeat`, легшая в реестр до запрета, `@history` в право
+        не превращает (ревью #175)."""
         with mi.транзакция(self.con):
-            for i, вид in enumerate(("call", "context", "heartbeat")):
+            for i, вид in enumerate(("call", "heartbeat")):
                 mi.put_event(self.con, {"kind": вид, "source": "phone",
                                         "source_id": "h%d" % i, "device_id": self.dev})
         self.assertEqual(contextd.scopes_from_history(self.con, self.dev), ["call"])
