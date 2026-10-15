@@ -46,6 +46,17 @@ bind. Но из локалки он виден, и это осознанный �
 `message`, `correction` и `email`. `audio` из ADR-0009 в их число не входит —
 это не вид, а дозагрузка к уже принятому событию, и телефону в список пишется
 `call`.
+
+Плюс слова, которые не виды, а права. Права на чтение — словарь ADR-0011:
+`memory:read` — читать контекст владельца, пакет `now`
+(`/v1/context/bootstrap`) и справку (`/v1/context/query`; Т6.4);
+`health:read`, `evidence:read`, `observatory:read` пока только принимаются в
+список. И `heartbeat` — сердцебиение узла (Т7.2). Со списком читать контекст
+можно, только если в нём есть `memory:read` или `correction`: правка
+словами называет пункт по коду из пакета, и без чтения она слепа. Событиями
+права не бывают — приём их не берёт, и `@history` их не собирает. Телефону список задаётся явно —
+`--allow ID call message`, а не `@history`: месяц без звонков снял бы `call`,
+и звонки получили бы 403 — для телефона это окончательный отказ.
 """
 import os, sys, io, re, json, time, glob, socket, hashlib, secrets, argparse, math
 import unicodedata
@@ -439,12 +450,56 @@ def scope_ok(con, device_id, kind):
     return kind in row["scopes"].split()
 
 
+# Т6.4 (ADR-0009, правка решения 4): права на чтение — словами словаря
+# ADR-0011 (решение 5) в том же allowlist, а не новая колонка и не таблица
+# прав. Двоеточие отделяет право от вида события синтаксически: вид с ним не
+# проходит форму (`ВИД`), так что право не бывает событием, а `@history` не
+# соберёт его из истории. Пакет и справка — объекты памяти без текста
+# evidence, то есть `memory:read`; остальные три заводятся вместе со своими
+# контрактами, а пока лишь принимаются в список.
+ПРАВА_ЧТЕНИЯ = ("health:read", "memory:read", "evidence:read", "observatory:read")
+ЧТЕНИЕ = "memory:read"
+# Право узла (Т7.2) — слово без двоеточия, исторически. Событием оно тоже не
+# бывает: приём его не берёт, `@history` не собирает (ревью #175)
+ПСЕВДОВИДЫ = ("heartbeat",)
+# `--allow` заменяет список целиком: совет «допиши» — а не «запиши», иначе
+# плагин, исполнив его буквально, потерял бы `correction`
+ОТКАЗ_ЧТЕНИЯ = ("устройству не разрешено читать контекст: допиши «memory:read» к "
+                "его списку (`--scopes ID` покажет текущий)")
+
+
+def можно_читать(con, device_id):
+    """Может ли устройство читать контекст владельца: пакет `now` и справку.
+
+    `null` — как до этого права, всё можно (решение 4: устройство без списка
+    работает как раньше). Список — нужен `memory:read` или `correction`:
+    правка словами называет пункт по коду из пакета, и токен, которому её
+    разрешили, без чтения слеп. У плагина Hermes в списке как раз
+    `correction`, а `@history` другого ему и не даст: право — не вид
+    события. Телефону со списком `call message` пакет обязательств не
+    нужен, и украденный телефон его больше не отдаёт (threat-model, сц. 2).
+    Нет устройства или оно отозвано — нет права: проверка не должна
+    держаться на том, что вызывающий нашёл устройство заново."""
+    if not device_id:
+        return False
+    row = con.execute("select scopes from devices where id=? and revoked_at is null",
+                      (device_id,)).fetchone()
+    if not row:
+        return False
+    if row["scopes"] is None:
+        return True
+    return bool({ЧТЕНИЕ, "correction"} & set(row["scopes"].split()))
+
+
 def scopes_from_history(con, device_id, days=30):
-    """Виды, которые устройство слало за `days` дней. Пусто — истории нет."""
+    """Виды, которые устройство слало за `days` дней. Пусто — истории нет.
+    Права не собираются: `heartbeat` (`ПСЕВДОВИДЫ`) — даже если такие
+    строки легли в реестр до запрета, а права с двоеточием видом быть не
+    могли вовсе. История — о том, что устройство шлёт, а не о правах."""
     since = mi.в_utc(datetime.now(mi.TZ) - timedelta(days=days))
     return sorted({r["kind"] for r in con.execute(
         "select distinct kind from events where device_id=? and received_utc>=?",
-        (device_id, since)) if r["kind"]})
+        (device_id, since)) if r["kind"] and r["kind"] not in ПСЕВДОВИДЫ})
 
 
 ВИД = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
@@ -488,7 +543,7 @@ def set_scopes(con, device_id, kinds):
     перестать проверять колонку; удалять её не нужно и не следует.
     """
     for k in kinds:
-        беда = плохой_вид(k)
+        беда = None if k in ПРАВА_ЧТЕНИЯ else плохой_вид(k)
         if беда:
             raise ValueError(беда)
     val = " ".join(sorted(set(kinds))) or None
@@ -1082,6 +1137,11 @@ class Handler(BaseHTTPRequestHandler):
             петля = self.client_address[0] in LOOPBACK
             return self.say(200, job_view(row, петля))
         if p.path == "/v1/context/bootstrap":
+            if not можно_читать(con, device_of(con, self.headers.get("Authorization"))):
+                return self.say(403, {"error": ОТКАЗ_ЧТЕНИЯ})
+            # след чтения (Т6.4): плагин ходит не чаще раза в TTL (60 с), и
+            # строка — единственный признак, что пакет читает чужой токен
+            print(log_line("GET", p.path, 200, None, клиент(self)), flush=True)
             return self.say(200, bootstrap(con, self.server.vault))
         return self.say(404, {"error": "нет такого пути"})
 
@@ -1260,6 +1320,11 @@ class Handler(BaseHTTPRequestHandler):
                 # список из истории, а `set_scopes` такой вид не принимает —
                 # не записывается ничего, включая настоящие виды (#29).
                 return self.say(400, {"error": беда}, поля=data)
+            if kind in ПСЕВДОВИДЫ:
+                # иначе право в списке открывало бы и запись событий такого
+                # вида, а `@history` превращал бы её обратно в право
+                return self.say(400, {"error": "«%s» — право, а не вид события"
+                                               % kind}, поля=data)
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
             # Ключ дедупа считает сервер по полям самого события. Присланный
@@ -1412,6 +1477,9 @@ class Handler(BaseHTTPRequestHandler):
             # что по нему открыто. В ход хуком едет только `now`. Содержимое
             # — одним текстом с той же очисткой, что у `now`; в JSON — только
             # опись пакетов, сырые поля карточек в ответ не идут
+            # право — раньше разбора запроса: отказу незачем знать, что спросили
+            if not можно_читать(con, device_of(con, self.headers.get("Authorization"))):
+                return self.say(403, {"error": ОТКАЗ_ЧТЕНИЯ})
             о_чём = data.get("about")
             if not isinstance(о_чём, str) or not о_чём.strip() or len(о_чём) > 200:
                 return self.say(400, {"error": "about — имя человека или проекта или "
@@ -2760,7 +2828,8 @@ def main(argv=None):
     ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
                     help="задать allowlist видов из `events.kind` "
                          "(сегодня заводятся `call`, `message`, `correction`, "
-                         "`email`; `audio` — не вид, а дозагрузка): "
+                         "`email`; `audio` — не вид, а дозагрузка; "
+                         "`memory:read` — право читать пакет и справку): "
                          "`--allow ID вид вид`; "
                          "`--allow ID` снимает ограничение (и только так); "
                          "`--allow ID @history` берёт виды из событий за 30 "

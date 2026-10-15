@@ -2095,6 +2095,110 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(row["name"], "старое")
         self.assertIsNone(row["scopes"], "миграция не должна ничего разрешать сама")
 
+    def читать(self):
+        """(код bootstrap, код справки) этим токеном."""
+        коды = []
+        for метод, путь, тело in (("GET", "/v1/context/bootstrap", None),
+                                  ("POST", "/v1/context/query", b'{"about": "x"}')):
+            req = urllib.request.Request(self.base + путь, data=тело, method=метод)
+            req.add_header("Content-Type", "application/json")
+            req.add_header("Authorization", "Bearer " + self.token)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    r.read()
+                    коды.append(r.status)
+            except urllib.error.HTTPError as e:
+                коды.append((e.code, json.loads(e.read() or b"{}").get("error", "")))
+        return коды
+
+    def test_чтение_контекста_по_списку(self):
+        """Т6.4: пакет и справку читает `null`, `memory:read` или `correction`;
+        список без них — 403 (украденный телефон обязательств не отдаёт)."""
+        self.assertEqual(self.читать(), [200, 200], "null — как раньше")
+        for виды, можно in ((["call", "message"], False), (["correction"], True),
+                            (["memory:read"], True), (["call", "memory:read"], True),
+                            (["health:read"], False),
+                            (["heartbeat"], False)):
+            with self.subTest(виды=виды):
+                contextd.set_scopes(self.con, self.dev, виды)
+                коды = self.читать()
+                if можно:
+                    self.assertEqual(коды, [200, 200])
+                else:
+                    self.assertEqual([к[0] for к in коды], [403, 403], коды)
+                    self.assertIn("memory:read", коды[0][1], "отказ говорит, что дописать")
+        self.assertFalse(contextd.можно_читать(self.con, "dev_нет"), "нет устройства")
+        self.assertFalse(contextd.можно_читать(self.con, None))
+
+    def test_отказ_справки_раньше_разбора(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        req = urllib.request.Request(self.base + "/v1/context/query", data=b"{}",
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        with self.assertRaises(urllib.error.HTTPError) as ош:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(ош.exception.code, 403, "не 400 за пустой about")
+        ош.exception.read()
+
+    def test_права_не_виды_события(self):
+        for вид in contextd.ПСЕВДОВИДЫ + contextd.ПРАВА_ЧТЕНИЯ:
+            with self.subTest(вид=вид):
+                self.assertEqual(self.послать(вид, "s-" + вид), 400, "даже при null")
+        contextd.set_scopes(self.con, self.dev, ["memory:read"])
+        self.assertEqual(self.послать("memory:read", "s2"), 400,
+                         "право чтения не открывает запись")
+        self.assertEqual(self.послать("call", "s3"), 403, "и других видов не даёт")
+
+    def test_словарь_прав_закрыт(self):
+        """В список ложатся виды по форме и права словаря ADR-0011 — и только
+        они: опечатка в праве не должна молча стать «ничего не разрешено»."""
+        found, val = contextd.set_scopes(self.con, self.dev,
+                                          ["call"] + list(contextd.ПРАВА_ЧТЕНИЯ))
+        self.assertTrue(found)
+        self.assertEqual(set(val.split()), {"call"} | set(contextd.ПРАВА_ЧТЕНИЯ))
+        for плохо in ("memory:write", "memory:reed", "foo:read", "context:read"):
+            with self.subTest(плохо=плохо), self.assertRaises(ValueError):
+                contextd.set_scopes(self.con, self.dev, [плохо])
+
+    def test_история_не_собирает_права(self):
+        """Строка `heartbeat`, легшая в реестр до запрета, `@history` в право
+        не превращает (ревью #175)."""
+        with mi.транзакция(self.con):
+            for i, вид in enumerate(("call", "heartbeat")):
+                mi.put_event(self.con, {"kind": вид, "source": "phone",
+                                        "source_id": "h%d" % i, "device_id": self.dev})
+        self.assertEqual(contextd.scopes_from_history(self.con, self.dev), ["call"])
+
+    def test_отозванный_не_читает(self):
+        self.assertTrue(contextd.можно_читать(self.con, self.dev))
+        contextd.revoke(self.con, self.dev)
+        self.assertFalse(contextd.можно_читать(self.con, self.dev),
+                         "право не держится на том, что устройство найдут заново")
+
+    def test_плагин_читает_правом_правки_и_не_читает_телефоном(self):
+        """Сквозь настоящий `Брокер` плагина: токен со списком `correction`
+        получает текст пакета, со списком телефона — пустоту (403)."""
+        import importlib.util
+        import context_pack
+        os.makedirs(os.path.join(self.srv.vault, "kb/commitments"), exist_ok=True)
+        os.makedirs(os.path.join(self.srv.vault, ".git"), exist_ok=True)   # флок волта
+        with open(os.path.join(self.srv.vault, "kb/commitments", "p.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("---\ntitle: вернуть ключи\nstatus: open\n---\n")
+        context_pack.build_now(self.srv.vault)
+        spec = importlib.util.spec_from_file_location(
+            "mara_context", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                                         "install", "mara-context", "__init__.py"))
+        плагин = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(плагин)
+        for виды, видит in ((["correction"], True), (["call", "message"], False)):
+            with self.subTest(виды=виды):
+                contextd.set_scopes(self.con, self.dev, виды)
+                брокер = плагин.Брокер(url=self.base, token=self.token)
+                текст = брокер.контекст([])
+                self.assertEqual("вернуть ключи" in текст, видит, текст)
+
     def test_null_пускает_всё(self):
         self.assertEqual(self.послать("call", "s1"), 200)
         self.assertEqual(self.послать("message", "s2"), 200)
