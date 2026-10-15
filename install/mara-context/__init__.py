@@ -242,17 +242,18 @@ class ПинHTTPS(urllib.request.HTTPSHandler):
         return self.do_open(_ПоПину, req, context=self._context, пин=self.пин)
 
 
-def беда_пина(url, пин):
+def беда_пина(url, пин, имя="MARA_CONTEXT_PIN"):
     """Почему с такими адресом и пином в сеть нельзя, или None. Пин без
-    `https://` — токен уехал бы открытым текстом."""
+    `https://` — запрос уехал бы открытым текстом. `имя` — переменная пина
+    в тексте: у сердцебиения `MARA_CONTEXT_PIN`, у шагов doctor — `MARA_NODE_PIN`."""
     if not пин:
         return None
     try:
         нормальный_пин(пин)
     except ValueError as e:
-        return "MARA_CONTEXT_PIN: %s" % e
+        return "%s: %s" % (имя, e)
     if urllib.parse.urlsplit(url or "").scheme.lower() != "https":
-        return "пин задан, а адрес не https:// — токен ушёл бы открытым текстом"
+        return "%s задан, а адрес не https:// — запрос ушёл бы открытым текстом" % имя
     return None
 
 

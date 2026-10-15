@@ -38,6 +38,8 @@ ASR_URL = os.environ.get("MARA_ASR_URL") or None
 # узлу, доказавшему секрет, ответ без верной подписи не принимается
 # (`node_agent.к_узлу`, threat-model п. 9). Без секрета — как раньше, напрямую
 СЕКРЕТ_УЗЛА = os.environ.get("MARA_NODE_SECRET") or None
+# Т0.9 п. 2: пин сертификата прокси узла — аудио уходит по TLS и только к нему
+ПИН_УЗЛА = os.environ.get("MARA_NODE_PIN") or None
 WINDOW_MS = int(os.environ.get("MARA_ASR_WINDOW_MS", 25000))
 OVERLAP_MS = int(os.environ.get("MARA_ASR_OVERLAP_MS", 2000))
 HTTP_TIMEOUT = 300
@@ -99,7 +101,7 @@ def transcribe_spans(base_url, plan, cutter, движок=None):
     for i, (a, b) in enumerate(plan, 1):
         ответ = node_agent.к_узлу(base_url + "/transcribe", cutter(a, b),
                                   "application/octet-stream", секрет=СЕКРЕТ_УЗЛА,
-                                  таймаут=HTTP_TIMEOUT)
+                                  таймаут=HTTP_TIMEOUT, пин=ПИН_УЗЛА)
         d = json.loads(ответ or b"{}")
         if движок is not None:
             for k in ("engine", "model", "language"):

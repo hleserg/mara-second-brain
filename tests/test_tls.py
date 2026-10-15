@@ -191,10 +191,9 @@ class Пин(unittest.TestCase):
             for m in re.finditer(r"(?ms)^(?:class|def) ([\w_]+)\b.*?(?=^\S|\Z)", текст):
                 out[m.group(1)] = [
                     л for л in m.group(0).rstrip().splitlines()
-                    # у агента `беда_пина` несёт параметр-имя переменной —
-                    # сравнивается остов без этих строк и без докстрок
-                    if "MARA_NODE_PIN" not in л and "имя" not in л
-                    and not л.strip().startswith(('\x22', "#"))]
+                    # сравнивается всё, кроме докстрок и комментариев:
+                    # `беда_пина` с параметром `имя` у обоих дословно
+                    if not л.strip().startswith(('\x22', "#"))]
             return out
         а = блоки(os.path.join("..", "scripts", "node_agent.py"))
         б = блоки(os.path.join("..", "install", "mara-context", "__init__.py"))

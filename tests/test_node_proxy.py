@@ -3,7 +3,7 @@
 подписанное и подписывает ответ; шаги doctor (`call_asr`, `call_extract`)
 отдают аудио и текст только узлу, доказавшему секрет, и не принимают ответ
 без верной подписи."""
-import contextlib, io, json, os, socket, sys, threading, time, unittest
+import contextlib, http.client, io, json, os, socket, sys, threading, time, unittest
 import urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
@@ -486,3 +486,181 @@ class Агент(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TLSПрокси(unittest.TestCase):
+    """Т0.9 п. 2, участок doctor → узел: прокси с сертификатом говорит только
+    TLS, а doctor сверяет его пин (`MARA_NODE_PIN`) до первого байта аудио."""
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil, tempfile
+        if not shutil.which("openssl"):
+            raise unittest.SkipTest("нет openssl — сертификат не выпустить")
+        cls.окружение = mock.patch.dict(os.environ, БЕЗ_ПРОКСИ)
+        cls.окружение.start()
+        cls.cert, cls.key, cls.пин = node_agent.выпустить(
+            os.path.join(tempfile.mkdtemp(), "tls"), "node", "mara-node")
+        cls.stt, cls.stt_url = _сервер(_Сервис, пришло=[])
+        env = {"MARA_NODE_SECRET": СЕКРЕТ, "MARA_NODE_PROXY_PORT": "0",
+               "MARA_NODE_PROXY_BIND": "127.0.0.1", "MARA_NODE_ASR_URL": cls.stt_url,
+               "MARA_NODE_TLS_CERT": cls.cert, "MARA_NODE_TLS_KEY": cls.key}
+        cls.прокси = node_agent.запустить_прокси(env)
+        cls.url = "https://127.0.0.1:%d" % cls.прокси.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        for с in (cls.stt, cls.прокси):
+            с.shutdown()
+            с.server_close()
+        cls.окружение.stop()
+
+    def setUp(self):
+        node_agent._доказано.clear()
+        self.addCleanup(node_agent._доказано.clear)
+        self.stt.пришло.clear()
+
+    def test_по_пину_аудио_доходит(self):
+        ответ = node_agent.к_узлу(self.url + "/transcribe", b"wav", "application/octet-stream",
+                                  секрет=СЕКРЕТ, пин=self.пин)
+        self.assertEqual(json.loads(ответ)["text"], "алло, это Анна")
+        self.assertEqual([п for п, _, _ in self.stt.пришло], ["/transcribe"])
+
+    def test_чужой_пин_аудио_не_уходит(self):
+        вывод = io.StringIO()
+        with contextlib.redirect_stdout(вывод):
+            with self.assertRaises(urllib.error.URLError) as e:
+                node_agent.к_узлу(self.url + "/transcribe", b"wav", "application/octet-stream",
+                                  секрет=СЕКРЕТ, пин="sha256:" + "00" * 32)
+        self.assertIsInstance(e.exception.reason, node_agent.ЧужойСертификат)
+        self.assertEqual(self.stt.пришло, [], "сервис узла не тронут")
+
+    def test_пин_с_http_не_ходит_в_сеть(self):
+        with self.assertRaises(ValueError) as e:
+            node_agent.к_узлу(self.url.replace("https", "http") + "/transcribe", b"wav",
+                              "application/octet-stream", секрет=СЕКРЕТ, пин=self.пин)
+        self.assertIn("MARA_NODE_PIN", str(e.exception))
+        self.assertEqual(self.stt.пришло, [])
+
+    def test_без_пина_самоподписанный_не_принят(self):
+        with self.assertRaises(urllib.error.URLError) as e:
+            node_agent.к_узлу(self.url + "/transcribe", b"wav", "application/octet-stream",
+                              секрет=СЕКРЕТ)
+        self.assertIsInstance(e.exception.reason, OSError)
+        self.assertEqual(self.stt.пришло, [])
+
+    def test_без_секрета_пин_сверяется(self):
+        """Пин работает и без подписи: прямой путь `к_узлу` тоже идёт через
+        `ПинHTTPS`, а чужой пин — отказ до байта."""
+        with self.assertRaises(urllib.error.URLError) as e:
+            node_agent.к_узлу(self.url + "/transcribe", b"wav", "application/octet-stream",
+                              пин="sha256:" + "00" * 32)
+        self.assertIsInstance(e.exception.reason, node_agent.ЧужойСертификат)
+        # с верным пином прямой путь доходит до прокси; без подписи тот отвечает
+        # 401 — но по TLS, и это ответ, а не обрыв
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            node_agent.к_узлу(self.url + "/transcribe", b"wav", "application/octet-stream",
+                              пин=self.пин)
+        self.assertEqual(e.exception.code, 401)
+
+    def test_http_на_прокси_tls_отбит_прокси_жив(self):
+        вывод = io.StringIO()
+        with contextlib.redirect_stdout(вывод):
+            # BadStatusLine (сервер успел отдать TLS-alert) — не OSError
+            with self.assertRaises((urllib.error.URLError, ConnectionError, OSError,
+                                    http.client.HTTPException)):
+                urllib.request.urlopen(self.url.replace("https", "http") + "/transcribe",
+                                       data=b"wav", timeout=5)
+            for _ in range(50):
+                if "рукопожатие" in вывод.getvalue():
+                    break
+                time.sleep(0.05)
+        self.assertIn("HTTP_REQUEST", вывод.getvalue())
+        self.test_по_пину_аудио_доходит()
+
+    def test_молчун_держит_одно_место_и_отваливается(self):
+        with mock.patch.object(node_agent, "РУКОПОЖАТИЕ_С", 0.5), \
+             contextlib.redirect_stdout(io.StringIO()):
+            молчун = socket.create_connection(("127.0.0.1", self.прокси.server_address[1]),
+                                              timeout=5)
+            try:
+                self.test_по_пину_аудио_доходит()
+                self.assertEqual(молчун.recv(1), b"")
+            finally:
+                молчун.close()
+
+    def test_половина_пары_прокси_не_поднимает(self):
+        env = {"MARA_NODE_SECRET": СЕКРЕТ, "MARA_NODE_PROXY_PORT": "0",
+               "MARA_NODE_PROXY_BIND": "127.0.0.1", "MARA_NODE_TLS_CERT": self.cert}
+        with self.assertRaises(ValueError):
+            node_agent.запустить_прокси(env)
+
+    def test_проба_doctor_по_пину(self):
+        import contextd
+        contextd._пробы.clear()
+        self.addCleanup(contextd._пробы.clear)
+        адрес = self.url
+        self.assertEqual(contextd.проба(адрес, пин=self.пин), (True, True))
+        # воркер отдаёт пробе пин из настроек шага: без него проба звала бы
+        # https:// с системным доверием и считала живой узел недоступным
+        contextd._пробы.clear()
+        with mock.patch.dict(os.environ, {"MARA_NODE_PIN": self.пин}), \
+             mock.patch.object(contextd, "ТЯЖЁЛЫЕ", {"asr": ("bigpc", "MARA_ASR_URL")}), \
+             mock.patch.dict(os.environ, {"MARA_ASR_URL": адрес}):
+            import mara_ingest as mi, tempfile
+            con = mi.connect(tempfile.mkdtemp())
+            try:
+                self.assertEqual(contextd.недоступные(con), {"asr": None},
+                                 "узел за TLS с пином — живой, а не node_offline")
+                # «жив» здесь — именно живой по пину, а не «настройка кривая»:
+                # отметку last_seen получает только отвечающий узел
+                self.assertIsNotNone(con.execute(
+                    "select last_seen from compute_nodes where name='bigpc'").fetchone(),
+                    "проба без пина сочла бы живой узел недоступным")
+            finally:
+                con.close()
+        contextd._пробы.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(contextd.проба(адрес, пин="sha256:" + "00" * 32)[0],
+                              "чужой сертификат — не «выключен»: шаг упадёт видно")
+            contextd._пробы.clear()
+            self.assertIsNone(contextd.проба(адрес)[0], "https без пина — тоже настройка")
+            contextd._пробы.clear()
+            # TLS-переменные узла не подхватились, прокси отвечает открытым
+            # текстом: это поломка настройки, а не «выключен» — иначе работы
+            # молча висели бы node_offline (ревью, P2)
+            self.assertIsNone(
+                contextd.проба(self.stt_url.replace("http://", "https://"),
+                               пин=self.пин)[0],
+                "коробка ответила не-TLS — настройка, не «выключен»")
+            contextd._пробы.clear()
+            self.assertIsNone(contextd.проба(адрес.replace("https", "http"), пин=self.пин)[0])
+            contextd._пробы.clear()
+            # выключенная коробка по-прежнему False
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                пусто = s.getsockname()[1]
+            self.assertFalse(contextd.проба("https://127.0.0.1:%d" % пусто, пин=self.пин)[0])
+
+    def test_шаги_берут_пин_из_окружения(self):
+        """`call_asr` и `call_extract` отдают `MARA_NODE_PIN` в `к_узлу`."""
+        with mock.patch.object(node_agent, "к_узлу", return_value=b'{"text": ""}') as узел, \
+             mock.patch.object(call_asr, "ПИН_УЗЛА", self.пин):
+            call_asr.transcribe_spans(self.url, [(0, 1000)], lambda a, b: b"wav")
+        self.assertEqual(узел.call_args.kwargs["пин"], self.пин)
+        with mock.patch.object(node_agent, "к_узлу",
+                               return_value=b'{"response": "{}"}') as узел, \
+             mock.patch.object(call_extract, "ПИН_УЗЛА", self.пин):
+            call_extract.ask_model("текст", base_url=self.url)
+        self.assertEqual(узел.call_args.kwargs["пин"], self.пин)
+
+    def test_выпуск_для_узла(self):
+        import tempfile
+        каталог = os.path.join(tempfile.mkdtemp(), "node")
+        вывод = io.StringIO()
+        with contextlib.redirect_stdout(вывод):
+            self.assertEqual(node_agent.main(["--tls-new", каталог]), 0)
+        self.assertEqual(sorted(os.listdir(каталог)), ["node.crt", "node.key"])
+        пин = node_agent.пин_сертификата(os.path.join(каталог, "node.crt"))
+        self.assertIn("MARA_NODE_PIN=" + пин, вывод.getvalue())
+        self.assertEqual(os.stat(os.path.join(каталог, "node.key")).st_mode & 0o777, 0o600)
