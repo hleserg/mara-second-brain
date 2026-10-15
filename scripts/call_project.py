@@ -688,8 +688,11 @@ def check_correction(payload):
         # объект и список коэрсились через str() и доезжали до волта своим
         # питоновским представлением (Codex по #176, круг 3)
         return "item — строка"
-    if not (item or "").strip() or len(item.strip()) > ПУНКТ_МАКС:
-        return "нужно название обязательства, до %d знаков" % ПУНКТ_МАКС
+    if len((item or "").strip()) > ПУНКТ_МАКС or (
+            not (item or "").strip() and payload.get("id") in (None, "")):
+        # у правки словами название — единственный адрес карточки; правка по
+        # коду (кнопки утра, Т-У.5) адресуется без него, id ниже проверяется
+        return "нужно название обязательства (или id), до %d знаков" % ПУНКТ_МАКС
     if payload.get("status") not in (None, "") + СТАТУСЫ:
         return "статус — один из: " + ", ".join(СТАТУСЫ)
     if payload.get("due") not in (None, "") and not (
@@ -785,8 +788,13 @@ def _строка_реестра(con, card, адреса):
                        "where id=?", (oid,)).fetchone() if oid else None
 
 
-def _конфликт(con, card, ожидали, payload, когда, адреса):
+def _конфликт(con, card, ожидали, payload, когда, адреса, файл_разошёлся=False):
     """ADR-0003 п.4: версия в реестре не та, что ждал вызывающий.
+
+    `файл_разошёлся` — шапка файла не совпала со строкой реестра (правка
+    рукой, перенос не догнал): версия реестра тогда не об этом файле, и
+    конфликт объявляется даже при совпавшей версии; `current` в ответе —
+    из файла, он свежее (Codex по #180).
 
     Возвращает ответ формы §4.5 или None, если конфликта нет. Проверять есть
     по чему только у карточки с id и строкой в реестре: без строки честно
@@ -796,10 +804,15 @@ def _конфликт(con, card, ожидали, payload, когда, адрес
     чтобы Control Plane показал открытое и дал владельцу разобрать.
     """
     row = _строка_реестра(con, card, адреса)
-    if row is None or row["version"] == ожидали:
+    if row is None or (row["version"] == ожидали and not файл_разошёлся):
         return None
     oid = row["id"]
-    текущее = {"title": row["title"], "status": row["status"], "due": row["due"]}
+    fm = card["fm"]
+    текущее = ({"title": str(fm.get("title") or ""),
+                "status": str(fm.get("status") or ""),
+                "due": str(fm.get("due") or "") or None}
+               if файл_разошёлся else
+               {"title": row["title"], "status": row["status"], "due": row["due"]})
     # открытая тревога на ту же версию объекта уже есть — повтор правки в
     # другую минуту не плодит очередь (ревью PR #118)
     было = con.execute(
@@ -808,14 +821,21 @@ def _конфликт(con, card, ожидали, payload, когда, адрес
         "json_extract(detail_json, '$.current_version')=?",
         (oid, row["version"])).fetchone()
     cid = было["id"] if было else mi.uuid7()
+    detail = json.dumps({"expected_version": ожидали,
+                         "current_version": row["version"],
+                         "current": текущее, "attempted_patch": payload},
+                        ensure_ascii=False)
     if not было:
         con.execute("insert into alerts(id,kind,severity,state,object_kind,object_id,"
                     "opened,detail_json) values(?,?,?,?,?,?,?,?)",
                     (cid, "version_conflict", "warn", "open", "commitment", oid, когда,
-                     json.dumps({"expected_version": ожидали,
-                                 "current_version": row["version"],
-                                 "current": текущее, "attempted_patch": payload},
-                                ensure_ascii=False)))
+                     detail))
+    elif файл_разошёлся:
+        # файл с прошлой тревоги мог уехать ещё раз, а версия реестра всё та
+        # же: ревью-очередь должна видеть свежие current и правку, а не
+        # состояние первого нажатия (Codex, круг 8)
+        con.execute("update alerts set detail_json=? where id=? and state='open'",
+                    (detail, cid))
     # в тревогу — как было, сырым (это реестр); в ответ — очищенным и
     # ограниченным: он едет модели (Т6.3, ревью #176)
     return {"found": True, "error": "version_conflict", "entity_id": oid,
@@ -825,10 +845,13 @@ def _конфликт(con, card, ожидали, payload, когда, адрес
             "attempted_patch": {k: _м(v) if isinstance(v, str) else v
                                 for k, v in payload.items() if k in ПОЛЯ_ПРАВКИ},
             "conflict_id": cid,
-            "text": "«%s» уже изменилась: версия %d, а не %d (статус %s) — не правил, "
+            "text": "«%s» уже изменилась: %s (статус %s) — не правил, "
                     "конфликт %s в очереди ревью"
-                    % (_м(row["title"]), row["version"], ожидали, _м(row["status"]),
-                       cid[-8:])}
+                    % (_м(текущее["title"]),
+                       "правлена рукой, перенос её ещё не догнал"
+                       if row["version"] == ожидали
+                       else "версия %d, а не %d" % (row["version"], ожидали),
+                       _м(текущее["status"]), cid[-8:])}
 
 
 def _карточки(vault):
@@ -1157,7 +1180,21 @@ def _правка(con, vault, event, p, item, status, due, note, ид, ожид�
                         or (due and due != fm.get("due")))
         row = _строка_реестра(con, found[0], адреса)
         проверено = row is not None
-        if меняет_шапку or (note and row is not None and ожидали > row["version"]):
+        # срок целиком, не первые десять знаков: правка рукой одного
+        # времени (`2026-10-15T18:00` → `T19:00`) — тоже дрейф (Codex)
+        рассинхрон = row is not None and (
+            str(row["status"] or "") != str(fm.get("status") or "")
+            or str(row["due"] or "") != str(fm.get("due") or ""))
+        if рассинхрон and меняет_шапку:
+            # шапка файла разошлась со строкой (правка рукой, перенос не
+            # догнал): версия реестра — не об этом файле, сверять с ней
+            # нечего, какая бы ни пришла — конфликт, не слепая правка
+            # (Codex по #180). Только у правки, меняющей шапку ФАЙЛА:
+            # «уже так» и чистая заметка остаются собой (ADR-0003 п.5,
+            # Codex, круг 5)
+            конфликт = _конфликт(con, found[0], ожидали, dict(p), когда, адреса,
+                                 файл_разошёлся=True)
+        elif меняет_шапку or (note and row is not None and ожидали > row["version"]):
             # версия больше текущей — такой нет; это не «старая
             # заметка», а чужое представление о карточке (ревью PR
             # #120, P3-4)

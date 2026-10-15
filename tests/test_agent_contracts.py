@@ -212,6 +212,19 @@ class Живьём(unittest.TestCase):
         self.assertTrue(d["duplicate"])
         self.assertIsNone(d["applied"], "у дубля итога нет")
 
+    def test_правка_по_коду_без_названия(self):
+        """Кнопкам утра (Т-У.5) слов взять неоткуда: `id` адресует правку
+        один; без обоих — прежний отказ словами."""
+        код, d = self.правка({"item": "вернуть книгу", "status": "open"}, "b-1")
+        ид = d["applied"]["id"]
+        код, d = self.правка({"id": "#" + ид[-8:], "status": "done"}, "b-2")
+        self.assertEqual(код, 200, d)
+        self.assertTrue(d["applied"]["applied"], d)
+        self.сверить_правку(d)
+        код, d = self.правка({"status": "done"}, "b-3")
+        self.assertEqual(код, 400)
+        self.assertIn("название", d["error"])
+
     def test_конфликт_по_схеме_и_без_лишнего(self):
         код, d = self.правка({"item": "забрать <!-- x --> «посылку»", "status": "open"}, "k-1")
         self.assertTrue(d["applied"]["created"], d)

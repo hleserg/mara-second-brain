@@ -63,6 +63,16 @@ MARA_CORE_SNAPSHOT_MAX_H=2.2
 # ручной повтор дубль не шлёт; после ошибки транспорта — может.
 0    20 * * * /usr/bin/python3 @REPO@/scripts/due_reminder.py >> @STATE@/due-reminder.log 2>&1
 
+# Утро с кнопками (Т-У.5): блок утра уходит с doctor — под пунктами кнопки
+# «сделал / не моё / завтра», им нужны Bot API и версии карточек из реестра.
+# Крону Мары на маке остаётся сводка за вчера (--no-morning), иначе утра два.
+# Без транспорта (нет токена бота) утро ложится в outbox и гасится skipped.
+0    9 * * *  /usr/bin/python3 @REPO@/scripts/morning_send.py >> @STATE@/morning-send.log 2>&1
+# Нажатия кнопок: каждый прогон держит long-poll почти всю минуту, замок на
+# файле смещения не пускает второй прогон. Не настроено (нет
+# MARA_BUTTONS_TOKEN в contextd.env) — тихий выход, лог не растёт.
+* * * * *     /usr/bin/python3 @REPO@/scripts/telegram_buttons.py >> @STATE@/telegram-buttons.log 2>&1
+
 # --- сбор в волт ------------------------------------------------------------
 20   * * * *  @REPO@/scripts/sessions-backfill.sh >/dev/null
 25   * * * *  /usr/bin/python3 @REPO@/scripts/hermes-ingest.py >> @STATE@/hermes-ingest.log 2>&1

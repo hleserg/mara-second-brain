@@ -240,6 +240,13 @@ def живые(vault, today):
 
 def morning(vault, today):
     """Утро v1 по правилам `docs/morning-brief.md`. Без модели."""
+    return утро(vault, today)[0]
+
+
+def утро(vault, today):
+    """Текст утра и его пункты: `(текст, [(номер, fm), …])`. Кнопкам под
+    пунктами (`morning_send`, Т-У.5) нужны те же карточки под теми же
+    номерами, что напечатаны владельцу, — один отбор на текст и кнопки."""
     live = живые(vault, today)
     due = lambda fm: str(fm.get("due") or "")[:10]
     dated = [fm for fm in live if due(fm) == today]
@@ -247,7 +254,7 @@ def morning(vault, today):
     maybe = sorted([fm for fm in live if fm.get("status") == "proposed"
                     and fm not in dated and fm not in late],
                    key=lambda fm: str(fm.get("occurred") or ""), reverse=True)
-    blocks, n = [], 0
+    blocks, n, пункты = [], 0, []
     for head, items, tail in (("Сегодня с датой:", dated, lambda fm: "срок сегодня"),
                               ("Это ещё нужно?", late,
                                lambda fm: "срок был %s.%s" % (due(fm)[8:10], due(fm)[5:7])),
@@ -255,6 +262,7 @@ def morning(vault, today):
         lines = []
         for fm in items[:TOP - n]:
             n += 1
+            пункты.append((n, fm))
             title = mb.cut(mb.clean(str(fm["title"])), context_pack.MAX_TITLE)
             lines.append("%d. %s%s\n   (%s)" % (n, title, " — " + tail(fm) if tail(fm) else "",
                                                  _откуда(fm, today)))
@@ -267,7 +275,7 @@ def morning(vault, today):
         blocks.append("Ещё %d ждут — не сегодня." % rest)
     if n:
         blocks[-1] += "\nОтветь Маре словами: «сделал», «не моё», «перенеси на пятницу»."
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), пункты
 
 
 def main(argv=None):
@@ -275,6 +283,10 @@ def main(argv=None):
     ap.add_argument("--vault", default=os.environ.get("VAULT", "/srv/vault"))
     ap.add_argument("--date", help="день в ISO; по умолчанию вчерашний")
     ap.add_argument("--raw", action="store_true", help="без облака, оглавление карточек")
+    # у крона Мары на маке, когда утро шлёт doctor с кнопками (Т-У.5,
+    # `morning_send`): два утра подряд — шум, который перестанут читать
+    ap.add_argument("--no-morning", action="store_true", dest="no_morning",
+                    help="без блока утра (его шлёт doctor, Т-У.5)")
     a = ap.parse_args(argv)
     vault_common.load_env()
     day = a.date or (datetime.now().date() - timedelta(days=1)).isoformat()
@@ -282,7 +294,8 @@ def main(argv=None):
                    os.environ.get("MARA_DIGEST_MODEL", "deepseek/deepseek-v4-pro"), a.raw)
     today = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
     done = closed(a.vault, day)
-    parts = [morning(a.vault, today), "Вчера закрыто: %d." % done if done else "", text]
+    parts = [morning(a.vault, today) if not a.no_morning else "",
+             "Вчера закрыто: %d." % done if done else "", text]
     print("\n\n".join(p for p in parts if p))
     return 0
 
