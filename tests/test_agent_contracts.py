@@ -312,8 +312,17 @@ class Живьём(unittest.TestCase):
                 self.assertEqual(код, 400)
                 self.assertIn("source", d["error"])
         # не строки там, где контракт обещает строку, — 400, а не обрыв
-        # (Codex по #176, круг 3)
+        # (Codex по #176, круги 3 и 5; falsey `due` терял срок молча)
         for поле, тело in (("occurred_at", {"occurred_at": {}}),
+                           ("YYYY-MM-DD", {"payload": {"item": "x", "status": "done",
+                                                       "due": 0}}),
+                           ("YYYY-MM-DD", {"payload": {"item": "x", "status": "done",
+                                                       "due": False}}),
+                           ("YYYY-MM-DD", {"payload": {"item": "x", "status": "done",
+                                                       "due": []}}),
+                           ("YYYY-MM-DD", {"payload": {"item": "x", "due": {}}}),
+                           ("YYYY-MM-DD", {"payload": {"item": "x", "status": "done",
+                                                       "due": ["2026-10-20"]}}),
                            ("item", {"payload": {"item": {"a": 1}, "status": "done"}}),
                            ("item", {"payload": {"item": [1], "status": "done"}}),
                            ("note", {"payload": {"item": "x", "note": [1, 2]}}),

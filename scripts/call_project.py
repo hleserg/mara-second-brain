@@ -692,7 +692,10 @@ def check_correction(payload):
         return "нужно название обязательства, до %d знаков" % ПУНКТ_МАКС
     if payload.get("status") not in (None, "") + СТАТУСЫ:
         return "статус — один из: " + ", ".join(СТАТУСЫ)
-    if payload.get("due") and not ДАТА.match(str(payload["due"])):
+    if payload.get("due") not in (None, "") and not (
+            isinstance(payload["due"], str) and ДАТА.match(payload["due"])):
+        # по наличию, не по истинности: `0`, `false`, `[]` тихо теряли срок —
+        # правка проходила без него (Codex по #176, круг 5)
         return "срок нужен как YYYY-MM-DD"
     if not (payload.get("status") or payload.get("due") or payload.get("note")):
         return "нечего править: ни статуса, ни срока, ни заметки"
