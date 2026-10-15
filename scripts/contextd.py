@@ -46,6 +46,12 @@ bind. Но из локалки он виден, и это осознанный �
 `message`, `correction` и `email`. `audio` из ADR-0009 в их число не входит —
 это не вид, а дозагрузка к уже принятому событию, и телефону в список пишется
 `call`.
+
+Плюс одно слово, которое не вид, а право: `context` — читать контекст
+владельца, пакет `now` (`/v1/context/bootstrap`) и справку
+(`/v1/context/query`; Т6.4). Со списком читать можно, только если в нём есть
+`context` или `correction`: правка словами называет пункт по коду из пакета,
+и без чтения она слепа. Событием `context` не бывает — приём его не берёт.
 """
 import os, sys, io, re, json, time, glob, socket, hashlib, secrets, argparse, math
 import unicodedata
@@ -437,6 +443,34 @@ def scope_ok(con, device_id, kind):
     if row["scopes"] is None:
         return True
     return kind in row["scopes"].split()
+
+
+# Т6.4 (ADR-0009, правка решения 4): право читать контекст владельца —
+# псевдовид в том же allowlist, а не новая колонка и не таблица прав
+ЧТЕНИЕ = "context"
+ОТКАЗ_ЧТЕНИЯ = ("устройству не разрешено читать контекст: в allowlist нужен "
+                "«context» (--allow ID … context)")
+
+
+def можно_читать(con, device_id):
+    """Может ли устройство читать контекст владельца: пакет `now` и справку.
+
+    `null` — как до этого права, всё можно (решение 4: устройство без списка
+    работает как раньше). Список — нужен `context` или `correction`: правка
+    словами называет пункт по коду из пакета, и токен, которому её
+    разрешили, без чтения слеп. У плагина Hermes в списке как раз
+    `correction`, а `@history` другого ему и не даст: `context` — не вид
+    события. Телефону со списком `call message …` пакет обязательств не
+    нужен, и украденный телефон его больше не отдаёт (threat-model, сц. 2).
+    Нет устройства — нет права, как у `scope_ok`."""
+    if not device_id:
+        return False
+    row = con.execute("select scopes from devices where id=?", (device_id,)).fetchone()
+    if not row:
+        return False
+    if row["scopes"] is None:
+        return True
+    return bool({ЧТЕНИЕ, "correction"} & set(row["scopes"].split()))
 
 
 def scopes_from_history(con, device_id, days=30):
@@ -1082,6 +1116,8 @@ class Handler(BaseHTTPRequestHandler):
             петля = self.client_address[0] in LOOPBACK
             return self.say(200, job_view(row, петля))
         if p.path == "/v1/context/bootstrap":
+            if not можно_читать(con, device_of(con, self.headers.get("Authorization"))):
+                return self.say(403, {"error": ОТКАЗ_ЧТЕНИЯ})
             return self.say(200, bootstrap(con, self.server.vault))
         return self.say(404, {"error": "нет такого пути"})
 
@@ -1260,6 +1296,11 @@ class Handler(BaseHTTPRequestHandler):
                 # список из истории, а `set_scopes` такой вид не принимает —
                 # не записывается ничего, включая настоящие виды (#29).
                 return self.say(400, {"error": беда}, поля=data)
+            if kind == ЧТЕНИЕ:
+                # иначе право чтения в списке открывало бы и запись событий
+                # такого вида, а `@history` превращал бы её обратно в право
+                return self.say(400, {"error": "«%s» — право чтения, а не вид события"
+                                               % ЧТЕНИЕ}, поля=data)
             data["kind"] = kind
             data["device_id"] = device_of(con, self.headers.get("Authorization"))
             # Ключ дедупа считает сервер по полям самого события. Присланный
@@ -1412,6 +1453,9 @@ class Handler(BaseHTTPRequestHandler):
             # что по нему открыто. В ход хуком едет только `now`. Содержимое
             # — одним текстом с той же очисткой, что у `now`; в JSON — только
             # опись пакетов, сырые поля карточек в ответ не идут
+            # право — раньше разбора запроса: отказу незачем знать, что спросили
+            if not можно_читать(con, device_of(con, self.headers.get("Authorization"))):
+                return self.say(403, {"error": ОТКАЗ_ЧТЕНИЯ})
             о_чём = data.get("about")
             if not isinstance(о_чём, str) or not о_чём.strip() or len(о_чём) > 200:
                 return self.say(400, {"error": "about — имя человека или проекта или "
@@ -2760,7 +2804,8 @@ def main(argv=None):
     ap.add_argument("--allow", nargs="+", metavar="ID|ВИД",
                     help="задать allowlist видов из `events.kind` "
                          "(сегодня заводятся `call`, `message`, `correction`, "
-                         "`email`; `audio` — не вид, а дозагрузка): "
+                         "`email`; `audio` — не вид, а дозагрузка; "
+                         "`context` — право читать пакет и справку): "
                          "`--allow ID вид вид`; "
                          "`--allow ID` снимает ограничение (и только так); "
                          "`--allow ID @history` берёт виды из событий за 30 "

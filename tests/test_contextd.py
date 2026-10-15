@@ -2095,6 +2095,59 @@ class ТестScopes(unittest.TestCase):
         self.assertEqual(row["name"], "старое")
         self.assertIsNone(row["scopes"], "миграция не должна ничего разрешать сама")
 
+    def читать(self):
+        """(код bootstrap, код справки) этим токеном."""
+        коды = []
+        for метод, путь, тело in (("GET", "/v1/context/bootstrap", None),
+                                  ("POST", "/v1/context/query", b'{"about": "x"}')):
+            req = urllib.request.Request(self.base + путь, data=тело, method=метод)
+            req.add_header("Content-Type", "application/json")
+            req.add_header("Authorization", "Bearer " + self.token)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    r.read()
+                    коды.append(r.status)
+            except urllib.error.HTTPError as e:
+                коды.append((e.code, json.loads(e.read() or b"{}").get("error", "")))
+        return коды
+
+    def test_чтение_контекста_по_списку(self):
+        """Т6.4: пакет и справку читает `null`, `context` или `correction`;
+        список без них — 403 (украденный телефон обязательств не отдаёт)."""
+        self.assertEqual(self.читать(), [200, 200], "null — как раньше")
+        for виды, можно in ((["call", "message"], False), (["correction"], True),
+                            (["context"], True), (["call", "context"], True),
+                            (["heartbeat"], False)):
+            with self.subTest(виды=виды):
+                contextd.set_scopes(self.con, self.dev, виды)
+                коды = self.читать()
+                if можно:
+                    self.assertEqual(коды, [200, 200])
+                else:
+                    self.assertEqual([к[0] for к in коды], [403, 403], коды)
+                    self.assertIn("context", коды[0][1], "отказ говорит, что дописать")
+        self.assertFalse(contextd.можно_читать(self.con, "dev_нет"), "нет устройства")
+        self.assertFalse(contextd.можно_читать(self.con, None))
+
+    def test_отказ_справки_раньше_разбора(self):
+        contextd.set_scopes(self.con, self.dev, ["call"])
+        req = urllib.request.Request(self.base + "/v1/context/query", data=b"{}",
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        with self.assertRaises(urllib.error.HTTPError) as ош:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(ош.exception.code, 403, "не 400 за пустой about")
+        ош.exception.read()
+
+    def test_context_не_вид_события(self):
+        self.assertEqual(self.послать("context", "s1"), 400, "даже при null")
+        contextd.set_scopes(self.con, self.dev, ["context"])
+        self.assertEqual(self.послать("context", "s2"), 400,
+                         "право чтения не открывает запись")
+        self.assertEqual(self.послать("call", "s3"), 403, "и других видов не даёт")
+        self.assertEqual(contextd.scopes_from_history(self.con, self.dev), [])
+
     def test_null_пускает_всё(self):
         self.assertEqual(self.послать("call", "s1"), 200)
         self.assertEqual(self.послать("message", "s2"), 200)
