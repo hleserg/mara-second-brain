@@ -32,6 +32,8 @@
   MARA_NODE_SECRET    общий секрет с doctor (`--new-secret`); с ним и с
   MARA_NODE_PROXY_PORT агент держит прокси сервисов узла (см. ниже)
   MARA_NODE_PROXY_BIND адрес прокси, по умолчанию 0.0.0.0
+  MARA_NODE_TLS_CERT  сертификат и ключ прокси (с doctor: `node_agent.py
+  MARA_NODE_TLS_KEY   --tls-new`); с ними прокси говорит только TLS
 
 Прокси сервисов узла (Т0.9 п. 5, threat-model п. 9). STT и Ollama чужие и
 отвечают кому угодно, а doctor принимал от адреса bigpc что угодно: узел,
@@ -47,6 +49,14 @@ doctor спрашивает `/mara/hello` со своим номером, и а�
 можно спросить мимо прокси. Подслушивания внутри сети подпись не снимает:
 это TLS, Т0.9 п. 2.
 
+TLS прокси (Т0.9 п. 2, участок doctor → узел): с `MARA_NODE_TLS_CERT` и
+`MARA_NODE_TLS_KEY` прокси говорит только TLS, и аудио с текстом по локалке
+шифрованы, а не только подписаны. Сертификат выпускают на doctor
+(`node_agent.py --tls-new КАТАЛОГ` — там есть openssl, на Windows его нет) и
+копируют на узел; doctor сверяет его пин (`MARA_NODE_PIN`) так же, как
+агент — пин doctor. Рукопожатие — в потоке соединения: молчун держит одно
+место из `СОЕДИНЕНИЙ`, и не дольше `РУКОПОЖАТИЕ_С`.
+
 TLS до doctor (Т0.9 п. 2): с `https://` в `MARA_URL` и пином сертификата в
 `MARA_CONTEXT_PIN` сердцебиение идёт по TLS, и токен уходит только после
 того, как сертификат doctor сошёлся с пином (`ПинHTTPS`). Цепочка до CA и
@@ -59,7 +69,8 @@ TLS до doctor (Т0.9 п. 2): с `https://` в `MARA_URL` и пином сер�
     python node_agent.py --new-secret   # новый общий секрет для doctor и узла
     python node_agent.py --self-check
 """
-import argparse, hashlib, hmac, http.client, json, os, re, secrets, shutil, ssl, subprocess, sys
+import argparse, hashlib, hmac, http.client, json, os, re, secrets, shutil, socket, ssl
+import subprocess, sys
 import threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -157,17 +168,70 @@ class ПинHTTPS(urllib.request.HTTPSHandler):
         return self.do_open(_ПоПину, req, context=self._context, пин=self.пин)
 
 
-def беда_пина(url, пин):
+def пин_сертификата(путь):
+    """`sha256:<hex>` первого сертификата PEM-файла: отпечаток всего
+    сертификата в DER, как его печатает `openssl x509 -fingerprint -sha256`."""
+    # latin-1, не ascii: PEM с UTF-8 комментарием или «Bag Attributes» рядом
+    # с сертификатом openssl принимает — и пин обязан считаться (ревью)
+    with open(путь, encoding="latin-1") as fh:
+        pem = fh.read()
+    m = re.search(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", pem, re.S)
+    if not m:
+        raise ValueError("в файле нет сертификата PEM")
+    return "sha256:" + hashlib.sha256(ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest()
+
+
+def выпустить(каталог, имя, cn, дней=3650):
+    """Самоподписанный сертификат и ключ: (сертификат, ключ, пин), файлы
+    `<имя>.crt` и `<имя>.key` в `каталог`. Один выпуск на `contextd` и прокси
+    узла (Т0.9 п. 2).
+
+    Выпускает `openssl` — в stdlib выпуска сертификатов нет (и на Windows
+    узла нет openssl: сертификат прокси выпускают на doctor и копируют).
+    Ключ заводится пустым с правами 0600 раньше, чем в него пишет openssl:
+    права не зависят ни от umask, ни от версии openssl. Существующие файлы
+    не трогаются: старый пин живёт в клиентах, и молча сменённый сертификат
+    отрезал бы их всех разом. Срок — десять лет: клиенты верят пину, а не
+    сроку, а истёкший сертификат на ровном месте — лишняя поломка.
+    """
+    каталог = os.path.abspath(os.path.expanduser(каталог))
+    os.makedirs(каталог, mode=0o700, exist_ok=True)
+    cert = os.path.join(каталог, имя + ".crt")
+    key = os.path.join(каталог, имя + ".key")
+    for путь in (cert, key):
+        if os.path.lexists(путь):
+            raise FileExistsError("уже есть %s — новый пин отрезал бы клиентов; "
+                                  "меняешь сертификат — сначала убери старый руками" % путь)
+    os.close(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    try:
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec",
+                        "-pkeyopt", "ec_paramgen_curve:prime256v1", "-sha256",
+                        "-days", str(дней), "-nodes", "-subj", "/CN=" + cn,
+                        "-keyout", key, "-out", cert],
+                       check=True, capture_output=True, timeout=60)
+    except BaseException:
+        for путь in (cert, key):
+            try:
+                os.unlink(путь)
+            except OSError:
+                pass
+        raise
+    os.chmod(key, 0o600)
+    return cert, key, пин_сертификата(cert)
+
+
+def беда_пина(url, пин, имя="MARA_CONTEXT_PIN"):
     """Почему с такими адресом и пином в сеть нельзя, или None. Пин без
-    `https://` — токен уехал бы открытым текстом."""
+    `https://` — запрос уехал бы открытым текстом. `имя` — переменная пина
+    в тексте: у сердцебиения `MARA_CONTEXT_PIN`, у шагов doctor — `MARA_NODE_PIN`."""
     if not пин:
         return None
     try:
         нормальный_пин(пин)
     except ValueError as e:
-        return "MARA_CONTEXT_PIN: %s" % e
+        return "%s: %s" % (имя, e)
     if urllib.parse.urlsplit(url or "").scheme.lower() != "https":
-        return "пин задан, а адрес не https:// — токен ушёл бы открытым текстом"
+        return "%s задан, а адрес не https:// — запрос ушёл бы открытым текстом" % имя
     return None
 
 
@@ -333,6 +397,7 @@ def отправить(url, token, тело, пин=None):
 ПЕРЕСЫЛКА_С = 1200
 ЧТЕНИЕ_С = 60                 # тишина сокета, после которой соединение рвётся, как у contextd
 СОЕДИНЕНИЙ = 8                # одновременных; лишние закрываются сразу, без потока
+РУКОПОЖАТИЕ_С = 10            # столько поток ждёт TLS-рукопожатия молчуна
 НОМЕР = re.compile(r"[0-9a-f]{32}\Z")
 ПОДПИСЬ = re.compile(r"[0-9a-f]{64}\Z")
 ЧИСЛО = re.compile(r"[0-9]{1,12}\Z")
@@ -398,12 +463,20 @@ _открыть = urllib.request.build_opener(_БезПереходов).open
 _доказано = {}                # база узла → monotonic последнего проверенного ответа
 
 
-def привет(база, секрет, таймаут=ТАЙМАУТ):
+def _открыватель(пин):
+    """Без пина — как было; с пином (`MARA_NODE_PIN`, Т0.9 п. 2) — ещё и
+    `ПинHTTPS`: сертификат прокси сверяется до первого байта аудио."""
+    if not пин:
+        return _открыть
+    return urllib.request.build_opener(_БезПереходов, ПинHTTPS(пин)).open
+
+
+def привет(база, секрет, таймаут=ТАЙМАУТ, пин=None):
     """Узел доказывает секрет на номере doctor — до того, как ему уйдёт
     аудио или текст. Сеть упала — исключение сети, как и без подписи."""
     номер = secrets.token_hex(16)
     try:
-        with _открыть("%s%s?nonce=%s" % (база, ПРИВЕТ, номер), timeout=таймаут) as r:
+        with _открыватель(пин)("%s%s?nonce=%s" % (база, ПРИВЕТ, номер), timeout=таймаут) as r:
             знак = _знак(r.headers)
     except urllib.error.HTTPError as e:
         e.close()
@@ -430,17 +503,25 @@ def _с_причиной(e):
     return urllib.error.HTTPError(e.url, e.code, "%s — %s" % (e.msg, причина), e.hdrs, None)
 
 
-def к_узлу(url, тело, тип, секрет=None, таймаут=300):
+def к_узлу(url, тело, тип, секрет=None, таймаут=300, пин=None):
     """POST шага doctor в сервис узла; тело ответа. Без секрета — как раньше,
     напрямую. С секретом — привет (раз в `ПРИВЕТ_С` на узел), подписанный
     запрос без редиректов и проверка подписи ответа: неверная — `ЧужойУзел`,
     ответ не принят. Доказательство узла живёт, только пока он отвечает
     подписанным: любой другой исход — следующий запрос снова с привета.
-    Отказ сервиса (4xx/5xx) — `HTTPError`, как и без подписи, но с причиной."""
+    Отказ сервиса (4xx/5xx) — `HTTPError`, как и без подписи, но с причиной.
+
+    С пином (`MARA_NODE_PIN`, Т0.9 п. 2) — только `https://` и только к
+    сертификату с этим отпечатком; пин при `http://` — `ValueError` до
+    похода в сеть: аудио ушло бы открытым текстом, а просили обратного."""
+    беда = беда_пина(url, пин, "MARA_NODE_PIN")
+    if беда:
+        raise ValueError(беда)
     if not секрет:
         req = urllib.request.Request(url, data=тело, method="POST")
         req.add_header("Content-Type", тип)
-        with urllib.request.urlopen(req, timeout=таймаут) as r:
+        открыть = _без_прокси(пин).open if пин else urllib.request.urlopen
+        with открыть(req, timeout=таймаут) as r:
             return r.read()
     ч = urllib.parse.urlsplit(url)
     база = "%s://%s" % (ч.scheme, ч.netloc)
@@ -450,7 +531,7 @@ def к_узлу(url, тело, тип, секрет=None, таймаут=300):
     проверено = False
     try:
         if time.monotonic() - _доказано.get(база, float("-inf")) > ПРИВЕТ_С:
-            привет(база, секрет)
+            привет(база, секрет, пин=пин)
             _доказано[база] = time.monotonic()
         заголовки = подписать_запрос(секрет, "POST", путь, тело)
         req = urllib.request.Request(база + путь, data=тело, method="POST")
@@ -458,7 +539,7 @@ def к_узлу(url, тело, тип, секрет=None, таймаут=300):
         for k, v in заголовки.items():
             req.add_header(k, v)
         try:
-            with _открыть(req, timeout=таймаут) as r:
+            with _открыватель(пин)(req, timeout=таймаут) as r:
                 ответ, код, знак = r.read(), r.status, _знак(r.headers)
         except urllib.error.HTTPError as e:
             raise _с_причиной(e)
@@ -484,11 +565,34 @@ class Прокси(ThreadingHTTPServer):
     # два агента делили бы соединения и память номеров
     allow_reuse_address = os.name != "nt"
 
-    def __init__(self, адрес, секрет, asr=None, llm=None, соединений=СОЕДИНЕНИЙ):
+    def __init__(self, адрес, секрет, asr=None, llm=None, соединений=СОЕДИНЕНИЙ, tls=None):
         super().__init__(адрес, _ПроксиОбработчик)
-        self.секрет, self.asr, self.llm = секрет, asr, llm
+        self.секрет, self.asr, self.llm, self.tls = секрет, asr, llm, tls
         self.номера, self.замок = {}, threading.Lock()
         self.места = threading.BoundedSemaphore(соединений)
+
+    def finish_request(self, request, client_address):
+        """С сертификатом — TLS (Т0.9 п. 2). Рукопожатие — здесь, в потоке
+        соединения, а не в `accept`: молчун держит одно место из
+        `СОЕДИНЕНИЙ` и не дольше `РУКОПОЖАТИЕ_С`, а не приём всех."""
+        if self.tls is None:
+            return super().finish_request(request, client_address)
+        request.settimeout(РУКОПОЖАТИЕ_С)
+        try:
+            канал = self.tls.wrap_socket(request, server_side=True)
+        except OSError as беда:              # ssl.SSLError — тоже OSError
+            лог("прокси: TLS-рукопожатие не сложилось — %s"
+                % (getattr(беда, "reason", None) or type(беда).__name__))
+            return
+        try:
+            self.RequestHandlerClass(канал, client_address, self)
+        finally:
+            # исходный сокет отдан каналу; `shutdown_request` закроет пустышку
+            try:
+                канал.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            канал.close()
 
     def process_request(self, request, client_address):
         if not self.места.acquire(blocking=False):
@@ -643,8 +747,19 @@ def запустить_прокси(env):
         return None
     if not (порт.isdigit() and int(порт) <= 65535):
         raise ValueError("MARA_NODE_PROXY_PORT — число от 0 до 65535")
+    cert, key = env.get("MARA_NODE_TLS_CERT") or "", env.get("MARA_NODE_TLS_KEY") or ""
+    tls = None
+    if cert or key:
+        # половина пары — ошибка, а не «без TLS»: прокси молча открытым
+        # текстом — ровно то, от чего владелец уходил
+        if not (cert and key):
+            raise ValueError("TLS прокси включают двое: MARA_NODE_TLS_CERT и MARA_NODE_TLS_KEY")
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls.load_cert_chain(cert, key)
     сервер = Прокси((env.get("MARA_NODE_PROXY_BIND") or "0.0.0.0", int(порт)), секрет,
-                    asr=env.get("MARA_NODE_ASR_URL"), llm=env.get("MARA_NODE_LLM_URL"))
+                    asr=env.get("MARA_NODE_ASR_URL"), llm=env.get("MARA_NODE_LLM_URL"),
+                    tls=tls)
     threading.Thread(target=сервер.serve_forever, daemon=True).start()
     return сервер
 
@@ -666,12 +781,32 @@ def main(argv=None):
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--new-secret", action="store_true", dest="new_secret",
                     help="напечатать новый общий секрет: MARA_NODE_SECRET на doctor и на узле")
+    ap.add_argument("--tls-new", metavar="КАТАЛОГ", dest="tls_new",
+                    help="на doctor: сертификат и ключ прокси узла (node.crt, node.key) — "
+                         "скопировать на узел; пин — в MARA_NODE_PIN на doctor")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args(argv)
     if a.self_check:
         return self_check()
     if a.new_secret:
         print(secrets.token_hex(32))
+        return 0
+    if a.tls_new:
+        try:
+            cert, key, пин = выпустить(a.tls_new, "node", "mara-node")
+        except subprocess.CalledProcessError as e:
+            # сам openssl говорит почему — без stderr осталась бы одна
+            # строка «returned non-zero exit status» (ревью)
+            print("не выпустил: %s\n%s" % (e, (e.stderr or b"").decode(errors="replace")))
+            return 1
+        except (OSError, subprocess.SubprocessError) as e:
+            print("не выпустил: %s" % e)
+            return 1
+        print("сертификат: %s\nключ (0600): %s\nпин: %s\n\n"
+              "на узел — оба файла, в окружение агента:\n  MARA_NODE_TLS_CERT=<путь к node.crt>\n"
+              "  MARA_NODE_TLS_KEY=<путь к node.key>\n"
+              "на doctor в ~/.config/mara/env: MARA_NODE_PIN=%s, а MARA_ASR_URL и "
+              "MARA_LLM_URL — https://<узел>:<порт прокси>" % (cert, key, пин, пин))
         return 0
     url, token = os.environ.get("MARA_URL"), os.environ.get("MARA_NODE_TOKEN")
     пин = os.environ.get("MARA_CONTEXT_PIN") or None
@@ -682,8 +817,11 @@ def main(argv=None):
             прокси = запустить_прокси(os.environ)
         except (OSError, ValueError, OverflowError) as e:
             # занятый или кривой порт — без прокси doctor не получит ни
-            # одного ответа узла; сердцебиение при этом идёт, а молчать нельзя
-            лог("прокси не поднялся: %s" % type(e).__name__)
+            # одного ответа узла; сердцебиение при этом идёт, а молчать
+            # нельзя. Текст ValueError выверен и без путей — он целиком;
+            # у OSError путь бывает, от него только тип (ревью)
+            лог("прокси не поднялся: %s" %
+                (e if isinstance(e, ValueError) else type(e).__name__))
         if прокси:
             лог("прокси сервисов узла слушает порт %d" % прокси.server_address[1])
         elif os.environ.get("MARA_NODE_SECRET"):

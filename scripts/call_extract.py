@@ -36,6 +36,8 @@ OLLAMA = os.environ.get("MARA_LLM_URL") or None
 # Т0.9 п. 5: тот же общий секрет, что у `call_asr`, — текст расшифровки уходит
 # только узлу, доказавшему секрет, а «обязательства» без подписи не принимаются
 СЕКРЕТ_УЗЛА = os.environ.get("MARA_NODE_SECRET") or None
+# Т0.9 п. 2: пин сертификата прокси узла — текст уходит по TLS и только к нему
+ПИН_УЗЛА = os.environ.get("MARA_NODE_PIN") or None
 MODEL = os.environ.get("MARA_EXTRACT_MODEL", vault_common.МОДЕЛЬ_ИЗВЛЕЧЕНИЯ)
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))
 REVIEW_MIN = float(os.environ.get("MARA_REVIEW_MIN", 0.60))
@@ -343,7 +345,8 @@ def ask_model(text, base_url=None, model=None):
     адрес = base_url or OLLAMA or vault_common.нужен_адрес(
         "MARA_LLM_URL", "коробка с ollama")
     d = json.loads(node_agent.к_узлу(адрес + "/api/generate", body, "application/json",
-                                     секрет=СЕКРЕТ_УЗЛА, таймаут=HTTP_TIMEOUT))
+                                     секрет=СЕКРЕТ_УЗЛА, таймаут=HTTP_TIMEOUT,
+                                     пин=ПИН_УЗЛА))
     return json.loads(strip_fence(d.get("response") or "{}"))
 
 

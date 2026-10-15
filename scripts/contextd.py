@@ -2107,52 +2107,17 @@ def tls_контекст(cert, key):
 
 def пин_сертификата(путь):
     """`sha256:<hex>` первого сертификата PEM-файла — то, что клиенты сверяют
-    сразу после рукопожатия (`MARA_CONTEXT_PIN`): отпечаток всего
-    сертификата в DER, как его печатает `openssl x509 -fingerprint -sha256`."""
-    # latin-1, не ascii: PEM с UTF-8 комментарием или «Bag Attributes» рядом
-    # с сертификатом openssl принимает — и пин обязан считаться (ревью)
-    with open(путь, encoding="latin-1") as fh:
-        pem = fh.read()
-    m = re.search(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", pem, re.S)
-    if not m:
-        raise ValueError("в файле нет сертификата PEM")
-    return "sha256:" + hashlib.sha256(ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest()
+    сразу после рукопожатия (`MARA_CONTEXT_PIN`). Считает `node_agent`: тот
+    же выпуск и тот же пин у прокси узла (Т0.9 п. 2)."""
+    import node_agent
+    return node_agent.пин_сертификата(путь)
 
 
 def tls_новый(каталог, дней=3650):
-    """Самоподписанный сертификат и ключ для contextd: (сертификат, ключ, пин).
-
-    Выпускает `openssl` — в stdlib выпуска сертификатов нет. Ключ заводится
-    пустым с правами 0600 раньше, чем в него пишет openssl: права не зависят
-    ни от umask, ни от версии openssl. Существующие файлы не трогаются:
-    старый пин живёт в клиентах, и молча сменённый сертификат отрезал бы их
-    всех разом. Срок — десять лет: клиенты верят пину, а не сроку, а
-    истёкший сертификат на ровном месте — лишняя поломка.
-    """
-    каталог = os.path.abspath(os.path.expanduser(каталог))
-    os.makedirs(каталог, mode=0o700, exist_ok=True)
-    cert = os.path.join(каталог, "contextd.crt")
-    key = os.path.join(каталог, "contextd.key")
-    for путь in (cert, key):
-        if os.path.lexists(путь):
-            raise FileExistsError("уже есть %s — новый пин отрезал бы клиентов; "
-                                  "меняешь сертификат — сначала убери старый руками" % путь)
-    os.close(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    try:
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec",
-                        "-pkeyopt", "ec_paramgen_curve:prime256v1", "-sha256",
-                        "-days", str(дней), "-nodes", "-subj", "/CN=mara-contextd",
-                        "-keyout", key, "-out", cert],
-                       check=True, capture_output=True, timeout=60)
-    except BaseException:
-        for путь in (cert, key):
-            try:
-                os.unlink(путь)
-            except OSError:
-                pass
-        raise
-    os.chmod(key, 0o600)
-    return cert, key, пин_сертификата(cert)
+    """Самоподписанный сертификат и ключ для contextd: (сертификат, ключ, пин),
+    файлы `contextd.crt` и `contextd.key` (`node_agent.выпустить`)."""
+    import node_agent
+    return node_agent.выпустить(каталог, "contextd", "mara-contextd", дней)
 
 
 def обрыв(беда, адрес):
@@ -2393,11 +2358,17 @@ def run_step(kind, event_id, продлить=None):
     return код == 0, mi.обезличить(err or "")[-500:]
 
 
-def проба(адрес, сейчас=None):
+def проба(адрес, сейчас=None, пин=None):
     """Жив ли сервис по адресу: `(жив, проба_свежая)`; `жив` — `None`, если
     адрес не разбирается. Ответ кэшируется на `ПРОБА_С`: воркер спрашивает
-    каждые пять секунд, а стучать в выключенную коробку так часто незачем."""
-    import urllib.request, urllib.error, http.client
+    каждые пять секунд, а стучать в выключенную коробку так часто незачем.
+
+    `пин` — `MARA_NODE_PIN` (Т0.9 п. 2): прокси узла за TLS отвечает
+    самоподписанным сертификатом, и проба сверяет его пин, как шаг. Чужой
+    сертификат и пин при `http://` — тоже `None`: это подмена или поломка
+    настройки, а не выключенная коробка, и шаг упадёт на них видно, а не
+    будет ждать узел вечно."""
+    import urllib.request, urllib.error, http.client, node_agent
     сейчас = time.monotonic() if сейчас is None else сейчас
     было = _пробы.get(адрес)
     if было and сейчас - было[0] < ПРОБА_С:
@@ -2407,7 +2378,11 @@ def проба(адрес, сейчас=None):
         if части.scheme not in ("http", "https") or not части.hostname:
             raise ValueError("не http-адрес")
         части.port                      # кривой порт — тоже ValueError
-        urllib.request.urlopen(адрес, timeout=ПРОБА_ТАЙМАУТ).close()
+        беда = node_agent.беда_пина(адрес, пин, "MARA_NODE_PIN")
+        if беда:
+            raise ValueError(беда)
+        открыть = node_agent._без_прокси(пин).open if пин else urllib.request.urlopen
+        открыть(адрес, timeout=ПРОБА_ТАЙМАУТ).close()
         жив = True
     except urllib.error.HTTPError:
         жив = True                      # ответил кодом — значит, жив
@@ -2415,6 +2390,13 @@ def проба(адрес, сейчас=None):
         # кривой адрес (`bigpc:8770` без схемы) — поломка настройки, а не
         # выключенная коробка: `None`, и шаг упадёт на нём видно
         жив = None
+    except urllib.error.URLError as e:
+        # сертификат не тот (пин), не проверился (https без пина) или в
+        # ответ пришёл не TLS (прокси без MARA_NODE_TLS_* под пином,
+        # WRONG_VERSION_NUMBER) — коробка ответила, но не та или не так:
+        # не «выключена», шаг упадёт на ней видно (ревью)
+        жив = None if isinstance(e.reason, (node_agent.ЧужойСертификат,
+                                            ssl.SSLError)) else False
     except (OSError, http.client.HTTPException):
         жив = False
     _пробы[адрес] = (сейчас, жив)
@@ -2798,7 +2780,7 @@ def недоступные(con):
         if not адрес:
             причины[kind] = None
             continue
-        жив, свежая = проба(адрес)
+        жив, свежая = проба(адрес, пин=адрес_шага("MARA_NODE_PIN"))
         if жив is None:
             причины[kind] = None
             continue
