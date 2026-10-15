@@ -36,7 +36,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
         // недели без сети догонит сверка по журналу
         Device.scan(ctx, s, now - 7 * 24 * 3600_000L).forEach { q.seen(it, now) }
 
-        val api = Api(s.baseUrl, s.token)
+        val api = Api(s.baseUrl, s.token, s.pin)
         val журнал = Device.callLog(ctx, now - 7 * 24 * 3600_000L)
         var пауза = прогон(ctx, q, api, журнал, now, s)
 

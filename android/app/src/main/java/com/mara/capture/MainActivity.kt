@@ -75,15 +75,17 @@ class MainActivity : AppCompatActivity() {
 
         b.url.setText(s.baseUrl)
         b.token.setText(s.token)
+        b.pin.setText(s.pin)
 
         b.save.setOnClickListener {
-            val беда = Адрес.беда(b.url.text.toString())
+            val беда = Адрес.беда(b.url.text.toString(), b.pin.text.toString())
             if (беда != null) {
                 покажи("Адрес не годится: $беда")
                 return@setOnClickListener
             }
             s.baseUrl = b.url.text.toString().trim()
             s.token = b.token.text.toString()
+            s.pin = b.pin.text.toString()
             if (s.paired) {
                 // чужой токен клал работы в FAILED; новый токен — новая попытка
                 Queue(this).retryFailed()
@@ -200,7 +202,7 @@ class MainActivity : AppCompatActivity() {
         if (!s.paired) return покажи("сначала адрес и токен")
         покажи("проверяю…")
         Thread {
-            val api = Api(s.baseUrl, s.token)
+            val api = Api(s.baseUrl, s.token, s.pin)
             val жив = api.health()
             val почему = api.lastError   // до tokenOk, тот перезапишет
             val токен = api.tokenOk()

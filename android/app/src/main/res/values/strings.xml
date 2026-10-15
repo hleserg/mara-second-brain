@@ -2,6 +2,7 @@
     <string name="app_name">Mara Capture</string>
     <string name="hint_url">адрес сервера, например http://doctor.local:8788</string>
     <string name="hint_token">токен устройства, из contextd --pair</string>
+    <string name="hint_pin">пин сертификата sha256:… для https://…:8789, из contextd --tls-pin; без TLS — пусто</string>
     <string name="save">Сохранить и запустить</string>
     <string name="perms">Выдать разрешения</string>
     <string name="folder">Выбрать папку с записями</string>

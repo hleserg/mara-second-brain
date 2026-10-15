@@ -371,6 +371,17 @@ class Сертификат(unittest.TestCase):
             self.assertEqual(contextd.main(["--tls-pin", cert + ".нет"]), 1)
         self.assertEqual(вывод.getvalue().splitlines()[0], пин)
 
+    def test_пин_фикстура_телефона(self):
+        """Одно число на две стороны: телефон считает отпечаток того же
+        сертификата (`CoreTest`, `Пин.отпечаток`) и сверяет с тем же пином."""
+        with open(os.path.join(HERE, "fixtures", "tls-pin.json"), encoding="utf-8") as fh:
+            ф = json.load(fh)
+        self.assertEqual(contextd.пин_сертификата(os.path.join(HERE, "fixtures", ф["cert"])),
+                         ф["pin"])
+        self.assertEqual(node_agent.нормальный_пин(ф["pin"]), ф["pin"][len("sha256:"):])
+        with open(os.path.join(HERE, "fixtures", ф["cert"]), encoding="ascii") as fh:
+            self.assertNotIn("PRIVATE KEY", fh.read(), "в фикстуре только сертификат")
+
     def test_пин_не_из_сертификата(self):
         путь = os.path.join(tempfile.mkdtemp(), "x.pem")
         with open(путь, "w") as fh:

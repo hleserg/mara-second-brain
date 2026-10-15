@@ -2,11 +2,18 @@ package com.mara.capture
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 /**
  * Решения приложения — здесь, и только чистыми функциями. Всё, что трогает
@@ -588,6 +595,51 @@ object MessageFlow {
 }
 
 /**
+ * Пин сертификата contextd (Т0.9 п. 2): отпечаток sha256 сертификата сервера
+ * целиком, как его печатают `contextd.py --tls-pin` и `openssl x509
+ * -fingerprint -sha256`. Сертификат самоподписанный, адрес doctor — номер в
+ * локалке, так что цепочка до CA и имя тут ничего не доказывают: доверие —
+ * совпадение отпечатка. Запись пина та же, что у плагина Мары и агента узла
+ * (`node_agent.нормальный_пин`); сверяет их фикстур `tests/fixtures/tls-pin.json`.
+ */
+object Пин {
+    private val префикс = Regex("""^\s*sha-?256(\s*fingerprint)?\s*[:=]?""", RegexOption.IGNORE_CASE)
+    private val разделители = Regex("""[\s:]""")
+    private val hex = Regex("^[0-9a-f]{64}$")
+
+    /** 64 знака hex или null — запись не годится, и соединяться без сверки нельзя. */
+    fun нормальный(запись: String?): String? {
+        val s = разделители.replace(префикс.replace(запись ?: "", ""), "").lowercase()
+        return if (hex.matches(s)) s else null
+    }
+
+    fun отпечаток(der: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(der).joinToString("") { "%02x".format(it) }
+
+    /**
+     * Доверие по пину: сертификат сервера — тот самый, или рукопожатие рвётся
+     * до первого байта запроса, и токен не уходит. Срок и цепочку не судим:
+     * пин и есть сертификат.
+     */
+    class Доверие(private val пин: String) : X509TrustManager {
+        override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) {
+            val лист = chain?.firstOrNull() ?: throw CertificateException("сервер не показал сертификат")
+            if (отпечаток(лист.encoded) != пин) throw CertificateException("сертификат не совпал с пином")
+        }
+
+        override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) {
+            throw CertificateException("клиентских сертификатов не принимаем")
+        }
+
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
+    fun фабрика(пин: String): SSLSocketFactory =
+        SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(Доверие(пин)), null) }
+            .socketFactory
+}
+
+/**
  * Проверка адреса сервера перед сохранением.
  *
  * Открытый HTTP допустим только внутрь своей сети: домашняя локалка, VPN
@@ -607,8 +659,18 @@ object Адрес {
     /** Хост из своей сети: ему открытый HTTP прощаем. */
     fun свой(host: String): Boolean = частные.matches(host)
 
-    /** null — адрес годится; иначе строка для показа владельцу. */
-    fun беда(url: String): String? {
+    /**
+     * null — адрес годится; иначе строка для показа владельцу. С пином
+     * (Т0.9 п. 2) адрес — только `https://`: пин при открытом HTTP значил бы,
+     * что владелец просил TLS, а токен ушёл бы текстом.
+     */
+    fun беда(url: String, пин: String = ""): String? {
+        if (пин.isNotBlank()) {
+            if (Пин.нормальный(пин) == null)
+                return "пин — отпечаток sha256 сертификата, 64 знака hex (contextd.py --tls-pin)"
+            if (!url.trim().lowercase().startsWith("https://"))
+                return "пин задан, а адрес не https:// — токен ушёл бы открытым текстом"
+        }
         val s = url.trim()
         if (s.isEmpty()) return "адрес пустой"
         val u = try {

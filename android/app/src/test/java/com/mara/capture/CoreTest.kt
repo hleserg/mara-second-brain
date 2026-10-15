@@ -769,6 +769,72 @@ class CoreTest {
         assertNotNull(Адрес.беда("https://mara.example.ru/"))
     }
 
+    // ── пин сертификата contextd (Т0.9 п. 2) ─────────────────────────────
+
+    private val пинФикстура: JSONObject by lazy { JSONObject(fixture("tls-pin.json").readText()) }
+
+    private fun сертификат(): java.security.cert.X509Certificate =
+        fixture(пинФикстура.getString("cert")).inputStream().use {
+            java.security.cert.CertificateFactory.getInstance("X.509")
+                .generateCertificate(it) as java.security.cert.X509Certificate
+        }
+
+    @Test
+    fun `пин читается в тех же записях, что у плагина и агента узла`() {
+        val п = "9f".repeat(32)
+        val двоеточия = п.chunked(2).joinToString(":") { it.uppercase() }
+        for (запись in listOf("sha256:$п", "SHA256:" + п.uppercase(), "sha256 Fingerprint=$двоеточия",
+                              "SHA256 Fingerprint=$двоеточия", двоеточия, п, " $п\n"))
+            assertEquals(запись, п, Пин.нормальный(запись))
+        for (кривой in listOf("", "sha256:", п.dropLast(1), п + "0", "g".repeat(64), "sha1:$п",
+                              "md5 Fingerprint=$двоеточия"))
+            assertNull(кривой, Пин.нормальный(кривой))
+        assertNull(Пин.нормальный(null))
+    }
+
+    @Test
+    fun `отпечаток сертификата — тот же, что считает сервер`() {
+        // одно число на две стороны: `contextd.пин_сертификата` в tests/test_tls.py
+        assertEquals(Пин.нормальный(пинФикстура.getString("pin")),
+            Пин.отпечаток(сертификат().encoded))
+    }
+
+    @Test
+    fun `доверие — только сертификату с пином`() {
+        val серт = сертификат()
+        val пин = Пин.нормальный(пинФикстура.getString("pin"))!!
+        Пин.Доверие(пин).checkServerTrusted(arrayOf(серт), "ECDHE_ECDSA")
+        for (чужой in listOf("00".repeat(32), пин.reversed())) {
+            try {
+                Пин.Доверие(чужой).checkServerTrusted(arrayOf(серт), "ECDHE_ECDSA")
+                throw AssertionError("чужой пин принят: $чужой")
+            } catch (e: java.security.cert.CertificateException) {
+                assertTrue(e.message!!.contains("пином"))
+            }
+        }
+        for (цепочка in listOf<Array<java.security.cert.X509Certificate>?>(null, arrayOf())) {
+            try {
+                Пин.Доверие(пин).checkServerTrusted(цепочка, "ECDHE_ECDSA")
+                throw AssertionError("пустая цепочка принята")
+            } catch (e: java.security.cert.CertificateException) {
+            }
+        }
+        // фабрика собирается из того же доверия — без Android
+        assertNotNull(Пин.фабрика(пин))
+    }
+
+    @Test
+    fun `пин — только с https`() {
+        val п = "sha256:" + "ab".repeat(32)
+        assertNull(Адрес.беда("https://192.168.0.2:8789", п))
+        assertNull(Адрес.беда("HTTPS://192.168.0.2:8789", п))
+        assertNull("без пина — как раньше", Адрес.беда("http://192.168.0.2:8788", ""))
+        assertTrue(Адрес.беда("http://192.168.0.2:8788", п)!!.contains("не https"))
+        assertTrue(Адрес.беда("https://192.168.0.2:8789", "sha256:abc")!!.contains("64 знака"))
+        // и адрес по-прежнему проверяется: слэш на конце
+        assertNotNull(Адрес.беда("https://192.168.0.2:8789/", п))
+    }
+
     // ── затиралка отчёта мастера (Т3.5) ──────────────────────────────────
 
     @Test
