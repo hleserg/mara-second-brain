@@ -1,0 +1,134 @@
+{
+  "_": "Контракты agent-facing слоя (Т6.3, docs/contracts/agent-api.md). Один файл на двоих: tests/test_agent_contracts.py сверяет с ним живые ответы contextd, демо плагина install/mara-context — свой разбор его примеров. Тип: str, int, bool, object, list, null; несколько — через |. Ключ с ? на конце необязателен. Внутри версии поля только добавляются (ADR-0011, решение 7).",
+  "mara.context.now.v1": {
+    "method": "GET",
+    "path": "/v1/context/bootstrap",
+    "scope": "memory:read",
+    "response": {
+      "contract": "str",
+      "now": "object|null",
+      "last_digest": "object|null",
+      "queue": "int",
+      "pipeline_version": "int"
+    },
+    "now": {
+      "text": "str",
+      "sha256": "str",
+      "supersedes": "str|null",
+      "generated": "str|null",
+      "items": "int|null"
+    },
+    "example": {
+      "contract": "mara.context.now.v1",
+      "now": {
+        "text": "Открытые обязательства владельца — собрано из волта автоматически.\n\n- «прислать смету» — до 2026-10-20 · «Анна» #0000abcd",
+        "sha256": "5f6c0e1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6",
+        "supersedes": null,
+        "generated": "2026-10-15T09:00:00+03:00",
+        "items": 1
+      },
+      "last_digest": null,
+      "queue": 0,
+      "pipeline_version": 1
+    }
+  },
+  "mara.context.query.v1": {
+    "method": "POST",
+    "path": "/v1/context/query",
+    "scope": "memory:read",
+    "request": {
+      "about": "str"
+    },
+    "limits": {
+      "about": 200,
+      "items_per_pack": 15
+    },
+    "response": {
+      "contract": "str",
+      "about": "str",
+      "generated_at": "str",
+      "sha256": "str",
+      "ambiguous": "list",
+      "packs": "list",
+      "text": "str"
+    },
+    "pack": {
+      "pack_id": "str",
+      "pack_type": "str",
+      "items": "int",
+      "conversations?": "int"
+    },
+    "example": {
+      "contract": "mara.context.query.v1",
+      "about": "Анна",
+      "generated_at": "2026-10-15T12:00:00+03:00",
+      "sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "ambiguous": [],
+      "packs": [
+        {"pack_id": "person/anna", "pack_type": "person", "items": 1}
+      ],
+      "text": "Справка из волта на 2026-10-15 12:00 по запросу — собрано автоматически.\nОткрыто перед «Анна» (1):\n- «прислать смету» — до 2026-10-20 · «Анна» #0000abcd"
+    }
+  },
+  "mara.command.correction.v1": {
+    "method": "POST",
+    "path": "/v1/ingest/event",
+    "scope": "correction",
+    "request": {
+      "kind": "str",
+      "source": "str",
+      "source_id": "str",
+      "occurred_at?": "str",
+      "idempotency_key?": "str",
+      "payload": "object"
+    },
+    "payload": {
+      "item": "str",
+      "status?": "str",
+      "due?": "str",
+      "note?": "str",
+      "id?": "str",
+      "expected_version?": "int|str"
+    },
+    "limits": {
+      "item": 200,
+      "note": 500,
+      "open_titles": 15
+    },
+    "response": {
+      "contract": "str",
+      "event_id": "str",
+      "duplicate": "bool",
+      "need_blob": "bool",
+      "applied": "object|null"
+    },
+    "applied": {
+      "found": "bool",
+      "text?": "str",
+      "title?": "str",
+      "id?": "str",
+      "version?": "int|null",
+      "error?": "str",
+      "ambiguous?": "list",
+      "open?": "list",
+      "open_more?": "int",
+      "created?": "str"
+    },
+    "example": {
+      "contract": "mara.command.correction.v1",
+      "event_id": "correction_00000000-0000-4000-8000-000000000001",
+      "duplicate": false,
+      "need_blob": false,
+      "applied": {
+        "found": true,
+        "card": "kb/commitments/2026-10-01-prislat-smetu.md",
+        "title": "прислать смету",
+        "changed": {"status": "done", "valid_from": "2026-10-15T12:00:00+03:00"},
+        "text": "«прислать смету»: статус open → done",
+        "applied": true,
+        "id": "01999999-0000-7000-8000-00000000abcd",
+        "version": 2
+      }
+    }
+  }
+}

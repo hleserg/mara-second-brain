@@ -650,6 +650,17 @@ def run(event_id, vault, root=None):
 
 СТАТУСЫ = ("open", "done", "cancelled")
 ДАТА = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ЗАМЕТКА_МАКС = 500          # знаков заметки правки: она ложится в журнал карточки
+СПИСОК_МАКС = 15            # открытых заголовков в ответе «не нашёл»
+
+
+def _м(s):
+    """Заголовок в ответ правки — с той же очисткой, что в пакете `now`
+    (`context_pack.данные`, Т0.9 п. 3). Заголовок — пересказ чужих слов
+    из звонка, ответ правки едет модели, и сырым он мог бы подделать
+    структуру или код карточки (Т6.3, контракт `mara.command.correction.v1`).
+    В карточку и реестр идёт сырое — очищается только ответ."""
+    return context_pack.данные(s, context_pack.MAX_TITLE)
 
 
 def check_correction(payload):
@@ -664,6 +675,8 @@ def check_correction(payload):
         return "срок нужен как YYYY-MM-DD"
     if not (payload.get("status") or payload.get("due") or payload.get("note")):
         return "нечего править: ни статуса, ни срока, ни заметки"
+    if len(str(payload.get("note") or "")) > ЗАМЕТКА_МАКС:
+        return "заметка — до %d знаков" % ЗАМЕТКА_МАКС
     if payload.get("id") not in (None, ""):
         ид = payload["id"].strip().lstrip("#") if isinstance(payload["id"], str) else ""
         if not (ид and len(ид) <= 36 and КОД.match(ид)):
@@ -772,12 +785,13 @@ def _конфликт(con, card, ожидали, payload, когда, адрес
                                  "current": текущее, "attempted_patch": payload},
                                 ensure_ascii=False)))
     return {"found": True, "error": "version_conflict", "entity_id": oid,
-            "card": card["rel"], "title": row["title"],
+            "card": card["rel"], "title": _м(row["title"]),
             "expected_version": ожидали, "current_version": row["version"],
             "current": текущее, "attempted_patch": payload, "conflict_id": cid,
             "text": "«%s» уже изменилась: версия %d, а не %d (статус %s) — не правил, "
                     "конфликт %s в очереди ревью"
-                    % (row["title"], row["version"], ожидали, row["status"], cid[-8:])}
+                    % (_м(row["title"]), row["version"], ожидали, row["status"],
+                       cid[-8:])}
 
 
 def _карточки(vault):
@@ -871,9 +885,9 @@ def _поправить(card, status, due, note, когда, event_id):
         журнал.append("срок %s → %s" % (fm.get("due") or "не был", due))
     if note:
         журнал.append(note)
-    out = {"found": True, "card": card["rel"], "title": title, "changed": новое}
+    out = {"found": True, "card": card["rel"], "title": _м(title), "changed": новое}
     if not журнал:
-        out["text"] = "«%s» уже так" % title
+        out["text"] = "«%s» уже так" % _м(title)
         return out
     if новое:
         новое["valid_from"] = когда
@@ -882,7 +896,8 @@ def _поправить(card, status, due, note, когда, event_id):
         text = text.rstrip("\n") + "\n\nПравки:\n"
     text += "- %s, Мара, correction/%s: %s\n" % (когда[:16], event_id, "; ".join(журнал))
     _atomic(card["path"], text)
-    out["text"] = "«%s»: %s" % (title, "; ".join(журнал))
+    # заметку придумывает модель — в ответ она едет очищенной, как заголовок
+    out["text"] = "«%s»: %s" % (_м(title), "; ".join(_м(ж) for ж in журнал))
     out["applied"] = True        # записано — и журнал, даже если шапка та же
     return out
 
@@ -931,8 +946,8 @@ def _завести(vault, item, due, note, когда, event):
     if os.path.exists(os.path.join(vault, rel)):
         rel = "%s/%s-%s--%s.md" % (COMM_DIR, day, stem, oid[-8:])
     _atomic(os.path.join(vault, rel), карточка_правки(item, due, note, когда, event, oid))
-    return {"found": False, "created": rel, "title": item,
-            "text": "завёл «%s»%s" % (item, " до " + due if due else "")}
+    return {"found": False, "created": rel, "title": _м(item),
+            "text": "завёл «%s»%s" % (_м(item), " до " + due if due else "")}
 
 
 def _вернуть_карточку(vault, out, found):
@@ -1112,7 +1127,7 @@ def _правка(con, vault, event, p, item, status, due, note, ид, ожид�
     if конфликт:
         out = конфликт
     elif len(found) > 1:
-        names = [c["fm"].get("title") for c in found]
+        names = [_м(c["fm"].get("title")) for c in found]
         out = {"found": False, "ambiguous": names,
                "ambiguous_ids": [_id_карточки(c, адреса) for c in found],
                "text": "подходят несколько, уточни: " + "; ".join(names)}
@@ -1127,11 +1142,16 @@ def _правка(con, vault, event, p, item, status, due, note, ид, ожид�
     elif status == "open":
         out = _завести(vault, item, due, note, когда, event)
     else:
-        открытые = [c["fm"].get("title") for c in cards
+        открытые = [_м(c["fm"].get("title")) for c in cards
                     if c["fm"].get("status") in context_pack.OPEN]
-        out = {"found": False, "open": открытые,
+        # ответ ограничен (§11 «bounded payloads»): список — не больше
+        # `СПИСОК_МАКС`, остальное числом; полный — в пакете и справке
+        хвост = len(открытые) - СПИСОК_МАКС
+        показ = открытые[:СПИСОК_МАКС] + (["…и ещё %d" % хвост] if хвост > 0 else [])
+        out = {"found": False, "open": открытые[:СПИСОК_МАКС],
+               "open_more": max(хвост, 0),
                "text": "не нашёл «%s» среди открытых: %s"
-                       % (item, "; ".join(открытые) or "список пуст")}
+                       % (_м(item), "; ".join(показ) or "список пуст")}
     записано.update(out=out, found=found)
     if con is not None:
         _в_реестр(con, vault, event, p, out, found, адреса, проверено, слияние, когда)

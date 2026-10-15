@@ -36,6 +36,12 @@
 очищенным текстом, что и пакет `now`. В ход хуком по-прежнему едет только `now`:
 кто собеседник реплики, хук не знает, а модель, спросившая инструментом, знает.
 
+Ответы doctor — по контрактам `docs/contracts/agent-api.md` (Т6.3): пакет
+`mara.context.now.v1`, справка `mara.context.query.v1`, правка
+`mara.command.correction.v1`. Плагин знает эти имена (`КОНТРАКТЫ`); ответ
+чужой версии он не разбирает, а просит обновить себя. Общий с сервером
+фикстур — `tests/fixtures/agent-contracts.json`.
+
 Наружу из хука и инструмента не выходит ни одно исключение: сбой брокера
 обязан выглядеть как отсутствие контекста, а не как сломанный ход.
 
@@ -123,6 +129,20 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
         "required": ["about"],
     },
 }
+
+# Т6.3: контракты doctor, которые плагин понимает (`docs/contracts/agent-api.md`).
+# Ответ без поля `contract` — doctor старше контрактов, и его ответы — та же
+# первая версия. Чужое имя — новая версия: её не разбираем, а просим обновить
+# плагин
+КОНТРАКТЫ = {"now": "mara.context.now.v1", "query": "mara.context.query.v1",
+             "correction": "mara.command.correction.v1"}
+
+
+def _чужой(data, вид):
+    """Имя контракта ответа, если плагин его не знает; иначе None."""
+    к = data.get("contract") if isinstance(data, dict) else None
+    return к if к is not None and к != КОНТРАКТЫ[вид] else None
+
 
 log = logging.getLogger(__name__)
 
@@ -214,7 +234,13 @@ class Брокер:
                 log.warning("mara-context: не забрал пакет (%s)", _причина(e))
                 return self._пакет
             self._свежесть = time.monotonic()
-            self._пакет = data.get("now")
+            чужой = _чужой(data, "now")
+            if чужой:
+                # старый пакет не выбрасываем — как при сбое сети
+                log.warning("mara-context: doctor отдаёт пакет контрактом %s, плагин "
+                            "знает %s — обнови плагин", чужой, КОНТРАКТЫ["now"])
+                return self._пакет
+            self._пакет = data.get("now") if isinstance(data, dict) else None
             return self._пакет
 
     def контекст(self, history=()):
@@ -258,6 +284,13 @@ class Брокер:
             return "не дозвонился до doctor: %s" % _причина(e)
         with self._lock:
             self._свежесть = None     # список изменился — следующий ход идёт за свежим
+        чужой = _чужой(data, "correction")
+        if чужой:
+            return ("doctor принял правку, но ответил контрактом %s, а плагин знает "
+                    "%s — обнови плагин; что применилось, видно в свежем списке"
+                    % (чужой, КОНТРАКТЫ["correction"]))
+        if not isinstance(data, dict):
+            return "doctor ответил на правку не объектом"
         if data.get("duplicate"):
             return "эту правку уже принимал, повторять не стал"
         applied = data.get("applied") or {}
@@ -299,6 +332,10 @@ class Брокер:
             return "doctor ответил на справку не JSON"
         except Exception as e:
             return "не дозвонился до doctor: %s" % _причина(e)
+        чужой = _чужой(data, "query")
+        if чужой:
+            return ("doctor отвечает справкой %s, а плагин знает %s — обнови плагин"
+                    % (чужой, КОНТРАКТЫ["query"]))
         текст = data.get("text") if isinstance(data, dict) else None
         # старый contextd отвечал заглушкой без `text`
         return текст if isinstance(текст, str) and текст else "doctor ответил без текста"

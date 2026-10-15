@@ -450,6 +450,17 @@ def scope_ok(con, device_id, kind):
     return kind in row["scopes"].split()
 
 
+# Т6.3: контракты agent-facing слоя (`docs/contracts/agent-api.md`, фикстур
+# `tests/fixtures/agent-contracts.json`). Имена — по образцу ADR-0011
+# (`mara.<область>.<имя>.v<N>`), правила версий — его же решение 7: внутри
+# версии поля только добавляются, несовместимое — новый суффикс рядом.
+# Ответ называет свой контракт, и клиент, не знающий имени, говорит «обнови
+# меня», а не разбирает чужую версию молча.
+КОНТРАКТ_ПАКЕТА = "mara.context.now.v1"
+КОНТРАКТ_СПРАВКИ = "mara.context.query.v1"
+КОНТРАКТ_ПРАВКИ = "mara.command.correction.v1"
+
+
 # Т6.4 (ADR-0009, правка решения 4): права на чтение — словами словаря
 # ADR-0011 (решение 5) в том же allowlist, а не новая колонка и не таблица
 # прав. Двоеточие отделяет право от вида события синтаксически: вид с ним не
@@ -1419,6 +1430,8 @@ class Handler(BaseHTTPRequestHandler):
                                      (data.get("blob") or {}).get("sha256"))
                     ответ = {"event_id": eid, "duplicate": dup, "need_blob": need,
                              "applied": None}
+                    if kind == "correction":
+                        ответ["contract"] = КОНТРАКТ_ПРАВКИ
                     if ключ:
                         con.execute(
                             "insert into ingest_attempts(id,source,device_id,"
@@ -1495,6 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
             # минута сборки в шапке в подпись не входит
             состав = context_pack.оформить_запрос(о_чём, паки, неоднозначные, когда="-")
             return self.say(200, {
+                "contract": КОНТРАКТ_СПРАВКИ,
                 # `about` — очищенным: сырой суррогат ронял `say` (ревью #173)
                 "about": context_pack.данные(о_чём, 200), "generated_at": mi.now_iso(),
                 "sha256": hashlib.sha256(состав.encode("utf-8")).hexdigest(),
@@ -1950,7 +1964,8 @@ def bootstrap(con, vault=None):
     row = con.execute("select id,event_id,text,items_json,sent_at from digests "
                       "where state='sent' order by %s desc "
                       "limit 1" % mi.секунды("sent_at")).fetchone()
-    return {"now": now_pack(vault),
+    return {"contract": КОНТРАКТ_ПАКЕТА,
+            "now": now_pack(vault),
             "last_digest": dict(row) if row else None,
             "queue": con.execute(
                 "select count(*) from jobs where state='ready'").fetchone()[0],
