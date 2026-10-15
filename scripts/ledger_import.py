@@ -59,14 +59,21 @@ from vault_common import locked
 VAULT = os.environ.get("MARA_VAULT", os.environ.get("VAULT", "/srv/vault"))
 
 
+# Выставляет только `main()`, и только у терминала: владельцу, запустившему
+# перенос руками, нужен путь карточки. Библиотечный зов (правка словами
+# через `call_project` внутри `contextd`) флага не трогает — у foreground
+# `contextd --serve` stderr тоже терминал, но его вывод — журнал (Codex).
+_У_ТЕРМИНАЛА = False
+
+
 def _скажи(s):
-    """Предупреждение переноса — в stderr. У терминала — как есть: владельцу,
-    запустившему перенос руками, нужен путь карточки. Когда stderr не
-    терминал (pipe, запуск из скрипта, правка словами внутри `contextd` →
-    journald) — `mi.для_журнала`: путь режется до каталога, пока владелец
-    явно не включил sensitive mode (ТЗ §15.1, `contextd.py
-    --sensitive-logs`); секреты маскируются всегда."""
-    print(s if sys.stderr.isatty() else mi.для_журнала(s), file=sys.stderr)
+    """Предупреждение переноса — в stderr. При прямом запуске
+    `ledger_import.py` с терминала — как есть (`_У_ТЕРМИНАЛА`). Иначе —
+    pipe, запуск из скрипта, правка словами внутри `contextd` → journald —
+    `mi.для_журнала`: путь режется до каталога, пока владелец явно не
+    включил sensitive mode (ТЗ §15.1, `contextd.py --sensitive-logs`);
+    секреты маскируются всегда."""
+    print(s if _У_ТЕРМИНАЛА else mi.для_журнала(s), file=sys.stderr)
 
 
 def _brief():
@@ -991,7 +998,8 @@ def self_check():
     return 0
 
 
-def main():
+def main(argv=None):
+    global _У_ТЕРМИНАЛА
     ap = argparse.ArgumentParser(description="перенос карточек волта в ledger")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--vault", default=VAULT)
@@ -999,10 +1007,11 @@ def main():
     ap.add_argument("--write-ids", action="store_true", dest="write_ids",
                     help="Т2.2: вписать id из реестра в шапки карточек")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if a.self_check:
         return self_check()
     mi.ROOT = a.root
+    _У_ТЕРМИНАЛА = sys.stderr.isatty()
     if a.write_ids:
         # Только после переноса и только всерьёз: без строк в реестре
         # вписывать нечего, а проба тут — `--dry-run` вместе с флагом.

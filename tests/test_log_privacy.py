@@ -417,8 +417,32 @@ class ЧувствительныйРежим(unittest.TestCase):
         finally:
             mi.ROOT = прежний
 
-    def test_скажи_у_терминала_как_есть(self):
-        """Владельцу, запустившему перенос руками, нужен путь — без режима."""
+    def test_скажи_у_терминала_как_есть_только_из_main(self):
+        """Владельцу, запустившему перенос руками, нужен путь — без режима.
+        Терминал определяет `main`, не сам `_скажи`: у foreground
+        `contextd --serve` stderr тоже tty, но правка словами через
+        `call_project` — это журнал (Codex по #182)."""
+        import ledger_import as li
+        import tempfile as tf
+        vault = tf.mkdtemp()
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        with open(os.path.join(vault, "kb/commitments",
+                               "2026-10-15-prislat-smetu-olegu.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("тело без шапки\n")
+        поток = io.StringIO()
+        поток.isatty = lambda: True
+        прежние = mi.ROOT, li._У_ТЕРМИНАЛА
+        try:
+            with contextlib.redirect_stderr(поток):
+                li.main(["--root", self.root, "--vault", vault, "--dry-run"])
+            self.assertIn("smetu", поток.getvalue(), "у терминала путь целиком")
+        finally:
+            mi.ROOT, li._У_ТЕРМИНАЛА = прежние
+
+    def test_скажи_при_tty_библиотечно_всё_равно_журнал(self):
+        """Библиотечный зов (правка словами внутри contextd) обезличен и
+        при tty-stderr: флаг терминала ставит только `main`."""
         import ledger_import as li
         поток = io.StringIO()
         поток.isatty = lambda: True
@@ -429,8 +453,8 @@ class ЧувствительныйРежим(unittest.TestCase):
                 li._скажи(self.строка)
         finally:
             mi.ROOT = прежний
-        self.assertIn(ОБЕЩАНИЕ, поток.getvalue())
-        self.assertNotIn("чувствительный журнал", поток.getvalue())
+        self.assertNotIn("smetu", поток.getvalue())
+        self.assertIn("kb/commitments/…", поток.getvalue())
 
     def test_перенос_предупреждает_через_скажи(self):
         """Сквозной: карточка без фронтматтера в прогоне `run` — в журнале
