@@ -1,5 +1,5 @@
 {
-  "_": "Контракты agent-facing слоя (Т6.3, docs/contracts/agent-api.md). Один файл на двоих: tests/test_agent_contracts.py сверяет с ним живые ответы contextd, демо плагина install/mara-context — свой разбор его примеров. Тип: str, int, bool, object, list, null; несколько — через |. Ключ с ? на конце необязателен. Внутри версии поля только добавляются (ADR-0011, решение 7).",
+  "_": "Контракты agent-facing слоя (Т6.3, docs/contracts/agent-api.md). Один файл на двоих: tests/test_agent_contracts.py сверяет с ним живые ответы contextd, демо плагина install/mara-context — свой разбор его примеров. Тип: str, int, bool, object, list, null; несколько — через |. Ключ с ? на конце необязателен; поля сверх схемы — служебные, клиент на них не опирается. Внутри версии поля только добавляются (ADR-0011, решение 7).",
   "mara.context.now.v1": {
     "method": "GET",
     "path": "/v1/context/bootstrap",
@@ -21,7 +21,7 @@
     "example": {
       "contract": "mara.context.now.v1",
       "now": {
-        "text": "Открытые обязательства владельца — собрано из волта автоматически.\n\n- «прислать смету» — до 2026-10-20 · «Анна» #0000abcd",
+        "text": "<!-- mara:now -->\nОткрытые обязательства владельца — собрано из волта автоматически.\n\n- «прислать смету» — до 2026-10-20 · «Анна» #0000abcd\n<!-- /mara:now -->\n",
         "sha256": "5f6c0e1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6",
         "supersedes": null,
         "generated": "2026-10-15T09:00:00+03:00",
@@ -65,7 +65,11 @@
       "sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
       "ambiguous": [],
       "packs": [
-        {"pack_id": "person/anna", "pack_type": "person", "items": 1}
+        {
+          "pack_id": "person/anna",
+          "pack_type": "person",
+          "items": 1
+        }
       ],
       "text": "Справка из волта на 2026-10-15 12:00 по запросу — собрано автоматически.\nОткрыто перед «Анна» (1):\n- «прислать смету» — до 2026-10-20 · «Анна» #0000abcd"
     }
@@ -93,7 +97,9 @@
     "limits": {
       "item": 200,
       "note": 500,
-      "open_titles": 15
+      "open_titles": 15,
+      "ambiguous_titles": 15,
+      "idempotency_key": 128
     },
     "response": {
       "contract": "str",
@@ -104,15 +110,28 @@
     },
     "applied": {
       "found": "bool",
-      "text?": "str",
+      "text": "str",
       "title?": "str",
       "id?": "str",
       "version?": "int|null",
       "error?": "str",
+      "entity_id?": "str",
+      "conflict_id?": "str",
+      "expected_version?": "int",
+      "current_version?": "int",
+      "current?": "object",
+      "attempted_patch?": "object",
       "ambiguous?": "list",
+      "ambiguous_more?": "int",
+      "ambiguous_ids?": "list",
       "open?": "list",
       "open_more?": "int",
       "created?": "str"
+    },
+    "current": {
+      "title": "str|null",
+      "status": "str|null",
+      "due": "str|null"
     },
     "example": {
       "contract": "mara.command.correction.v1",
@@ -123,7 +142,10 @@
         "found": true,
         "card": "kb/commitments/2026-10-01-prislat-smetu.md",
         "title": "прислать смету",
-        "changed": {"status": "done", "valid_from": "2026-10-15T12:00:00+03:00"},
+        "changed": {
+          "status": "done",
+          "valid_from": "2026-10-15T12:00:00+03:00"
+        },
         "text": "«прислать смету»: статус open → done",
         "applied": true,
         "id": "01999999-0000-7000-8000-00000000abcd",

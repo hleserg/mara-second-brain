@@ -651,7 +651,11 @@ def run(event_id, vault, root=None):
 СТАТУСЫ = ("open", "done", "cancelled")
 ДАТА = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 ЗАМЕТКА_МАКС = 500          # знаков заметки правки: она ложится в журнал карточки
-СПИСОК_МАКС = 15            # открытых заголовков в ответе «не нашёл»
+ПУНКТ_МАКС = 200            # знаков названия обязательства в правке
+СПИСОК_МАКС = 15            # заголовков в ответе «не нашёл» и «подходят несколько»
+# поля правки, которые ответ на конфликт возвращает как `attempted_patch`
+# (ADR-0003 п. 4): только известные — лишний ключ любой длины в ответ не едет
+ПОЛЯ_ПРАВКИ = ("item", "status", "due", "note", "id", "expected_version")
 
 
 def _м(s):
@@ -663,12 +667,25 @@ def _м(s):
     return context_pack.данные(s, context_pack.MAX_TITLE)
 
 
+def _код(card, адреса):
+    """Код карточки `xxxxxxxx` — как в пакете (`context_pack.строка`), или
+    None: что не по формату, в ответ не едет."""
+    код = str(_id_карточки(card, адреса) or "").strip()[-8:]
+    return код.lower() if context_pack.КОД.match(код) else None
+
+
+def _адрес_ответа(ид):
+    """Id карточки в ответ: только по формату id (`КОД`), иначе None —
+    шапку правят рукой, и в `id:` бывает что угодно."""
+    return ид if isinstance(ид, str) and КОД.match(ид) else None
+
+
 def check_correction(payload):
     """Граница доверия: аргументы придумывает модель. Ошибка — строкой, чтобы
     Мара переспросила владельца, а не оставила 500 в логе."""
     item = str(payload.get("item") or "").strip()
-    if not item or len(item) > 200:
-        return "нужно название обязательства, до 200 знаков"
+    if not item or len(item) > ПУНКТ_МАКС:
+        return "нужно название обязательства, до %d знаков" % ПУНКТ_МАКС
     if payload.get("status") not in (None, "") + СТАТУСЫ:
         return "статус — один из: " + ", ".join(СТАТУСЫ)
     if payload.get("due") and not ДАТА.match(str(payload["due"])):
@@ -784,13 +801,18 @@ def _конфликт(con, card, ожидали, payload, когда, адрес
                                  "current_version": row["version"],
                                  "current": текущее, "attempted_patch": payload},
                                 ensure_ascii=False)))
+    # в тревогу — как было, сырым (это реестр); в ответ — очищенным и
+    # ограниченным: он едет модели (Т6.3, ревью #176)
     return {"found": True, "error": "version_conflict", "entity_id": oid,
             "card": card["rel"], "title": _м(row["title"]),
             "expected_version": ожидали, "current_version": row["version"],
-            "current": текущее, "attempted_patch": payload, "conflict_id": cid,
+            "current": {k: _м(v) if v is not None else None for k, v in текущее.items()},
+            "attempted_patch": {k: _м(v) if isinstance(v, str) else v
+                                for k, v in payload.items() if k in ПОЛЯ_ПРАВКИ},
+            "conflict_id": cid,
             "text": "«%s» уже изменилась: версия %d, а не %d (статус %s) — не правил, "
                     "конфликт %s в очереди ревью"
-                    % (_м(row["title"]), row["version"], ожидали, row["status"],
+                    % (_м(row["title"]), row["version"], ожидали, _м(row["status"]),
                        cid[-8:])}
 
 
@@ -1023,7 +1045,10 @@ def _в_реестр(con, vault, event, p, out, found, адреса, прове�
                   "version_checked": проверено,
                   "merged": "commutative" if слияние else None,
                   "conflict_id": out.get("conflict_id"),
-                  "ambiguous_ids": out.get("ambiguous_ids")}, когда)
+                  # в аудит — все и как есть: в ответе список ограничен и
+                  # очищен, а реестру нужен полный след
+                  "ambiguous_ids": [_id_карточки(c, адреса) for c in found]
+                                   if out.get("ambiguous") else None}, когда)
 
 
 def заметка(raw):
@@ -1127,10 +1152,18 @@ def _правка(con, vault, event, p, item, status, due, note, ид, ожид�
     if конфликт:
         out = конфликт
     elif len(found) > 1:
-        names = [_м(c["fm"].get("title")) for c in found]
-        out = {"found": False, "ambiguous": names,
-               "ambiguous_ids": [_id_карточки(c, адреса) for c in found],
-               "text": "подходят несколько, уточни: " + "; ".join(names)}
+        # ограничено, как «не нашёл»; у имени — код карточки: два заголовка с
+        # общим началом обрезка делает одинаковыми, и по имени их уже не
+        # различить, а по коду — да (ревью #176)
+        показ = found[:СПИСОК_МАКС]
+        хвост = len(found) - СПИСОК_МАКС
+        names = [_м(c["fm"].get("title")) for c in показ]
+        с_кодом = ["%s #%s" % (n, _код(c, адреса)) if _код(c, адреса) else n
+                   for n, c in zip(names, показ)]
+        out = {"found": False, "ambiguous": names, "ambiguous_more": max(хвост, 0),
+               "ambiguous_ids": [_адрес_ответа(_id_карточки(c, адреса)) for c in показ],
+               "text": "подходят несколько, уточни: " + "; ".join(
+                   с_кодом + (["…и ещё %d" % хвост] if хвост > 0 else []))}
     elif found:
         out = _поправить(found[0], status, due, note, когда, event.get("id"))
         # ADR-0003 п.3: без строки в реестре версию проверить нечем
@@ -1142,8 +1175,12 @@ def _правка(con, vault, event, p, item, status, due, note, ид, ожид�
     elif status == "open":
         out = _завести(vault, item, due, note, когда, event)
     else:
-        открытые = [_м(c["fm"].get("title")) for c in cards
-                    if c["fm"].get("status") in context_pack.OPEN]
+        # порядок — как в пакете: по сроку, без срока — в конце; статус — без
+        # регистра, пустой после очистки заголовок не едет (ревью #176)
+        открытые = [_м(c["fm"].get("title")) for c in sorted(
+            (c for c in cards if str(c["fm"].get("status") or "").lower() in context_pack.OPEN),
+            key=lambda c: (context_pack.срок(c["fm"]) or "9999-99-99", c["rel"]))]
+        открытые = [t for t in открытые if t]
         # ответ ограничен (§11 «bounded payloads»): список — не больше
         # `СПИСОК_МАКС`, остальное числом; полный — в пакете и справке
         хвост = len(открытые) - СПИСОК_МАКС
