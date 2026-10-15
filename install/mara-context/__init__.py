@@ -36,6 +36,12 @@
 очищенным текстом, что и пакет `now`. В ход хуком по-прежнему едет только `now`:
 кто собеседник реплики, хук не знает, а модель, спросившая инструментом, знает.
 
+Ответы doctor — по контрактам `docs/contracts/agent-api.md` (Т6.3): пакет
+`mara.context.now.v1`, справка `mara.context.query.v1`, правка
+`mara.command.correction.v1`. Плагин знает эти имена (`КОНТРАКТЫ`); ответ
+чужой версии он не разбирает, а просит обновить себя. Общий с сервером
+фикстур — `tests/fixtures/agent-contracts.json`.
+
 Наружу из хука и инструмента не выходит ни одно исключение: сбой брокера
 обязан выглядеть как отсутствие контекста, а не как сломанный ход.
 
@@ -79,7 +85,7 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
     "parameters": {
         "type": "object",
         "properties": {
-            "item": {"type": "string",
+            "item": {"type": "string", "maxLength": 200,
                      "description": "обязательство теми же словами, что в списке; "
                                     "для новой задачи — её формулировка"},
             "status": {"type": "string", "enum": ["open", "done", "cancelled"],
@@ -87,7 +93,7 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
                                       "cancelled — отменено"},
             "due": {"type": "string",
                     "description": "срок как YYYY-MM-DD; «пятница» переведи в дату сам"},
-            "note": {"type": "string",
+            "note": {"type": "string", "maxLength": 500,
                      "description": "что ещё сказал владелец, одной строкой"},
             "id": {"type": "string",
                    "description": "код #xxxxxxxx из списка или полный id карточки; "
@@ -116,13 +122,32 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
     "parameters": {
         "type": "object",
         "properties": {
-            "about": {"type": "string",
+            "about": {"type": "string", "maxLength": 200,
                       "description": "имя человека или проект в именительном падеже, "
                                      "или основа слова из задачи"},
         },
         "required": ["about"],
     },
 }
+
+# Т6.3: контракты doctor, которые плагин понимает (`docs/contracts/agent-api.md`).
+# Ответ без поля `contract` — doctor старше контрактов, и его ответы — та же
+# первая версия. Чужое имя — новая версия: её не разбираем, а просим обновить
+# плагин
+КОНТРАКТЫ = {"now": "mara.context.now.v1", "query": "mara.context.query.v1",
+             "correction": "mara.command.correction.v1"}
+
+
+def _чужой(data, вид):
+    """Имя контракта ответа, если плагин его не знает; иначе None. Пустое
+    имя, `0`, `false` и явный `null` — тоже чужие: за первую версию идёт
+    только ответ, где поля нет вовсе (старый doctor). Проверять результат —
+    на `is not None`."""
+    if not isinstance(data, dict) or "contract" not in data:
+        return None
+    к = data["contract"]
+    return repr(к) if к != КОНТРАКТЫ[вид] else None
+
 
 log = logging.getLogger(__name__)
 
@@ -214,14 +239,27 @@ class Брокер:
                 log.warning("mara-context: не забрал пакет (%s)", _причина(e))
                 return self._пакет
             self._свежесть = time.monotonic()
-            self._пакет = data.get("now")
+            чужой = _чужой(data, "now")
+            if чужой is not None:
+                # старый пакет не выбрасываем — как при сбое сети
+                log.warning("mara-context: doctor отдаёт пакет контрактом %s, плагин "
+                            "знает %s — обнови плагин", чужой, КОНТРАКТЫ["now"])
+                return self._пакет
+            now = data.get("now") if isinstance(data, dict) else ""
+            if now is not None and not isinstance(now, dict):
+                # не объект и не null — не наш ответ; старый пакет живёт, как
+                # при чужой версии (ревью #176)
+                log.warning("mara-context: doctor отдал пакет не объектом — держу прежний")
+                return self._пакет
+            self._пакет = now
             return self._пакет
 
     def контекст(self, history=()):
         пакет = self._достать()
-        if not пакет or not пакет.get("text"):
+        текст = пакет.get("text") if isinstance(пакет, dict) else None
+        if not (isinstance(текст, str) and текст):
             return ""
-        return "" if _в_истории(пакет["text"], history) else пакет["text"]
+        return "" if _в_истории(текст, history) else текст
 
     def правка(self, args):
         """Инструмент mara_correction: одно событие на doctor, ответ — строкой."""
@@ -247,20 +285,38 @@ class Брокер:
         try:
             with self._open(self._запрос(self.url_событий, событие),
                             timeout=self.timeout_правки) as r:
-                data = json.loads(r.read() or b"{}")
+                сырой = r.read()
         except urllib.error.HTTPError as e:
             try:
                 msg = json.loads(e.read() or b"{}").get("error")
-            except ValueError:
+            except (ValueError, AttributeError):
                 msg = None
             return "doctor не принял правку: %s" % (msg or e.code)
         except Exception as e:
             return "не дозвонился до doctor: %s" % _причина(e)
         with self._lock:
             self._свежесть = None     # список изменился — следующий ход идёт за свежим
+        try:
+            data = json.loads(сырой or b"{}")
+        except ValueError:
+            return "doctor ответил на правку не JSON — итог не разобрал"
+        чужой = _чужой(data, "correction")
+        if чужой is not None:
+            # правка уже применена: сервер решает раньше, чем плагин видит имя
+            return ("doctor ответил на правку контрактом %s, а плагин знает %s — "
+                    "итог не разобрал, обнови плагин" % (чужой, КОНТРАКТЫ["correction"]))
+        if not isinstance(data, dict):
+            return "doctor ответил на правку не объектом"
         if data.get("duplicate"):
             return "эту правку уже принимал, повторять не стал"
-        applied = data.get("applied") or {}
+        applied = data.get("applied")
+        if applied is None:
+            # событие записано, а применить doctor не успел (сбой между
+            # приёмом и правкой) — честно так и говорим (ревью #176)
+            return ("doctor записал правку, но итога не прислал — что применилось, "
+                    "видно в следующем списке")
+        if not isinstance(applied, dict):
+            return "doctor ответил на правку без итога"
         if applied.get("error") == "version_conflict":
             # ADR-0003 п.4: конфликт — нормальный ответ, не авария; Мара
             # говорит об этом владельцу и не повторяет вслепую
@@ -271,7 +327,11 @@ class Брокер:
                        applied.get("expected_version"),
                        (applied.get("current") or {}).get("status"),
                        applied.get("current_version")))
-        текст = applied.get("text") or json.dumps(applied, ensure_ascii=False)
+        текст = applied.get("text")
+        if not (isinstance(текст, str) and текст):
+            # раньше сюда ехал весь `applied` через json.dumps — с полями,
+            # которые модели не предназначены (ревью #176)
+            return "doctor ответил на правку без текста"
         # id и версия — в ответ Маре словами: иначе ей неоткуда взять
         # expected_version для следующей правки (Codex по #118)
         if applied.get("id") and applied.get("version") is not None:
@@ -288,17 +348,25 @@ class Брокер:
         try:
             with self._open(self._запрос(self.url_справки, {"about": о_чём[:200]}),
                             timeout=self.timeout_справки) as r:
-                data = json.loads(r.read() or b"{}")
+                сырой = r.read()
         except urllib.error.HTTPError as e:
             try:
                 msg = json.loads(e.read() or b"{}").get("error")
-            except ValueError:
+            except (ValueError, AttributeError):
                 msg = None
             return "doctor не ответил на справку: %s" % (msg or e.code)
-        except ValueError:
-            return "doctor ответил на справку не JSON"
         except Exception as e:
             return "не дозвонился до doctor: %s" % _причина(e)
+        try:
+            # разбор — после сети: `ValueError` из самого похода (кривой
+            # заголовок) — не «ответ не JSON»
+            data = json.loads(сырой or b"{}")
+        except ValueError:
+            return "doctor ответил на справку не JSON"
+        чужой = _чужой(data, "query")
+        if чужой is not None:
+            return ("doctor отвечает справкой %s, а плагин знает %s — обнови плагин"
+                    % (чужой, КОНТРАКТЫ["query"]))
         текст = data.get("text") if isinstance(data, dict) else None
         # старый contextd отвечал заглушкой без `text`
         return текст if isinstance(текст, str) and текст else "doctor ответил без текста"

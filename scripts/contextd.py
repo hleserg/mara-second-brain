@@ -450,6 +450,21 @@ def scope_ok(con, device_id, kind):
     return kind in row["scopes"].split()
 
 
+# Т6.3: контракты agent-facing слоя (`docs/contracts/agent-api.md`, фикстур
+# `tests/fixtures/agent-contracts.json`). Имена — по образцу ADR-0011
+# (`mara.<область>.<имя>.v<N>`), правила версий — его же решение 7: внутри
+# версии поля только добавляются, несовместимое — новый суффикс рядом.
+# Ответ называет свой контракт, и клиент, не знающий имени, говорит «обнови
+# меня», а не разбирает чужую версию молча. Версию выбирает путь: `/v1/…`
+# отвечает только v1, пока она жива, а v2 встанет рядом своим путём; имя в
+# ответе — подтверждение, а не согласование (ревью #176).
+КОНТРАКТ_ПАКЕТА = "mara.context.now.v1"
+КОНТРАКТ_СПРАВКИ = "mara.context.query.v1"
+КОНТРАКТ_ПРАВКИ = "mara.command.correction.v1"
+ЗАПРОС_О_МАКС = 200                     # знаков `about` в справке
+КЛЮЧ_МАКС = 128                         # знаков ключа идемпотентности (Т2.9)
+
+
 # Т6.4 (ADR-0009, правка решения 4): права на чтение — словами словаря
 # ADR-0011 (решение 5) в том же allowlist, а не новая колонка и не таблица
 # прав. Двоеточие отделяет право от вида события синтаксически: вид с ним не
@@ -1361,7 +1376,42 @@ class Handler(BaseHTTPRequestHandler):
                     поля=data)
             if kind == "correction":
                 import call_project
-                err = call_project.check_correction(data.get("payload") or {})
+                payload = data.get("payload")
+                if payload is not None and not isinstance(payload, dict):
+                    # `"payload": "строка"` роняло проверку на `.get()` —
+                    # обрыв без ответа вместо 400 контракта (ревью #176)
+                    return self.say(400, {"error": "payload — объект"}, поля=data)
+                if not (isinstance(data.get("source_id"), str) and data["source_id"].strip()):
+                    # ключ дедупа правки — `source` и `source_id`: без него
+                    # первая правка ложилась, а каждая следующая молча
+                    # становилась её дублем (ревью #176)
+                    return self.say(400, {"error": "source_id — непустая строка: "
+                                                   "по нему узнаётся повтор правки"},
+                                    поля=data)
+                if data.get("source") != "mara":
+                    # вторая половина того же ключа дедупа, и ровно `mara`
+                    # по контракту: другой source делал бы из того же
+                    # source_id второе событие — та же правка применялась бы
+                    # дважды, с ложным происхождением (Codex по #176,
+                    # круги 2 и 4). Панель волны 8 придёт со своим контрактом
+                    # и своим source — это решение того контракта, не лазейка
+                    # этого.
+                    return self.say(400, {"error": "source правки — mara"}, поля=data)
+                if not isinstance(data.get("occurred_at"), (str, type(None))):
+                    # `{}` в occurred_at доезжал до вставки и ронял её —
+                    # обрыв вместо 400 (Codex по #176, круг 3)
+                    return self.say(400, {"error": "occurred_at — строка"}, поля=data)
+                try:
+                    # `"\udcff"` — валидный json, но не UTF-8: строка с
+                    # одиночным суррогатом роняла запись в базу, и Мара
+                    # получала обрыв вместо 400 контракта (ревью #176). Только
+                    # у правки: телефон с 400 запись бросает насовсем, и его
+                    # пути — отдельное решение
+                    json.dumps(data, ensure_ascii=False).encode("utf-8")
+                except UnicodeEncodeError:
+                    return self.say(400, {"error": "в правке одиночный суррогат — "
+                                                   "это не UTF-8"}, поля=data)
+                err = call_project.check_correction(payload or {})
                 if err:
                     return self.say(400, {"error": err}, поля=data)
             # Квитанция идемпотентности (ТЗ §4.4, Т2.9): клиент прислал
@@ -1374,9 +1424,9 @@ class Handler(BaseHTTPRequestHandler):
                 # пустой заголовок — отсутствие ключа, а не отказ: 400 у
                 # телефона терминален
                 ключ = self.headers.get("Idempotency-Key") or None
-            if ключ is not None and not (isinstance(ключ, str) and 0 < len(ключ) <= 128):
-                return self.say(400, {"error": "idempotency_key — строка до 128 знаков"},
-                                поля=data)
+            if ключ is not None and not (isinstance(ключ, str) and 0 < len(ключ) <= КЛЮЧ_МАКС):
+                return self.say(400, {"error": "idempotency_key — строка до %d знаков"
+                                               % КЛЮЧ_МАКС}, поля=data)
             было = квитанция(con, data["device_id"], ключ) if ключ else None
             if было is not None:
                 print(log_line("POST", p.path, 200, data) + " replay", flush=True)
@@ -1419,6 +1469,8 @@ class Handler(BaseHTTPRequestHandler):
                                      (data.get("blob") or {}).get("sha256"))
                     ответ = {"event_id": eid, "duplicate": dup, "need_blob": need,
                              "applied": None}
+                    if kind == "correction":
+                        ответ["contract"] = КОНТРАКТ_ПРАВКИ
                     if ключ:
                         con.execute(
                             "insert into ingest_attempts(id,source,device_id,"
@@ -1481,9 +1533,9 @@ class Handler(BaseHTTPRequestHandler):
             if not можно_читать(con, device_of(con, self.headers.get("Authorization"))):
                 return self.say(403, {"error": ОТКАЗ_ЧТЕНИЯ})
             о_чём = data.get("about")
-            if not isinstance(о_чём, str) or not о_чём.strip() or len(о_чём) > 200:
+            if not isinstance(о_чём, str) or not о_чём.strip() or len(о_чём) > ЗАПРОС_О_МАКС:
                 return self.say(400, {"error": "about — имя человека или проекта или "
-                                               "слово, до 200 знаков"})
+                                               "слово, до %d знаков" % ЗАПРОС_О_МАКС})
             import context_pack, vault_common
             о_чём = о_чём.strip()
             паки, неоднозначные = context_pack.по_запросу(
@@ -1495,8 +1547,9 @@ class Handler(BaseHTTPRequestHandler):
             # минута сборки в шапке в подпись не входит
             состав = context_pack.оформить_запрос(о_чём, паки, неоднозначные, когда="-")
             return self.say(200, {
+                "contract": КОНТРАКТ_СПРАВКИ,
                 # `about` — очищенным: сырой суррогат ронял `say` (ревью #173)
-                "about": context_pack.данные(о_чём, 200), "generated_at": mi.now_iso(),
+                "about": context_pack.данные(о_чём, ЗАПРОС_О_МАКС), "generated_at": mi.now_iso(),
                 "sha256": hashlib.sha256(состав.encode("utf-8")).hexdigest(),
                 "packs": [{k: п[k] for k in ("pack_id", "pack_type", "conversations")
                            if k in п} | {"items": len(п["items"])} for п in паки],
@@ -1950,7 +2003,8 @@ def bootstrap(con, vault=None):
     row = con.execute("select id,event_id,text,items_json,sent_at from digests "
                       "where state='sent' order by %s desc "
                       "limit 1" % mi.секунды("sent_at")).fetchone()
-    return {"now": now_pack(vault),
+    return {"contract": КОНТРАКТ_ПАКЕТА,
+            "now": now_pack(vault),
             "last_digest": dict(row) if row else None,
             "queue": con.execute(
                 "select count(*) from jobs where state='ready'").fetchone()[0],
