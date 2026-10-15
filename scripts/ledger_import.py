@@ -61,10 +61,11 @@ VAULT = os.environ.get("MARA_VAULT", os.environ.get("VAULT", "/srv/vault"))
 
 def _скажи(s):
     """Предупреждение переноса — в stderr. У терминала — как есть: владельцу,
-    запустившему перенос руками, нужен путь карточки. В журнал (ночной крон,
-    правка словами внутри `contextd` → journald) — `mi.для_журнала`: путь
-    режется до каталога, пока владелец явно не включил sensitive mode
-    (ТЗ §15.1, `contextd.py --sensitive-logs`); секреты маскируются всегда."""
+    запустившему перенос руками, нужен путь карточки. Когда stderr не
+    терминал (pipe, запуск из скрипта, правка словами внутри `contextd` →
+    journald) — `mi.для_журнала`: путь режется до каталога, пока владелец
+    явно не включил sensitive mode (ТЗ §15.1, `contextd.py
+    --sensitive-logs`); секреты маскируются всегда."""
     print(s if sys.stderr.isatty() else mi.для_журнала(s), file=sys.stderr)
 
 
@@ -1042,7 +1043,7 @@ def main():
     if a.dry_run:
         история_, замечания = история(a.vault)
         for z in замечания:
-            print("ledger_import: " + z, file=sys.stderr)
+            _скажи("ledger_import: " + z)
         print("история правок: " + ", ".join(
             "%s %d" % (k, история_[k]) for k in (
                 "по пути правок", "рукой без события", "без правок",
@@ -1060,7 +1061,7 @@ def main():
     elif con is not None:
         счёт, замечания = сверка(con, a.vault)
         for z in замечания:
-            print("ledger_import: " + z, file=sys.stderr)
+            _скажи("ledger_import: " + z)
         print(строка_сверки(счёт))
         if not a.dry_run and not сошлось(счёт):
             return 1

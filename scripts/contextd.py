@@ -3130,7 +3130,11 @@ def main(argv=None):
     if a.sensitive_logs is not None:
         # gated sensitive mode журналов (ТЗ §15.1): явное включение на срок,
         # с предупреждением здесь и в каждой строке журнала
-        срок = mi.включить_чувствительные(a.root, a.sensitive_logs)
+        try:
+            срок = mi.включить_чувствительные(a.root, a.sensitive_logs)
+        except OSError as e:
+            print("не вышло: %s" % e)
+            return 1
         if срок is None:
             print("чувствительный режим журналов выключен")
         else:

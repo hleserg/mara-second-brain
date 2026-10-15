@@ -368,6 +368,23 @@ class ЧувствительныйРежим(unittest.TestCase):
         срок = mi.включить_чувствительные(self.root, 999999, now=now)
         self.assertLessEqual((срок - now).total_seconds(), 24 * 3600)
 
+    def test_срок_без_таймзоны_читается(self):
+        """Рукой вписанный naive-срок не роняет `_скажи` (aware < naive —
+        TypeError), а считается сроком в поясе владельца."""
+        with open(os.path.join(self.root, mi.ЧУВСТВ_ФАЙЛ), "w") as fh:
+            fh.write("2099-01-01T00:00:00")
+        self.assertIsNotNone(mi.чувствительно(self.root))
+        self.assertIn(ОБЕЩАНИЕ, mi.для_журнала(self.строка, self.root))
+
+    def test_обезличить_снимает_префикс_режима(self):
+        """Хвост шага, родившийся под режимом, в `jobs.last_error` и Telegram
+        не притворяется чувствительным: путь там всё равно срезан."""
+        mi.включить_чувствительные(self.root, 30)
+        s = mi.обезличить(mi.для_журнала(self.строка, self.root))
+        self.assertNotIn("чувствительный журнал", s)
+        self.assertNotIn("smetu", s)
+        self.assertIn("kb/commitments/…", s)
+
     def test_ноль_выключает(self):
         mi.включить_чувствительные(self.root, 30)
         self.assertIsNotNone(mi.чувствительно(self.root))
@@ -439,18 +456,34 @@ class ЧувствительныйРежим(unittest.TestCase):
         self.assertNotIn("smetu", err.getvalue())
 
     def test_включатель_contextd(self):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            код = contextd.main(["--root", self.root, "--sensitive-logs", "30"])
-        self.assertEqual(код, 0)
-        self.assertIn("внимание:", buf.getvalue())
-        self.assertIsNotNone(mi.чувствительно(self.root))
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            код = contextd.main(["--root", self.root, "--sensitive-logs", "0"])
-        self.assertEqual(код, 0)
-        self.assertIn("выключен", buf.getvalue())
-        self.assertIsNone(mi.чувствительно(self.root))
+        прежний = mi.ROOT          # contextd.main ставит mi.ROOT = a.root
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                код = contextd.main(["--root", self.root, "--sensitive-logs", "30"])
+            self.assertEqual(код, 0)
+            self.assertIn("внимание:", buf.getvalue())
+            self.assertIsNotNone(mi.чувствительно(self.root))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                код = contextd.main(["--root", self.root, "--sensitive-logs", "0"])
+            self.assertEqual(код, 0)
+            self.assertIn("выключен", buf.getvalue())
+            self.assertIsNone(mi.чувствительно(self.root))
+        finally:
+            mi.ROOT = прежний
+
+    def test_включатель_на_кривом_root_код_1(self):
+        прежний = mi.ROOT
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                код = contextd.main(["--root", os.path.join(self.root, "нет/такого"),
+                                     "--sensitive-logs", "30"])
+        finally:
+            mi.ROOT = прежний
+        self.assertEqual(код, 1)
+        self.assertIn("не вышло:", buf.getvalue())
 
 
 if __name__ == "__main__":
