@@ -683,8 +683,12 @@ def _адрес_ответа(ид):
 def check_correction(payload):
     """Граница доверия: аргументы придумывает модель. Ошибка — строкой, чтобы
     Мара переспросила владельца, а не оставила 500 в логе."""
-    item = str(payload.get("item") or "").strip()
-    if not item or len(item) > ПУНКТ_МАКС:
+    item = payload.get("item")
+    if not isinstance(item, (str, type(None))):
+        # объект и список коэрсились через str() и доезжали до волта своим
+        # питоновским представлением (Codex по #176, круг 3)
+        return "item — строка"
+    if not (item or "").strip() or len(item.strip()) > ПУНКТ_МАКС:
         return "нужно название обязательства, до %d знаков" % ПУНКТ_МАКС
     if payload.get("status") not in (None, "") + СТАТУСЫ:
         return "статус — один из: " + ", ".join(СТАТУСЫ)
@@ -692,7 +696,9 @@ def check_correction(payload):
         return "срок нужен как YYYY-MM-DD"
     if not (payload.get("status") or payload.get("due") or payload.get("note")):
         return "нечего править: ни статуса, ни срока, ни заметки"
-    if len(str(payload.get("note") or "")) > ЗАМЕТКА_МАКС:
+    if not isinstance(payload.get("note"), (str, type(None))):
+        return "note — строка"
+    if len(payload.get("note") or "") > ЗАМЕТКА_МАКС:
         return "заметка — до %d знаков" % ЗАМЕТКА_МАКС
     if payload.get("id") not in (None, ""):
         ид = payload["id"].strip().lstrip("#") if isinstance(payload["id"], str) else ""

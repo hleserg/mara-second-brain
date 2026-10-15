@@ -140,9 +140,13 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
 
 def _чужой(data, вид):
     """Имя контракта ответа, если плагин его не знает; иначе None. Пустое
-    имя, `0`, `false` — тоже чужие: проверять результат — на `is not None`."""
-    к = data.get("contract") if isinstance(data, dict) else None
-    return repr(к) if к is not None and к != КОНТРАКТЫ[вид] else None
+    имя, `0`, `false` и явный `null` — тоже чужие: за первую версию идёт
+    только ответ, где поля нет вовсе (старый doctor). Проверять результат —
+    на `is not None`."""
+    if not isinstance(data, dict) or "contract" not in data:
+        return None
+    к = data["contract"]
+    return repr(к) if к != КОНТРАКТЫ[вид] else None
 
 
 log = logging.getLogger(__name__)

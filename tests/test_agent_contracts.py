@@ -310,6 +310,20 @@ class Живьём(unittest.TestCase):
                 код, d = self.запрос(к["path"], тело)
                 self.assertEqual(код, 400)
                 self.assertIn("source", d["error"])
+        # не строки там, где контракт обещает строку, — 400, а не обрыв
+        # (Codex по #176, круг 3)
+        for поле, тело in (("occurred_at", {"occurred_at": {}}),
+                           ("item", {"payload": {"item": {"a": 1}, "status": "done"}}),
+                           ("item", {"payload": {"item": [1], "status": "done"}}),
+                           ("note", {"payload": {"item": "x", "note": [1, 2]}}),
+                           ("note", {"payload": {"item": "x", "note": {"a": 1}}})):
+            with self.subTest(поле=поле, тело=тело):
+                база = {"kind": "correction", "source": "mara", "source_id": "t-1",
+                        "payload": {"item": "x", "status": "done"}}
+                база.update(тело)
+                код, d = self.запрос(к["path"], база)
+                self.assertEqual(код, 400, d)
+                self.assertIn(поле, d["error"])
         код, d = self.запрос(к["path"], сырое=b'{"kind": "correction", "source": "mara", '
                                              b'"source_id": "u-1", "payload": '
                                              b'{"item": "\\udcff", "status": "done"}}')
@@ -440,7 +454,7 @@ class Плагин(unittest.TestCase):
 
     def test_чужая_версия_не_разбирается(self):
         for имя, пример in ((имя, к["example"]) for имя, к in КОНТРАКТЫ.items()):
-            for версия in (имя.replace(".v1", ".v2"), "", 0, False):
+            for версия in (имя.replace(".v1", ".v2"), "", 0, False, None):
                 чужой = dict(пример, contract=версия)
                 with self.subTest(контракт=имя, версия=версия):
                     п, б = self.брокер(чужой)

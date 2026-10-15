@@ -1394,6 +1394,10 @@ class Handler(BaseHTTPRequestHandler):
                     # вместо 400 (Codex по #176, круг 2)
                     return self.say(400, {"error": "source — непустая строка "
                                                    "(у правки Мары — mara)"}, поля=data)
+                if not isinstance(data.get("occurred_at"), (str, type(None))):
+                    # `{}` в occurred_at доезжал до вставки и ронял её —
+                    # обрыв вместо 400 (Codex по #176, круг 3)
+                    return self.say(400, {"error": "occurred_at — строка"}, поля=data)
                 try:
                     # `"\udcff"` — валидный json, но не UTF-8: строка с
                     # одиночным суррогатом роняла запись в базу, и Мара
