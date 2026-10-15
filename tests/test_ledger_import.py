@@ -434,7 +434,10 @@ class Перенос(_СтендПереноса):
         r, = self.строки("commitments")
         self.assertIsNone(r["confidence"])
         self.assertEqual(итог["спорных"], 0, "одно поле — не повод ронять прогон")
-        self.assertIn("2026-09-03-smeta.md", поток.getvalue())
+        # предупреждение идёт через `_скажи`: в журнале (stderr — не терминал)
+        # путь карточки срезан до каталога (ТЗ §15.1, Т9.1), причина остаётся
+        self.assertIn("kb/commitments/…", поток.getvalue())
+        self.assertNotIn("smeta", поток.getvalue())
         self.assertIn("высокая", поток.getvalue())
 
 
@@ -927,6 +930,9 @@ class Идентичность(unittest.TestCase):
             li.run(self.con, self.vault)
         self.assertEqual(self.con.execute("select id from commitments").fetchone()[0], было)
         self.assertIn("верю реестру", поток.getvalue())
+        # предупреждение идёт через `_скажи`: в журнале путь срезан (Т9.1)
+        self.assertIn("kb/commitments/…", поток.getvalue())
+        self.assertNotIn(".md", поток.getvalue().split("верю реестру")[0])
 
     def test_write_ids_вписывает_и_обновляет_отпечаток(self):
         p = карточка(self.vault, "kb/commitments/a.md")
@@ -968,6 +974,8 @@ class Идентичность(unittest.TestCase):
             итог = li.run(self.con, self.vault)
         self.assertEqual((итог["спорных"], итог["обязательств"]), (1, 1), итог)
         self.assertIn("не сливаем", поток.getvalue())
+        # спор идёт через `_скажи`: в журнале путь карточки срезан (Т9.1)
+        self.assertIn("kb/commitments/…", поток.getvalue())
         self.assertEqual(self.con.execute("select count(*) from commitments").fetchone()[0],
                          2, "z.md после копии по алфавиту перенесена")
         счёт, _ = li.сверка(self.con, self.vault)

@@ -39,6 +39,32 @@ class Обезличить(unittest.TestCase):
         self.assertIn("kb/commitments/…", s)
         self.assertIn("Permission denied", s, "причина остаётся")
 
+    def test_имя_с_пробелами_режется_целиком(self):
+        """Файл, названный рукой, несёт пробелы — хвост названия не течёт
+        («kb/commitments/… invoice …» был бы утечкой, Codex по #182)."""
+        s = mi.обезличить("спор: 'kb/commitments/Send invoice to Olegu.md' и ещё")
+        self.assertNotIn("invoice", s)
+        self.assertNotIn("Olegu", s)
+        self.assertEqual(s, "спор: 'kb/commitments/…' и ещё")
+        s = mi.обезличить("kb/commitments/прислать смету Олегу.md: конфликт")
+        self.assertNotIn("смету", s)
+        self.assertEqual(s, "kb/commitments/…: конфликт")
+        # знаки препинания в имени — тоже имя (Codex, круг 3)
+        s = mi.обезличить("kb/commitments/Send invoice, urgent to Olegu.md: спор")
+        self.assertNotIn("urgent", s)
+        self.assertEqual(s, "kb/commitments/…: спор")
+        # «.md » в середине имени: жадность до последнего .md (Codex, круг 4)
+        s = mi.обезличить("kb/commitments/Send.md backup to Olegu.md — спор")
+        self.assertNotIn("backup", s)
+        self.assertEqual(s, "kb/commitments/… — спор")
+        # жадность не пересекает начало следующего пути: два пути в одной
+        # строке режутся по отдельности, диагностика между ними остаётся
+        self.assertEqual(mi.обезличить("спор: kb/commitments/a.md, kb/commitments/b.md"),
+                         "спор: kb/commitments/…, kb/commitments/…")
+        self.assertEqual(
+            mi.обезличить("kb/commitments/a.md — строки нет (ключ vault:kb/commitments/a.md)"),
+            "kb/commitments/… — строки нет (ключ vault:kb/commitments/…)")
+
     def test_карточка_человека_тоже(self):
         """`call_project.person_card` пишет `entities/people/<slug(имени)>.md`
         тем же шагом `project`."""
@@ -331,6 +357,201 @@ class Хвосты(unittest.TestCase):
         self.assertNotIn("sk-or", текст)
         self.assertIn("не вышло: ValueError: Invalid header value", текст,
                       "причина остаётся, без ключа")
+
+
+class ЧувствительныйРежим(unittest.TestCase):
+    """Gated sensitive mode (ТЗ §15.1): журнал несёт содержимое только после
+    явного включения на срок, с предупреждением в строке; секреты — никогда."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.строка = "ledger_import: %s несёт id a, в реестре b — верю реестру" % ОБЕЩАНИЕ
+
+    def test_по_умолчанию_обезличено(self):
+        s = mi.для_журнала(self.строка, self.root)
+        self.assertNotIn("smetu", s)
+        self.assertIn("kb/commitments/…", s)
+        self.assertNotIn("чувствительный журнал", s)
+
+    def test_включено_путь_цел_токен_нет(self):
+        mi.включить_чувствительные(self.root, 30)
+        s = mi.для_журнала("%s: спор, адрес /bot%s/x" % (ОБЕЩАНИЕ, ТОКЕН), self.root)
+        self.assertIn(ОБЕЩАНИЕ, s, "в режиме путь остаётся")
+        self.assertNotIn(ТОКЕН, s, "секреты маскируются всё равно")
+        self.assertIn("<TG_TOKEN>", s)
+        self.assertIn("[чувствительный журнал до ", s, "явное предупреждение")
+
+    def test_срок_истёк_снова_обезличено(self):
+        import datetime as dt
+        mi.включить_чувствительные(self.root, 5,
+                                   now=dt.datetime.now(mi.TZ) - dt.timedelta(hours=1))
+        self.assertIsNone(mi.чувствительно(self.root))
+        self.assertNotIn("smetu", mi.для_журнала(self.строка, self.root))
+
+    def test_потолок_сутки(self):
+        import datetime as dt
+        now = dt.datetime.now(mi.TZ)
+        срок = mi.включить_чувствительные(self.root, 999999, now=now)
+        self.assertLessEqual((срок - now).total_seconds(), 24 * 3600)
+
+    def test_срок_без_таймзоны_читается(self):
+        """Рукой вписанный naive-срок не роняет `_скажи` (aware < naive —
+        TypeError), а считается сроком в поясе владельца."""
+        with open(os.path.join(self.root, mi.ЧУВСТВ_ФАЙЛ), "w") as fh:
+            fh.write("2099-01-01T00:00:00")
+        self.assertIsNotNone(mi.чувствительно(self.root))
+        self.assertIn(ОБЕЩАНИЕ, mi.для_журнала(self.строка, self.root))
+
+    def test_обезличить_снимает_префикс_режима(self):
+        """Хвост шага, родившийся под режимом, в `jobs.last_error` и Telegram
+        не притворяется чувствительным: путь там всё равно срезан."""
+        mi.включить_чувствительные(self.root, 30)
+        s = mi.обезличить(mi.для_журнала(self.строка, self.root))
+        self.assertNotIn("чувствительный журнал", s)
+        self.assertNotIn("smetu", s)
+        self.assertIn("kb/commitments/…", s)
+
+    def test_ноль_выключает(self):
+        mi.включить_чувствительные(self.root, 30)
+        self.assertIsNotNone(mi.чувствительно(self.root))
+        self.assertIsNone(mi.включить_чувствительные(self.root, 0))
+        self.assertIsNone(mi.чувствительно(self.root))
+        self.assertFalse(os.path.exists(os.path.join(self.root, mi.ЧУВСТВ_ФАЙЛ)))
+
+    def test_кривой_файл_не_роняет_и_не_включает(self):
+        with open(os.path.join(self.root, mi.ЧУВСТВ_ФАЙЛ), "w") as fh:
+            fh.write("мусор")
+        self.assertIsNone(mi.чувствительно(self.root))
+        self.assertNotIn("smetu", mi.для_журнала(self.строка, self.root))
+
+    def test_скажи_в_журнал_режет_путь_а_в_режиме_нет(self):
+        import ledger_import as li
+        прежний = mi.ROOT
+        mi.ROOT = self.root
+        try:
+            err = io.StringIO()               # не tty — как journald и лог крона
+            with contextlib.redirect_stderr(err):
+                li._скажи(self.строка)
+            self.assertNotIn("smetu", err.getvalue())
+            self.assertIn("kb/commitments/…", err.getvalue())
+            mi.включить_чувствительные(self.root, 30)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                li._скажи(self.строка)
+            self.assertIn(ОБЕЩАНИЕ, err.getvalue())
+            self.assertIn("[чувствительный журнал до ", err.getvalue())
+        finally:
+            mi.ROOT = прежний
+
+    def test_скажи_у_терминала_как_есть_только_из_main(self):
+        """Владельцу, запустившему перенос руками, нужен путь — без режима.
+        Терминал определяет `main`, не сам `_скажи`: у foreground
+        `contextd --serve` stderr тоже tty, но правка словами через
+        `call_project` — это журнал (Codex по #182)."""
+        import ledger_import as li
+        import tempfile as tf
+        vault = tf.mkdtemp()
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        with open(os.path.join(vault, "kb/commitments",
+                               "2026-10-15-prislat-smetu-olegu.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("тело без шапки\n")
+        поток = io.StringIO()
+        поток.isatty = lambda: True
+        прежние = mi.ROOT, li._У_ТЕРМИНАЛА
+        try:
+            with contextlib.redirect_stderr(поток):
+                li.main(["--root", self.root, "--vault", vault, "--dry-run"])
+            self.assertIn("smetu", поток.getvalue(), "у терминала путь целиком")
+        finally:
+            mi.ROOT, li._У_ТЕРМИНАЛА = прежние
+
+    def test_скажи_при_tty_библиотечно_всё_равно_журнал(self):
+        """Библиотечный зов (правка словами внутри contextd) обезличен и
+        при tty-stderr: флаг терминала ставит только `main`."""
+        import ledger_import as li
+        поток = io.StringIO()
+        поток.isatty = lambda: True
+        прежний = mi.ROOT
+        mi.ROOT = self.root
+        try:
+            with contextlib.redirect_stderr(поток):
+                li._скажи(self.строка)
+        finally:
+            mi.ROOT = прежний
+        self.assertNotIn("smetu", поток.getvalue())
+        self.assertIn("kb/commitments/…", поток.getvalue())
+
+    def test_имя_с_переводом_строки_не_рвёт_предупреждение(self):
+        """Линукс позволяет \n в имени файла: `_скажи` делает предупреждение
+        однострочным, и срез съедает имя целиком — иначе хвост имени жил бы
+        отдельной строкой журнала без префикса пути (Codex, круг 5)."""
+        import ledger_import as li
+        прежний = mi.ROOT
+        mi.ROOT = self.root
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                li._скажи("ledger_import: kb/commitments/Send\ninvoice to Olegu.md"
+                          " несёт id a, в реестре b — верю реестру")
+        finally:
+            mi.ROOT = прежний
+        self.assertNotIn("invoice", err.getvalue())
+        self.assertIn("kb/commitments/…", err.getvalue())
+        self.assertEqual(err.getvalue().count("\n"), 1, "одна строка журнала")
+
+    def test_перенос_предупреждает_через_скажи(self):
+        """Сквозной: карточка без фронтматтера в прогоне `run` — в журнале
+        путь срезан. Мутант «печать мимо _скажи» этот тест роняет."""
+        import ledger_import as li
+        vault = tempfile.mkdtemp()
+        os.makedirs(os.path.join(vault, "kb/commitments"))
+        with open(os.path.join(vault, "kb/commitments",
+                               "2026-10-15-prislat-smetu-olegu.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("тело без шапки\n")
+        con = mi.connect(self.root)
+        прежний = mi.ROOT
+        mi.ROOT = self.root
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                итог = li.run(con, vault)
+        finally:
+            mi.ROOT = прежний
+        self.assertEqual(итог["спорных"], 1)
+        self.assertIn("без фронтматтера", err.getvalue())
+        self.assertNotIn("smetu", err.getvalue())
+
+    def test_включатель_contextd(self):
+        прежний = mi.ROOT          # contextd.main ставит mi.ROOT = a.root
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                код = contextd.main(["--root", self.root, "--sensitive-logs", "30"])
+            self.assertEqual(код, 0)
+            self.assertIn("внимание:", buf.getvalue())
+            self.assertIsNotNone(mi.чувствительно(self.root))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                код = contextd.main(["--root", self.root, "--sensitive-logs", "0"])
+            self.assertEqual(код, 0)
+            self.assertIn("выключен", buf.getvalue())
+            self.assertIsNone(mi.чувствительно(self.root))
+        finally:
+            mi.ROOT = прежний
+
+    def test_включатель_на_кривом_root_код_1(self):
+        прежний = mi.ROOT
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                код = contextd.main(["--root", os.path.join(self.root, "нет/такого"),
+                                     "--sensitive-logs", "30"])
+        finally:
+            mi.ROOT = прежний
+        self.assertEqual(код, 1)
+        self.assertIn("не вышло:", buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -59,6 +59,29 @@ from vault_common import locked
 VAULT = os.environ.get("MARA_VAULT", os.environ.get("VAULT", "/srv/vault"))
 
 
+# Выставляет только `main()`, и только у терминала: владельцу, запустившему
+# перенос руками, нужен путь карточки. Библиотечный зов (правка словами
+# через `call_project` внутри `contextd`) флага не трогает — у foreground
+# `contextd --serve` stderr тоже терминал, но его вывод — журнал (Codex).
+_У_ТЕРМИНАЛА = False
+
+
+def _скажи(s):
+    """Предупреждение переноса — в stderr. При прямом запуске
+    `ledger_import.py` с терминала — как есть (`_У_ТЕРМИНАЛА`). Иначе —
+    pipe, запуск из скрипта, правка словами внутри `contextd` → journald —
+    `mi.для_журнала`: путь режется до каталога, пока владелец явно не
+    включил sensitive mode (ТЗ §15.1, `contextd.py --sensitive-logs`);
+    секреты маскируются всегда. Предупреждение в журнале — одна строка:
+    перевод строки внутри имени файла (линукс позволяет) рвал бы его на
+    две записи, и хвост имени жил бы строкой без префикса пути, мимо
+    среза (Codex по #182, круг 5)."""
+    if _У_ТЕРМИНАЛА:
+        print(s, file=sys.stderr)
+    else:
+        print(mi.для_журнала(s.replace("\n", "␊")), file=sys.stderr)
+
+
 def _brief():
     """mara-brief.py с дефисом в имени обычным import не берётся."""
     spec = importlib.util.spec_from_file_location(
@@ -131,8 +154,8 @@ def _карточка(vault, p):
     except OSError as e:
         # битый симлинк или каталог с именем `*.md`: перенос разовый и
         # руками, останавливать его из-за одного мусорного имени незачем
-        print("ledger_import: %s не читается (%s) — пропущен"
-              % (os.path.relpath(p, vault), e), file=sys.stderr)
+        _скажи("ledger_import: %s не читается (%s) — пропущен"
+               % (os.path.relpath(p, vault), e))
         return None
     # BOM от винды и CRLF из синка: без них `frontmatter` не матчит шапку
     # вовсе и возвращает пустоту, а карточка молча заводится объектом со
@@ -177,8 +200,7 @@ def run(con, vault=None, dry_run=False):
                 # шапки нет вовсе: завести объект со всеми полями NULL и
                 # ключом по пути хуже, чем не заводить — такая строка потом
                 # даёт дубль при первом же переименовании файла
-                print("ledger_import: %s без фронтматтера — пропущена" % rel,
-                      file=sys.stderr)
+                _скажи("ledger_import: %s без фронтматтера — пропущена" % rel)
                 итог["спорных"] += 1
                 continue
             native = ключ(fm, rel)
@@ -188,9 +210,8 @@ def run(con, vault=None, dry_run=False):
             # прямо требует ТЗ §4.3. Считаем и говорим вслух.
             if native in видели:
                 итог["спорных"] += 1
-                print("ledger_import: %s и %s несут один source_id %s — "
-                      "перенесён первый" % (видели[native], rel, native),
-                      file=sys.stderr)
+                _скажи("ledger_import: %s и %s несут один source_id %s — "
+                       "перенесён первый" % (видели[native], rel, native))
                 continue
             исход = _перенести(con, rel, fm, sha, текст, вид, таблица, поля,
                                dry_run, evidence_из_шапки=True)
@@ -321,10 +342,10 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
     native = ключ(fm, rel)
     row, проекция, спор = _спор(con, rel, native, вид, таблица)
     if спор:
-        print("ledger_import: %s стоит за объектом %s (ключ %s), а "
-              "карточка объявила source_id %s — %s, не сливаем" %
-              (rel, проекция["id"], проекция["source_native_id"],
-               native, спор), file=sys.stderr)
+        _скажи("ledger_import: %s стоит за объектом %s (ключ %s), а "
+               "карточка объявила source_id %s — %s, не сливаем" %
+               (rel, проекция["id"], проекция["source_native_id"],
+                native, спор))
         return None
     прежний = row["id"] if row else None
     # Т2.2: id по старшинству — реестр, потом шапка карточки, потом новый.
@@ -333,15 +354,15 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
     # Разошлись — верим реестру и говорим: шапку поправит `--write-ids`.
     в_шапке = (_строка(fm.get("id")) or "").strip() or None
     if прежний and в_шапке and в_шапке != прежний:
-        print("ledger_import: %s несёт id %s, в реестре %s — верю реестру"
-              % (rel, в_шапке, прежний), file=sys.stderr)
+        _скажи("ledger_import: %s несёт id %s, в реестре %s — верю реестру"
+               % (rel, в_шапке, прежний))
     новый = прежний is None
     if новый and con is not None:
         занят = _id_занят(con, таблица, в_шапке)
         if занят:
-            print("ledger_import: %s несёт id %s, а в реестре он у объекта с "
-                  "ключом %s (здесь %s) — не сливаем"
-                  % (rel, в_шапке, занят, native), file=sys.stderr)
+            _скажи("ledger_import: %s несёт id %s, а в реестре он у объекта с "
+                   "ключом %s (здесь %s) — не сливаем"
+                   % (rel, в_шапке, занят, native))
             return None
     if dry_run:
         # проба показывает и ссылки: сколько восстановила бы, сколько отвергла
@@ -361,8 +382,8 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
         # целиком. И не спорная — одно поле, набранное руками, не
         # повод ронять весь прогон.
         if сырое is not None and значения["confidence"] is None:
-            print("ledger_import: %s — confidence %r не число, "
-                  "перенесено пустым" % (rel, сырое), file=sys.stderr)
+            _скажи("ledger_import: %s — confidence %r не число, "
+                   "перенесено пустым" % (rel, сырое))
     значения["id"] = oid
     значения["source_native_id"] = native
     значения["origin_event"] = (
@@ -421,8 +442,8 @@ def _evidence_из_шапки(con, rel, oid, fm, событие, dry_run=False):
         if con.execute("select 1 from audit_events where object_kind='commitment' and "
                        "object_id=? and action='evidence_withdrawn' limit 1",
                        (oid,)).fetchone():
-            print("ledger_import: %s — ссылки evidence отозваны реестром, из шапки не "
-                  "восстанавливаются" % rel, file=sys.stderr)
+            _скажи("ledger_import: %s — ссылки evidence отозваны реестром, из шапки не "
+                   "восстанавливаются" % rel)
             return 0
     когда, принято, отвергнуто = mi.now_iso(), 0, []
     for ссылка in список:
@@ -444,8 +465,8 @@ def _evidence_из_шапки(con, rel, oid, fm, событие, dry_run=False):
                          int(m.group(2)), int(m.group(3)), "model", когда))
         принято += 1
     if отвергнуто:
-        print("ledger_import: %s — ссылок evidence без сегмента в реестре: %d "
-              "(не восстановлены)" % (rel, len(отвергнуто)), file=sys.stderr)
+        _скажи("ledger_import: %s — ссылок evidence без сегмента в реестре: %d "
+               "(не восстановлены)" % (rel, len(отвергнуто)))
     if принято and not dry_run:
         mi.audit(con, "evidence_restored", ("import", ПЕРЕНОС), "commitment", oid,
                  {"restored": принято, "rejected": len(отвергнуто), "from": "frontmatter"},
@@ -983,7 +1004,8 @@ def self_check():
     return 0
 
 
-def main():
+def main(argv=None):
+    global _У_ТЕРМИНАЛА
     ap = argparse.ArgumentParser(description="перенос карточек волта в ledger")
     ap.add_argument("--root", default=mi.ROOT)
     ap.add_argument("--vault", default=VAULT)
@@ -991,9 +1013,11 @@ def main():
     ap.add_argument("--write-ids", action="store_true", dest="write_ids",
                     help="Т2.2: вписать id из реестра в шапки карточек")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if a.self_check:
         return self_check()
+    mi.ROOT = a.root
+    _У_ТЕРМИНАЛА = sys.stderr.isatty()
     if a.write_ids:
         # Только после переноса и только всерьёз: без строк в реестре
         # вписывать нечего, а проба тут — `--dry-run` вместе с флагом.
@@ -1034,7 +1058,7 @@ def main():
     if a.dry_run:
         история_, замечания = история(a.vault)
         for z in замечания:
-            print("ledger_import: " + z, file=sys.stderr)
+            _скажи("ledger_import: " + z)
         print("история правок: " + ", ".join(
             "%s %d" % (k, история_[k]) for k in (
                 "по пути правок", "рукой без события", "без правок",
@@ -1052,7 +1076,7 @@ def main():
     elif con is not None:
         счёт, замечания = сверка(con, a.vault)
         for z in замечания:
-            print("ledger_import: " + z, file=sys.stderr)
+            _скажи("ledger_import: " + z)
         print(строка_сверки(счёт))
         if not a.dry_run and not сошлось(счёт):
             return 1
