@@ -4,7 +4,7 @@
 нему потом видно, что запись была и куда делась. Сверка чинит то, что чинится
 однозначно, и только докладывает про то, где нужен человек.
 """
-import os, sys, io, json, glob, time, subprocess, tempfile, unittest
+import os, sys, io, json, glob, time, shutil, subprocess, tempfile, unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 
@@ -803,7 +803,17 @@ class Сверка(unittest.TestCase):
 
     def test_чистое_состояние_не_даёт_ошибок(self):
         root, con, eid, sha, path = стенд(audio_until=день(30))
-        находки = rc.run(con, root, vault=None)
+        # Носители бэкапа — свои, со свежим архивом: без `targets` `run`
+        # берёт `MARA_CORE_TARGETS` хоста, и на doctor, где шара соседней
+        # машины не принимала архив месяц, тест падал на настоящей находке
+        # `бэкап-ядра-отвалился` (гейт 2026-10-19). На CI он молчал лишь
+        # потому, что там этих путей нет.
+        носитель = tempfile.mkdtemp(prefix="mara-ret-core-")
+        self.addCleanup(shutil.rmtree, носитель, True)
+        open(os.path.join(носитель, "core-2026-09-01.tar.gz.gpg"), "wb").write(b"gpg")
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"     # см. mi.смонтирован
+        self.addCleanup(os.environ.pop, "MARA_BACKUP_ALLOW_SAME_DEV", None)
+        находки = rc.run(con, root, vault=None, targets=[носитель])
         self.assertEqual([f for f in находки if f["level"] == "error"], [])
         self.assertEqual(rc.код(находки), 0, "на здоровой системе крон молчит")
 

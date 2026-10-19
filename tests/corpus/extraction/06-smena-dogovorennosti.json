@@ -57,5 +57,56 @@
    "кто_не_тот": 0,
    "срок_не_тот": 0
   }
+ },
+ "живой": {
+  "model": "qwen3.5:9b",
+  "prompt_version": 3,
+  "rules_version": 3,
+  "owner_named": true,
+  "date": "2026-10-19",
+  "response": {
+   "requests": [],
+   "commitments": [],
+   "decisions": [
+    {
+     "action": "встретиться в среду",
+     "explicit": true,
+     "deadline_phrase": "в среду",
+     "confidence": 1.0,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ]
+    }
+   ],
+   "open_questions": [],
+   "changed_instructions": [
+    {
+     "action": "встретиться в пятницу",
+     "explicit": true,
+     "deadline_phrase": "в пятницу",
+     "confidence": 1.0,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ],
+     "supersedes": "встретиться в пятницу",
+     "new_state": "встретиться в среду"
+    }
+   ],
+   "people_mentioned": [],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 0,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
  }
 }
