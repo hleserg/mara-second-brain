@@ -76,7 +76,8 @@
   },
   "mara.command.correction.v1": {
     "method": "POST",
-    "path": "/v1/ingest/event",
+    "path": "/v1/command/correction",
+    "legacy_path": "/v1/ingest/event",
     "scope": "correction",
     "request": {
       "kind": "str",
@@ -125,6 +126,7 @@
       "ambiguous?": "list",
       "ambiguous_more?": "int",
       "ambiguous_ids?": "list",
+      "ambiguous_versions?": "list",
       "open?": "list",
       "open_more?": "int",
       "created?": "str"

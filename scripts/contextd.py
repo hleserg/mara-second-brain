@@ -474,6 +474,14 @@ def scope_ok(con, device_id, kind):
 КОНТРАКТ_ПАКЕТА = "mara.context.now.v1"
 КОНТРАКТ_СПРАВКИ = "mara.context.query.v1"
 КОНТРАКТ_ПРАВКИ = "mara.command.correction.v1"
+# Т2.3, хвост (ADR-0003, дополнение 2026-10-19): доменная команда — своим
+# путём. Он принимает ту же правку, что `/v1/ingest/event` с `kind:
+# correction`, но строже: `id` без `expected_version` — 400 (версия есть в
+# списке пакета, `vN`, и в каждом ответе правки), а конфликт версий — HTTP
+# `409` с тем же JSON, что раньше шёл под 200. Старый путь остаётся как
+# есть: телефон и кнопки утра (`telegram_buttons`) шлют события, а не
+# команды, и у них 4xx терминален.
+ПУТЬ_ПРАВКИ = "/v1/command/correction"
 ЗАПРОС_О_МАКС = 200                     # знаков `about` в справке
 КЛЮЧ_МАКС = 128                         # знаков ключа идемпотентности (Т2.9)
 
@@ -1085,6 +1093,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def повтор(self, path, команда, было, data):
+        """Идемпотентный повтор: тот же JSON, что в первый раз, и тот же код —
+        конфликт на пути команды и при повторе `409`, иначе клиент, не
+        дождавшийся первого ответа, принял бы отказ за успех."""
+        код = код_правки(команда, было)
+        if код == 200:
+            print(log_line("POST", path, код, data) + " replay", flush=True)
+        return self.say(код, было, ещё={"Idempotent-Replay": "true"}, поля=data)
+
     def отлуп(self, code, текст, ещё=None):
         """Ответ на тело, которое мы отказались читать.
 
@@ -1352,9 +1369,16 @@ class Handler(BaseHTTPRequestHandler):
             if not принять_здоровье(con, dev, здоровье):
                 return self.say(200, {"ok": True, "stale": True})
             return self.say(200, {"ok": True})
-        if p.path in ("/v1/ingest/event", "/v1/ingest/message", "/v1/ingest/email"):
-            kind = {"/v1/ingest/message": "message",
-                    "/v1/ingest/email": "email"}.get(p.path) or data.get("kind") or "event"
+        if p.path in (ПУТЬ_ПРАВКИ, "/v1/ingest/event", "/v1/ingest/message",
+                      "/v1/ingest/email"):
+            команда = p.path == ПУТЬ_ПРАВКИ
+            if команда and data.get("kind") not in (None, "correction"):
+                # путь задаёт вид: `kind: call` на пути команды — ошибка
+                # клиента, а не событие в обход проверок правки
+                return self.say(400, {"error": "на %s только kind=correction"
+                                               % ПУТЬ_ПРАВКИ}, поля=data)
+            kind = {"/v1/ingest/message": "message", "/v1/ingest/email": "email",
+                    ПУТЬ_ПРАВКИ: "correction"}.get(p.path) or data.get("kind") or "event"
             беда = плохой_вид(kind)
             if беда:
                 # Без этой проверки вид ложился в `events.kind` как есть, и
@@ -1441,6 +1465,14 @@ class Handler(BaseHTTPRequestHandler):
                 err = call_project.check_correction(payload or {})
                 if err:
                     return self.say(400, {"error": err}, поля=data)
+                if команда and (payload or {}).get("id") not in (None, "") and (
+                        (payload or {}).get("expected_version") in (None, "")):
+                    # правка по коду без версии на пути команды — отказ, а не
+                    # «последняя побеждает»: версия стоит в списке пакета
+                    # (`#код vN`) и в ответе прошлой правки (ADR-0003, п. 4)
+                    return self.say(400, {"error": "с id нужна expected_version — "
+                                                   "версия из списка (vN) или из "
+                                                   "прошлого ответа правки"}, поля=data)
             # Квитанция идемпотентности (ТЗ §4.4, Т2.9): клиент прислал
             # `idempotency_key` — повтор с тем же ключом получает тот же
             # ответ, что и первый, а не новый расчёт. Дедуп события это не
@@ -1456,8 +1488,7 @@ class Handler(BaseHTTPRequestHandler):
                                                % КЛЮЧ_МАКС}, поля=data)
             было = квитанция(con, data["device_id"], ключ) if ключ else None
             if было is not None:
-                print(log_line("POST", p.path, 200, data) + " replay", flush=True)
-                return self.say(200, было, ещё={"Idempotent-Replay": "true"})
+                return self.повтор(p.path, команда, было, data)
             try:
                 # событие и квитанция — одной короткой транзакцией (§5.2
                 # п.1). Правка словами — вне её: она ждёт флок волта, который
@@ -1511,7 +1542,7 @@ class Handler(BaseHTTPRequestHandler):
                 было = квитанция(con, data["device_id"], ключ) if ключ else None
                 if было is None:
                     raise
-                return self.say(200, было, ещё={"Idempotent-Replay": "true"})
+                return self.повтор(p.path, команда, было, data)
             except _ПравокМного as много:
                 # Плагин показывает текст отказа Маре как есть («doctor не
                 # принял правку: …»), поэтому в нём сказано, сколько ждать.
@@ -1547,8 +1578,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "and idempotency_key=?",
                                 (json.dumps(ответ, ensure_ascii=False),
                                  data["device_id"], ключ))
-            print(log_line("POST", p.path, 200, data), flush=True)
-            return self.say(200, ответ)
+            код = код_правки(команда, ответ)
+            if код == 200:
+                # отказы (и 409 среди них) `say` печатает сам
+                print(log_line("POST", p.path, код, data), flush=True)
+            return self.say(код, ответ, поля=data)
         if p.path == "/v1/context/query":
             # Т6.2: пакеты по сущности — по запросу, инструментом Мары
             # `mara_context` (ADR-0008, решение 1 с правкой 2026-10-14): кто
@@ -1665,6 +1699,15 @@ def квитанция(con, device_id, ключ):
     row = con.execute("select outcome from ingest_attempts where device_id=? and "
                       "idempotency_key=?", (device_id, ключ)).fetchone()
     return json.loads(row["outcome"]) if row else None
+
+
+def код_правки(команда, ответ):
+    """HTTP-код ответа на правку. На пути команды конфликт версий — `409`
+    (ADR-0003, дополнение 2026-10-19), на legacy-пути всё, что принято, —
+    `200`, и клиент читает `applied.error` сам."""
+    if команда and ((ответ or {}).get("applied") or {}).get("error") == "version_conflict":
+        return 409
+    return 200
 
 
 def blob_row(con, sha256):

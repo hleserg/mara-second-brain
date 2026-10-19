@@ -89,8 +89,9 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
             "открытых. item — теми же словами, что в списке «Открытые "
             "обязательства»; если такого нет и status=open — заведётся новая. "
             "Два похожих — сервер попросит уточнить, переспроси владельца. "
-            "У пункта списка есть код #xxxxxxxx — передай его в id, тогда правка "
-            "ляжет точно в эту карточку.")
+            "У пункта списка есть код #xxxxxxxx и версия vN — передай их в id и "
+            "expected_version, тогда правка ляжет точно в эту карточку; id без "
+            "версии doctor не принимает.")
 
 СХЕМА = {
     "name": "mara_correction",
@@ -110,10 +111,13 @@ URL = os.environ.get("MARA_CONTEXT_URL", "http://127.0.0.1:8788")
                      "description": "что ещё сказал владелец, одной строкой"},
             "id": {"type": "string",
                    "description": "код #xxxxxxxx из списка или полный id карточки; "
-                                  "с ним правка ложится точно в неё, без поиска по словам"},
+                                  "с ним правка ложится точно в неё, без поиска по "
+                                  "словам. Вместе с id обязательна expected_version"},
             "expected_version": {"type": "integer", "minimum": 1,
-                                 "description": "версия карточки из прошлого ответа, если "
-                                                "есть; разошлась — сервер не правит, а "
+                                 "description": "версия карточки: число после v в "
+                                                "строке списка («#5479d088 v3» → 3) или "
+                                                "из прошлого ответа правки. Обязательна "
+                                                "при id; разошлась — сервер не правит, а "
                                                 "возвращает конфликт"},
         },
         "required": ["item"],
@@ -305,6 +309,11 @@ class Брокер:
                  timeout_справки=TIMEOUT_СПРАВКИ, pin=None):
         base = url.rstrip("/")
         self.url = base + "/v1/context/bootstrap"
+        # Т2.3, хвост: правка — доменной командой (`/v1/command/correction`):
+        # с id обязательна версия, конфликт версий приходит как HTTP 409.
+        # Старый путь событий остаётся запасным: doctor, выкаченный раньше
+        # плагина, отвечает на новый путь 404, и правка уходит по-старому
+        self.url_правки = base + "/v1/command/correction"
         self.url_событий = base + "/v1/ingest/event"
         self.url_справки = base + "/v1/context/query"
         self.token, self.pin = token, pin
@@ -395,6 +404,13 @@ class Брокер:
         payload = {k: args.get(k) for k in ("item", "status", "due", "note", "id",
                                             "expected_version")
                    if args.get(k) not in (None, "")}
+        if "id" in payload and "expected_version" not in payload:
+            # контракт команды (ADR-0003, дополнение 2026-10-19): doctor
+            # ответил бы 400 — говорим то же, не ходя в сеть, и называем,
+            # где версию взять
+            return ("с id нужна expected_version — число после v в строке списка "
+                    "(«#%s v3» → 3) или из прошлого ответа правки; без неё правку "
+                    "по коду не шлю" % str(payload["id"]).lstrip("#")[-8:])
         # source_id — содержимое плюс минута: повтор вызова моделью в ту же
         # минуту — дубль, та же правка через час — новое событие
         # `expected_version` в ключе обязателен: ответ на конфликт сам велит
@@ -408,18 +424,9 @@ class Брокер:
                        (ключ + "|" + time.strftime("%Y-%m-%dT%H:%M")).encode("utf-8")).hexdigest(),
                    "occurred_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                    "payload": payload}
-        try:
-            with self._open(self._запрос(self.url_событий, событие),
-                            timeout=self.timeout_правки) as r:
-                сырой = r.read()
-        except urllib.error.HTTPError as e:
-            try:
-                msg = json.loads(e.read() or b"{}").get("error")
-            except (ValueError, AttributeError):
-                msg = None
-            return "doctor не принял правку: %s" % (msg or e.code)
-        except Exception as e:
-            return "не дозвонился до doctor: %s" % _причина(e)
+        сырой = self._отправить(событие)
+        if isinstance(сырой, str):
+            return сырой
         with self._lock:
             self._свежесть = None     # список изменился — следующий ход идёт за свежим
         try:
@@ -464,6 +471,34 @@ class Брокер:
             текст += " [id #%s, версия %s]" % (str(applied["id"])[-8:], applied["version"])
         return текст
 
+
+    def _отправить(self, событие):
+        """Тело ответа doctor на правку, или готовый текст для Мары, если
+        ответа по существу нет. 409 — ответ по существу: конфликт версий
+        приезжает тем же JSON, что раньше под 200 (ADR-0003, п. 4), и
+        разбирается дальше как он. 404 на пути команды — doctor старее
+        плагина: один повтор по пути событий, где та же правка принималась
+        всегда."""
+        url = self.url_правки
+        for попытка in (1, 2):
+            try:
+                with self._open(self._запрос(url, событие),
+                                timeout=self.timeout_правки) as r:
+                    return r.read()
+            except urllib.error.HTTPError as e:
+                тело = e.read() or b"{}"
+                if e.code == 409:
+                    return тело
+                if e.code == 404 and попытка == 1 and url == self.url_правки:
+                    url = self.url_событий
+                    continue
+                try:
+                    msg = json.loads(тело).get("error")
+                except (ValueError, AttributeError):
+                    msg = None
+                return "doctor не принял правку: %s" % (msg or e.code)
+            except Exception as e:
+                return "не дозвонился до doctor: %s" % _причина(e)
 
     def справка(self, args):
         """Инструмент mara_context: что открыто по человеку, проекту или слову —
@@ -561,7 +596,7 @@ def _demo():
 
     def живой(req, timeout=None):
         счёт["n"] += 1
-        if req.get_full_url().endswith("/v1/ingest/event"):
+        if req.get_full_url().endswith("/v1/command/correction"):
             assert timeout == 0.5, timeout
             тело = json.loads(req.data)
             assert тело["kind"] == "correction" and тело["source"] == "mara", тело
@@ -658,6 +693,43 @@ def _demo():
     текст = б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088",
                       "expected_version": 2})
     assert "конфликт версий" in текст and "версия 3" in текст, текст
+    # Т2.3, хвост: тот же конфликт под HTTP 409 разбирается так же
+    def конфликт409(req, timeout=None):
+        assert req.get_full_url().endswith("/v1/command/correction"), req.get_full_url()
+        raise urllib.error.HTTPError(req.full_url, 409, "conflict", {}, io.BytesIO(
+            json.dumps({"event_id": "c", "duplicate": False, "applied": {
+                "found": True, "error": "version_conflict", "title": "смета",
+                "expected_version": 2, "current_version": 3,
+                "current": {"status": "done"}}}).encode()))
+    б._open = конфликт409
+    текст = б.правка({"item": "смета", "status": "cancelled", "id": "#5479d088",
+                      "expected_version": 2})
+    assert "конфликт версий" in текст and "версия 3" in текст, текст
+    # id без версии — отказ на месте, в сеть не ходим
+    def нельзя(req, timeout=None):
+        raise AssertionError("правка по коду без версии ушла в сеть")
+    б._open = нельзя
+    текст = б.правка({"item": "смета", "status": "done", "id": "#5479d088"})
+    assert "expected_version" in текст and "5479d088" in текст, текст
+    # doctor старее плагина: 404 на пути команды — один повтор по пути событий
+    пути = []
+
+    def старый(req, timeout=None):
+        пути.append(req.get_full_url().rsplit("/", 2)[-2:])
+        if req.get_full_url().endswith("/v1/command/correction"):
+            raise urllib.error.HTTPError(req.full_url, 404, "nf", {}, io.BytesIO(b"{}"))
+        return Ответ(json.dumps({"event_id": "c", "duplicate": False,
+                                 "applied": {"found": True, "text": "ок по-старому"}}).encode())
+    б._open = старый
+    assert б.правка({"item": "смета", "status": "done"}) == "ок по-старому"
+    assert пути == [["command", "correction"], ["ingest", "event"]], пути
+    # 404 по пути событий — уже отказ, третьего пути нет
+    def нет_нигде(req, timeout=None):
+        пути.append(1)
+        raise urllib.error.HTTPError(req.full_url, 404, "nf", {}, io.BytesIO(b"{}"))
+    пути.clear()
+    б._open = нет_нигде
+    assert "404" in б.правка({"item": "смета", "status": "done"}) and len(пути) == 2, пути
     # повтор «как велено», с другой версией, — другое событие, не дубль
     ключи = []
 
