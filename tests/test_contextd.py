@@ -358,6 +358,71 @@ class Api(unittest.TestCase):
         self.assertTrue(снова["duplicate"])
         self.assertIsNone(снова["applied"], "дубль второй раз не применяется")
 
+    def test_путь_команды_версия_обязательна_и_конфликт_409(self):
+        """Т2.3, хвост (ADR-0003, дополнение 2026-10-19): `/v1/command/correction`
+        принимает ту же правку (волт у класса общий — заголовок свой), но `id` без `expected_version` — 400, конфликт
+        версий — 409 с тем же JSON, и повтор по ключу идемпотентности
+        воспроизводит 409. Legacy-путь по-прежнему отвечает 200."""
+        with open(os.path.join(self.vault, "kb/commitments", "k409.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("---\ntitle: сверить смету k409\nstatus: open\n---\n")
+        путь = contextd.ПУТЬ_ПРАВКИ
+        code, r = self.post(путь, {
+            "kind": "call", "source": "mara", "source_id": "k409-kind",
+            "payload": {"item": "сверить смету k409", "note": "x"}})
+        self.assertEqual(code, 400, "путь задаёт вид: чужой kind — отказ")
+        code, r = self.post(путь, {
+            "source": "mara", "source_id": "k409-1",
+            "payload": {"item": "сверить смету k409", "note": "первая правка"}})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r["contract"], contextd.КОНТРАКТ_ПРАВКИ)
+        ид, версия = r["applied"]["id"], r["applied"]["version"]
+        self.assertTrue(ид and isinstance(версия, int), r["applied"])
+        code, r = self.post(путь, {
+            "source": "mara", "source_id": "k409-2",
+            "payload": {"id": ид, "status": "done"}})
+        self.assertEqual(code, 400, "id без версии на пути команды — отказ")
+        self.assertIn("expected_version", r["error"])
+        self.assertEqual(self.con.execute(
+            "select count(*) from events where source_id='k409-2'").fetchone()[0], 0,
+            "отказ контракта — событие не записано")
+        конфликт = {"source": "mara", "source_id": "k409-3",
+                    "payload": {"id": ид, "status": "done",
+                                "expected_version": версия + 5}}
+        req = urllib.request.Request(self.base + путь, method="POST",
+                                     data=json.dumps(конфликт).encode("utf-8"))
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.token)
+        req.add_header("Idempotency-Key", "k409-key")
+        ответы = []
+        for _ in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    ответы.append((resp.status, json.loads(resp.read()), resp.headers))
+            except urllib.error.HTTPError as e:
+                ответы.append((e.code, json.loads(e.read()), e.headers))
+        (код1, тело1, з1), (код2, тело2, з2) = ответы
+        self.assertEqual(код1, 409, тело1)
+        self.assertEqual(тело1["applied"]["error"], "version_conflict")
+        self.assertEqual(тело1["applied"]["current_version"], версия)
+        self.assertFalse(тело1["duplicate"])
+        self.assertIsNone(з1.get("Idempotent-Replay"))
+        self.assertEqual((код2, тело2), (409, тело1), "повтор воспроизводит отказ")
+        self.assertEqual(з2.get("Idempotent-Replay"), "true")
+        code, r = self.post("/v1/ingest/event", {
+            "kind": "correction", "source": "mara", "source_id": "k409-4",
+            "payload": {"id": ид, "status": "done", "expected_version": версия + 5}})
+        self.assertEqual(code, 200, "legacy-путь: конфликт под 200, как раньше")
+        self.assertEqual(r["applied"]["error"], "version_conflict")
+        code, r = self.post("/v1/ingest/event", {
+            "kind": "correction", "source": "mara", "source_id": "k409-5",
+            "payload": {"id": ид, "status": "done"}})
+        self.assertEqual(code, 200, "legacy-путь: id без версии принимается")
+        self.assertIn("open → done", r["applied"]["text"])
+        with open(os.path.join(self.vault, "kb/commitments", "k409.md"),
+                  encoding="utf-8") as fh:
+            self.assertIn("status: done", fh.read())
+
     def test_правка_и_удаление_сообщения_ревизии_а_не_потери(self):
         """ТЗ §11: правки и удаления — ревизии и надгробия. Три события в базе,
         одно состояние наружу через mara_ingest.message_state."""

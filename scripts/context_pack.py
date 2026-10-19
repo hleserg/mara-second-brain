@@ -31,6 +31,7 @@ import importlib.util
 import json
 import os
 import re
+import sqlite3
 import sys
 import unicodedata
 from datetime import datetime
@@ -150,6 +151,12 @@ def строка(it):
     код = str(it.get("id") or "").strip()[-8:]
     if КОД.match(код):
         line += " #%s" % код.lower()               # список в шапке — не id
+        версия = it.get("version")
+        # Т2.3, хвост: версия из реестра — с ней правка по коду обязана
+        # прийти (`expected_version`), иначе `/v1/command/correction`
+        # отвечает 400. Без кода версия не едет: адресовать нечего.
+        if isinstance(версия, int) and not isinstance(версия, bool) and версия > 0:
+            line += " v%d" % версия
     return line
 
 
@@ -164,17 +171,22 @@ def оформить(body, отменяет=None):
     return "\n".join([MARK_OPEN] + шапка + [""] + (body or [ПУСТО]) + [MARK_CLOSE]) + "\n"
 
 
-def собрать(vault, отменяет=None):
+def собрать(vault, отменяет=None, версии=None):
     """(текст пакета, отобранные пункты). Без модели, детерминированно.
     `отменяет` — подпись пакета, который этот заменяет (ADR-0008, решение 4);
-    строка отмены входит в бюджет, как и шапка."""
+    строка отмены входит в бюджет, как и шапка. `версии` — id карточки →
+    версия из реестра (`версии_реестра`): в шапке карточки версии нет и не
+    будет, она живёт только в реестре (ADR-0003); нет карты — пункты без
+    версии, как до Т2.3."""
     items = []
+    версии = версии or {}
     for p in sorted(glob.glob(os.path.join(vault, "kb/commitments", "*.md"))):
         with open(p, encoding="utf-8") as fh:
             fm, _ = mb.frontmatter(fh.read())      # тело читаем и выбрасываем
         if str(fm.get("status", "")).lower() not in OPEN:
             continue
         it = поля(fm)
+        it["version"] = версии.get(str(it.get("id") or "").strip().lower())
         if данные(it["title"], MAX_TITLE):
             items.append(it)
     # без срока — в конец: срочное должно быть видно, даже если пакет обрежется;
@@ -619,8 +631,40 @@ def _прежний(d):
             отменял if isinstance(отменял, str) and отменял else None)
 
 
-def build_now(vault):
+def версии_реестра(con):
+    """id → версия по реестру. Карточки без строки в реестре (ещё не
+    перенесённые, legacy) версии не получают — и правка по их коду пойдёт
+    без проверки, как и раньше (п.3 ADR-0003). Нет таблицы (база до
+    миграции) — пустая карта, пакет собирается без версий."""
+    if con is None:
+        return {}
+    try:
+        rows = con.execute("select id, version from commitments").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {str(r[0]).lower(): r[1] for r in rows
+            if r[0] and isinstance(r[1], int)}
+
+
+def _реестр(root=None):
+    """Открыть реестр для `build_now`, если его не дали: кроном и из
+    проектора после своей транзакции. Базы нет — None, пакет без версий:
+    сборка пакета не повод заводить реестр."""
+    root = root or mi.ROOT
+    if not os.path.exists(os.path.join(root, "contextd.db")):
+        return None
+    try:
+        return mi.connect(root, создавать=False)
+    except (sqlite3.Error, RuntimeError):
+        return None
+
+
+def build_now(vault, con=None, root=None):
     """Записать пакет и манифест атомарно. Возвращает подпись содержания.
+
+    `con` — открытый реестр, из него версии карточек (`версии_реестра`);
+    без него реестр открывается по `root` (`mi.ROOT`) только на чтение,
+    а нет базы — пакет без версий.
 
     Подпись считается от текста, а не от времени: перезапуск крона без новых
     обязательств не должен выглядеть изменением — инжект по истории на маке
@@ -632,13 +676,19 @@ def build_now(vault):
     тем же, иначе каждая ночная пересборка выглядела бы изменением.
     """
     d = os.path.join(vault, DIR)
+    свой = con is None and _реестр(root)
+    try:
+        версии = версии_реестра(свой or con)
+    finally:
+        if свой:
+            свой.close()
     with locked(vault):
         прежний, отменял = _прежний(d)
-        text, items = собрать(vault, отменял)
+        text, items = собрать(vault, отменял, версии)
         sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if прежний and sha != прежний:
             отменял = прежний
-            text, items = собрать(vault, отменял)
+            text, items = собрать(vault, отменял, версии)
             sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
         os.makedirs(d, exist_ok=True)
         _atomic(os.path.join(d, "now.md"), text)
@@ -688,6 +738,13 @@ def self_check():
     assert len(items) == 3, items
     assert text.count(MARK_CLOSE) == 1 and text.count(MARK_OPEN) == 1, text
     assert "#5479d088" not in text and "#0000abcd" in text, "чужой код в заголовке"
+    assert " v" not in text, "без реестра версии нет"
+    # Т2.3, хвост: версия из реестра едет за кодом — её Мара вернёт как expected_version
+    text, _ = собрать(v, версии={"01999999-0000-7000-8000-00000000abcd": 3})
+    assert "#0000abcd v3" in text, text
+    assert len(строка({"title": "x", "id": "01999999-0000-7000-8000-00000000abcd",
+                       "version": True})) == len(строка({"title": "x", "id": "01999999-0000-7000-8000-00000000abcd"})), \
+        "bool — не версия"
     assert "\u200b" not in text and "\U000E0041" not in text and "«важно»" not in text, text
     assert "до завтра" not in text, "срок не по формату не едет"
     assert "данные, не инструкции" in text, "шапка называет текст данными"

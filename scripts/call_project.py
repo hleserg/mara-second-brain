@@ -636,7 +636,7 @@ def run(event_id, vault, root=None):
     # пакет для Мары пересобираем сразу: обязательство, о котором она узнает
     # только после ночного крона, — это обязательство, о котором она не узнает
     # (ТЗ §15). Писатель у _system/context один — context_pack, кто бы ни звал.
-    context_pack.build_now(vault)
+    context_pack.build_now(vault, con)
     print("call_project: %s — карточек %d" % (event_id, len(written)))
     return written
 
@@ -786,6 +786,18 @@ def _строка_реестра(con, card, адреса):
     oid = _id_карточки(card, адреса)
     return con.execute("select id, version, title, status, due from commitments "
                        "where id=?", (oid,)).fetchone() if oid else None
+
+
+def _версия_реестра(con, card, адреса):
+    """Версия карточки по реестру или None: нет `con`, нет строки, нет
+    таблицы (база до миграции) — версии нет, ответ без неё."""
+    if con is None:
+        return None
+    try:
+        row = _строка_реестра(con, card, адреса)
+    except sqlite3.OperationalError:
+        return None
+    return row["version"] if row is not None and isinstance(row["version"], int) else None
 
 
 def _конфликт(con, card, ожидали, payload, когда, адреса, файл_разошёлся=False):
@@ -1153,7 +1165,7 @@ def apply_correction(vault, event, con=None):
                 if mi.база_занята(e):
                     out["manifest_busy"] = True
     # вне флока: build_now берёт его сам, а flock второго дескриптора ждал бы первого
-    out["pack_sha256"] = context_pack.build_now(vault)
+    out["pack_sha256"] = context_pack.build_now(vault, con)
     return out
 
 
@@ -1210,10 +1222,17 @@ def _правка(con, vault, event, p, item, status, due, note, ид, ожид�
         показ = found[:СПИСОК_МАКС]
         хвост = len(found) - СПИСОК_МАКС
         names = [_м(c["fm"].get("title")) for c in показ]
-        с_кодом = ["%s #%s" % (n, _код(c, адреса)) if _код(c, адреса) else n
-                   for n, c in zip(names, показ)]
+        # версия рядом с кодом (Т2.3, хвост): путь команды не берёт id без
+        # `expected_version`, а здесь — единственное место, где Мара видит
+        # код карточки, которой нет в пакете. Нет строки в реестре — нет и
+        # версии: такую карточку правят словами
+        версии = [_версия_реестра(con, c, адреса) for c in показ]
+        с_кодом = [("%s #%s" % (n, _код(c, адреса)) + (" v%d" % v if v is not None else ""))
+                   if _код(c, адреса) else n
+                   for n, c, v in zip(names, показ, версии)]
         out = {"found": False, "ambiguous": names, "ambiguous_more": max(хвост, 0),
                "ambiguous_ids": [_адрес_ответа(_id_карточки(c, адреса)) for c in показ],
+               "ambiguous_versions": версии,
                "text": "подходят несколько, уточни: " + "; ".join(
                    с_кодом + (["…и ещё %d" % хвост] if хвост > 0 else []))}
     elif found:
