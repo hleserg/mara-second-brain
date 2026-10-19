@@ -1,7 +1,7 @@
 """Т0.9 п. 5, threat-model п. 9: запросы doctor к сервисам узла подписаны
 общим секретом. Прокси агента узла (`node_agent.Прокси`) пересылает только
-подписанное и подписывает ответ; шаги doctor (`call_asr`, `call_extract`)
-отдают аудио и текст только узлу, доказавшему секрет, и не принимают ответ
+подписанное и подписывает ответ; шаг doctor `call_asr`
+отдаёт аудио только узлу, доказавшему секрет, и не принимают ответ
 без верной подписи."""
 import contextlib, http.client, io, json, os, socket, sys, threading, time, unittest
 import urllib.error, urllib.request
@@ -12,7 +12,6 @@ from unittest import mock
 sys.path.insert(0, СКРИПТЫ)
 import node_agent
 import call_asr
-import call_extract
 
 БЕЗ_ПРОКСИ = {k: "" for k in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
                                "all_proxy", "ALL_PROXY")}
@@ -174,10 +173,6 @@ class Прокси(_Стенд):
         with mock.patch.object(call_asr, "СЕКРЕТ_УЗЛА", СЕКРЕТ):
             сегменты = call_asr.transcribe_spans(self.url, [(0, 1000)], lambda a, b: b"wav")
         self.assertEqual([с["text"] for с in сегменты], ["алло, это Анна"])
-        with mock.patch.object(call_extract, "СЕКРЕТ_УЗЛА", СЕКРЕТ):
-            self.assertEqual(call_extract.ask_model("Анна: пришли смету", base_url=self.url),
-                             {"requests": [], "commitments": []})
-        self.assertEqual([п for п, _, _ in self.llm.пришло], ["/api/generate"])
 
     def test_без_подписи_и_с_чужим_секретом_401_сервис_не_тронут(self):
         self.assertEqual(self.сырой("/transcribe"), 401)
@@ -455,7 +450,7 @@ class Агент(unittest.TestCase):
     def test_пересылка_не_короче_шагов(self):
         """Прокси не рвёт генерацию раньше шага doctor (ревью, P2-2)."""
         self.assertGreaterEqual(node_agent.ПЕРЕСЫЛКА_С,
-                                max(call_asr.HTTP_TIMEOUT, call_extract.HTTP_TIMEOUT))
+                                call_asr.HTTP_TIMEOUT)
 
     def test_отказ_сердцебиения_не_гасит_прокси(self):
         self.assertTrue(node_agent.выходить_ли(401, None))
@@ -643,15 +638,10 @@ class TLSПрокси(unittest.TestCase):
             self.assertFalse(contextd.проба("https://127.0.0.1:%d" % пусто, пин=self.пин)[0])
 
     def test_шаги_берут_пин_из_окружения(self):
-        """`call_asr` и `call_extract` отдают `MARA_NODE_PIN` в `к_узлу`."""
+        """`call_asr` отдаёт `MARA_NODE_PIN` в `к_узлу`."""
         with mock.patch.object(node_agent, "к_узлу", return_value=b'{"text": ""}') as узел, \
              mock.patch.object(call_asr, "ПИН_УЗЛА", self.пин):
             call_asr.transcribe_spans(self.url, [(0, 1000)], lambda a, b: b"wav")
-        self.assertEqual(узел.call_args.kwargs["пин"], self.пин)
-        with mock.patch.object(node_agent, "к_узлу",
-                               return_value=b'{"response": "{}"}') as узел, \
-             mock.patch.object(call_extract, "ПИН_УЗЛА", self.пин):
-            call_extract.ask_model("текст", base_url=self.url)
         self.assertEqual(узел.call_args.kwargs["пин"], self.пин)
 
     def test_выпуск_для_узла(self):

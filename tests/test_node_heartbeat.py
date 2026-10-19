@@ -102,21 +102,19 @@ class Причины(_База):
     def test_пауза(self):
         self.отчитаться(accept_jobs=False)
         self.assertEqual(contextd.недоступные(self.con),
-                         {"asr": "node_paused:bigpc", "extract": "node_paused:bigpc"})
+                         {"asr": "node_paused:bigpc"})
 
     def test_нет_сервиса(self):
         self.отчитаться(capabilities=["llm"])
-        self.assertEqual(contextd.недоступные(self.con),
-                         {"asr": "node_no_capability:bigpc", "extract": None})
+        self.assertEqual(contextd.недоступные(self.con), {"asr": "node_no_capability:bigpc"})
 
     def test_непроверенное_не_держит(self):
         """Ревью Т7.2, P2: агенту не задали адрес STT — он про него молчит, и
         «нет возможности» не ставится: судит проба doctor, как без агента."""
         self.отчитаться(capabilities=[], checked=["llm"])
-        self.assertEqual(contextd.недоступные(self.con),
-                         {"asr": None, "extract": "node_no_capability:bigpc"})
-        self.отчитаться(capabilities=[], checked=[])
-        self.assertEqual(contextd.недоступные(self.con), {"asr": None, "extract": None})
+        self.assertEqual(contextd.недоступные(self.con), {"asr": None})
+        self.отчитаться(capabilities=[], checked=["asr"])
+        self.assertEqual(contextd.недоступные(self.con), {"asr": "node_no_capability:bigpc"})
 
     def test_всё_хорошо_не_отменяет_пробу(self):
         """Узел сказал «беру», но с doctor адрес не отвечает — ждём, как
@@ -132,7 +130,7 @@ class Причины(_База):
     def test_устаревшее_сердцебиение_не_держит(self):
         self.отчитаться(accept_jobs=False)
         self.состарить("bigpc", 3600)
-        self.assertEqual(contextd.недоступные(self.con), {"asr": None, "extract": None})
+        self.assertEqual(contextd.недоступные(self.con), {"asr": None})
 
     def test_такт_не_берёт_работу_на_паузе(self):
         eid, _ = mi.put_event(self.con, {"kind": "call", "source": "phone",

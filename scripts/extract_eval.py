@@ -47,7 +47,7 @@ requester «на regression corpus». Корпус — синтетически�
 Режимы:
 
     python3 scripts/extract_eval.py --replay      # записанные ответы, в гейте
-    python3 scripts/extract_eval.py --live        # модель (MARA_LLM_URL), на doctor
+    python3 scripts/extract_eval.py --live        # облачная модель (OPENROUTER_API_KEY), на doctor
     python3 scripts/extract_eval.py --live --record   # и записать ответы в корпус
 
 `--replay` — регресс правил: записанный ответ проходит нынешний `normalize`, и
@@ -307,7 +307,7 @@ def main():
     ap.add_argument("--corpus", default=КОРПУС)
     ap.add_argument("--replay", action="store_true",
                     help="записанные ответы через нынешние правила")
-    ap.add_argument("--live", action="store_true", help="спросить модель (MARA_LLM_URL)")
+    ap.add_argument("--live", action="store_true", help="спросить модель (OPENROUTER_API_KEY)")
     ap.add_argument("--record", action="store_true",
                     help="с --live: записать ответы и счёт в корпус")
     ap.add_argument("--self-check", action="store_true", dest="self_check")

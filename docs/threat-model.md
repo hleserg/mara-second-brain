@@ -17,10 +17,10 @@
                                  │                              │
               локальная сеть; с секретом — HMAC          ├─▶ R2 (rclone bisync, каждые 5 мин)
                                  ▼                              ├─▶ git-зеркало на том же диске
-                    bigpc: прокси агента узла ─▶ Ollama, ASR    └─▶ шифрованный бандл на носители
-                    (MARA_LLM_URL, MARA_ASR_URL)
+                    bigpc: прокси агента узла ─▶ ASR            └─▶ шифрованный бандл на носители
+                    (MARA_ASR_URL)
                                                  облачные LLM ◀── queue-worker, daily-summary,
-                                                 (OpenRouter)     пакет контекста для Hermes
+                                                 (OpenRouter)     call_extract, пакет контекста
                                                  Telegram    ◀── дайджесты звонков, утренняя сводка
 ```
 
@@ -30,7 +30,7 @@
 | сеть → contextd | любой в той же сети | слушает петлю, если не задан `MARA_BIND` (`contextd.py:1270`); без токена открыт только `/healthz` (`contextd.py:87`), `/metrics` — только с петли (`contextd.py:597`); с `MARA_TLS_*` рядом слушает TLS (`TLSСервер`), открытый порт сворачивается `MARA_PLAIN_BIND` |
 | contextd → bigpc | вычислительный узел | без секрета — **ничем**, HTTP как есть; с `MARA_NODE_SECRET` — прокси агента узла: запрос и ответ подписаны HMAC-SHA256 общего секрета, аудио — только узлу, доказавшему секрет (`node_agent.к_узлу`, `node_agent.Прокси`, Т0.9 п. 5) |
 | сеть → прокси агента на bigpc | любой в той же сети | до проверки подписи — только заголовки: тело не читается, соединений не больше восьми, тишина сокета — 60 с; пересылаются только `POST /transcribe` и `POST /api/generate`; Ollama за прокси слушает петлю, иначе её модель подменят мимо него (`docs/USER-MANUAL-STEPS.md`) |
-| doctor → облачные LLM | провайдер модели | карточки `sensitive: true` не уходят (`queue-worker.py:54`, `daily-summary.py:62`); в пакет контекста — белый список полей (`context_pack.py:68`) |
+| doctor → облачные LLM | провайдер модели | карточки `sensitive: true` не уходят (`queue-worker.py:54`, `daily-summary.py:62`); в пакет контекста — белый список полей (`context_pack.py:68`); расшифровка звонка и имя владельца (`MARA_OWNER_NAME`) уходят из `call_extract` **целиком и без редакции** — принятый владельцем риск, ADR-0013 (аудио не уходит) |
 | волт → R2 | Cloudflare и всё, что синкается с бакетом | фильтр `config/r2-filters.txt`: `raw/`, `.git/`, очередь, ключи плагинов не уезжают |
 | волт/ядро → носители бэкапа | соседняя машина, внешний диск | gpg AES256 по парольной фразе (`core-backup.py:54`, `vault-backup.sh`) |
 | модель → инструменты | ответ модели | аргументы `mara_correction` проверяются как недоверенные (`call_project.py:291`) |
@@ -153,7 +153,8 @@ sha256, отзыв, `last_seen` у каждого устройства (`context
 **5. Prompt injection в сообщении, письме, транскрипте.**
 Есть: сырой текст в пакет контекста не попадает — только пять полей
 (`context_pack.py:68`, ТЗ §15); заголовок обрезан (`MAX_TITLE`) и
-очищен; извлечение из звонков — локальная модель без инструментов.
+очищен; извлечение из звонков — облачная модель без инструментов
+(ADR-0013), её ответ проходит нормализацию и валидацию `call_extract`.
 Дыра: цепочка «чужая фраза в звонке → заголовок обязательства → пакет в
 Hermes → модель с инструментом `mara_correction`». Инструмент умеет менять
 статус обязательства, лимита частоты у него нет, подтверждения у
@@ -291,7 +292,7 @@ doctor описаны файлами с версиями и sha256 каждог�
 | Токены устройств | `devices.token_sha256` в `contextd.db` (только хеш) | contextd |
 | `MARA_NODE_TOKEN` — токен сердцебиения узла (Т7.2) | окружение пользователя на узле (bigpc); в `contextd.db` — хеш, устройство `node:<узел>` | `node_agent.py`, contextd |
 | Токен бота Telegram для дайджестов | `/etc/mara/contextd.env` | contextd |
-| `OPENROUTER_API_KEY` | `~/.config/mara/env` (`MARA_ENV_FILE`) | queue-worker, daily-summary |
+| `OPENROUTER_API_KEY` | `~/.config/mara/env` (`MARA_ENV_FILE`) | queue-worker, daily-summary, call_extract (под contextd) |
 | `MARA_CONTEXT_TOKEN` | окружение Hermes | плагин `install/mara-context` |
 | `MARA_BUTTONS_TOKEN` — токен устройства «кнопки утра» (Т-У.5) | `/etc/mara/contextd.env`; в `contextd.db` — хеш | `telegram_buttons.py`, contextd |
 | `MARA_BUTTONS_BOT_TOKEN` — токен бота утра (Т-У.5, бот свой — не Hermes) | `/etc/mara/contextd.env` | `morning_send.py`, `telegram_buttons.py` |
@@ -309,7 +310,7 @@ doctor описаны файлами с версиями и sha256 каждог�
 | Токен узла | `contextd.py --revoke dev_…`, затем `--pair-node <узел>` и новый токен в окружение агента | `node_agent.py --once` со старым — «токен не принят», с новым — «сердцебиение: 200» |
 | Ключ TLS contextd | убрать `contextd.crt` и `contextd.key`, `contextd.py --tls-new` в тот же каталог, `systemctl restart contextd`; новый пин (`--tls-pin`) — в `MARA_CONTEXT_PIN` плагина и агента узла | клиент со старым пином — «сертификат не совпал с пином», запрос не ушёл; с новым — ответ |
 | Токен бота | новый в @BotFather, правка `/etc/mara/contextd.env`, `systemctl restart contextd` | следующий дайджест дошёл |
-| `OPENROUTER_API_KEY` | новый ключ у провайдера, правка `~/.config/mara/env` | следующий прогон queue-worker без 401 |
+| `OPENROUTER_API_KEY` | новый ключ у провайдера, правка `~/.config/mara/env`, `systemctl restart contextd` | следующий прогон queue-worker без 401; работы `extract` не копятся в ретраях (`/metrics`) |
 | OAuth Gmail | `gmail_ingest.py --login --port …` | `gmail` в `/metrics` снова растёт и сбрасывается |
 | Сессия TDLib | повторный вход tdlib-ingest | `tdlib` в `/metrics` свежий |
 | Парольная фраза | новая фраза, прогон `core-backup.py` и `vault-backup.sh`; старые копии расшифровываются старой — её в менеджере паролей не удалять, пока копии живы | учение восстановления на новой копии |

@@ -132,7 +132,8 @@ uv ставит Basic Memory и больше ни во что не вмешив�
 | OpenRouter | то же, `deepseek/deepseek-v4-pro` | ToS + тариф | `daily-summary.py:26,175` | adopt |
 | Telegram Bot API | `sendMessage` | ToS Telegram | `call_digest.py:31,108-118` | adopt |
 | Cloudflare R2 | S3-совместимый бакет | ToS Cloudflare | `vault-r2-sync.sh` | adopt |
-| Ollama (Big PC) | HTTP, `qwen3.5:9b` | MIT (свой хост) | `call_extract.py:34-35` | adopt |
+| Ollama (Big PC) | HTTP, `qwen3.5:9b` | MIT (свой хост) | — (с 2026-10-19 не используется, ADR-0013) | reject |
+| OpenRouter | то же, `openai/gpt-6-luna` | ToS + тариф | `call_extract.py` (`ask_model`), ADR-0013 | adopt |
 | Gmail API | `gmail/v1`, scope `gmail.readonly` | Google API ToS | `gmail_ingest.py:19-22` | adopt |
 | GitHub | `git clone --mirror`, Actions | ToS GitHub | `git-ingest.py:67-69` | adopt |
 | Hermes Agent (мак) | v0.20.6 (2026.8.27), git | MIT | `mara-watchdog.sh:41-42` | adopt |
@@ -204,7 +205,7 @@ crypt-remote**: клиентского шифрования нет, и в бак
 этот запрет сегодня выполняют — по списку каталогов, а не по свойству данных;
 правильным ответом остался бы `crypt`-remote, и он записан долгом.
 
-**Ollama на Big PC** — вторая, независимая установка: `call_extract.py` ходит
+**Ollama на Big PC** (до 2026-10-19, см. ADR-0013) — вторая, независимая установка: `call_extract.py` ходит
 на `MARA_LLM_URL` и достаёт факты из транскриптов локальной моделью, чтобы
 звонки не уезжали в облако. Версия там записана в самом скрипте как «qwen3.5:9b
 и ollama 0.23.2 второго сентября 2026» (`call_extract.py:205`) — то есть 0.23.2
@@ -605,11 +606,12 @@ ADR-0009 (решение 3: read-only на клиентских машинах,
    ключей в `~/.basic-memory/config.json` и **полная переиндексация**: векторы
    разных моделей несравнимы. Смена размерности (1024 у bge-m3) — то же самое
    плюс `semantic_embedding_dimensions`.
-3. **Ollama на Big PC и `qwen3.5:9b`.** Уходит — и извлечение фактов из
-   звонков останавливается целиком. Заменять его облаком **нельзя**: §7.3
-   запрещает отправлять аудио и полные транскрипты в чужие облака — это
-   запрет по существу, а не про порт. Единственная замена —
-   другая локальная модель на той же ручке `MARA_LLM_URL`.
+3. **Ollama на Big PC и `qwen3.5:9b`.** *Пересмотрено 2026-10-19
+   ([ADR-0013](0013-cloud-call-extraction.md)):* владелец явно снял запрет
+   на облако для транскриптов (`TZ-master.md:550` такое решение допускает),
+   и извлечение перешло на OpenRouter. Путь выхода теперь общий с п. 4;
+   вернуть локальную модель — `MARA_EXTRACT_API` на любой
+   OpenAI-совместимый `/chat/completions`.
 4. **OpenRouter.** Отключается снятием ключа: `queue-worker` встанет и будет
    копить очередь, `daily-summary` перейдёт на механический пересказ. Данные
    не теряются, деградирует только качество. Смена модели —
