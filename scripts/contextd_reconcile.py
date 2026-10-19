@@ -1886,6 +1886,13 @@ def self_check():
     os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"   # см. mi.смонтирован
     root = tempfile.mkdtemp()
     mi.ROOT = root
+    # отметки бэкапа — тоже во временный каталог: `учение_бэкапа` читает
+    # `mi.ОТМЕТКА_*`, а не `targets`, и на doctor, где носители отмечены, а
+    # учение ещё ни разу не проходило, самопроверка падала на настоящей
+    # находке `учение-не-проходит` (гейт 2026-10-19)
+    mi.STATE = os.path.join(root, "state")
+    mi.ОТМЕТКА_НОСИТЕЛЕЙ = os.path.join(mi.STATE, "core-targets.json")
+    mi.ОТМЕТКА_УЧЕНИЯ = os.path.join(mi.STATE, "core-drill.json")
     con = mi.connect(root)
     # свежий «архив» на игрушечном носителе: иначе проверка бэкапа честно
     # ругалась бы на любую машину, где /mnt/backup не смонтирован

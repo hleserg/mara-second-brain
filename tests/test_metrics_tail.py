@@ -151,6 +151,20 @@ class Учение(_База):
         self.assertIn("учение-не-проходит",
                       [x["check"] for x in cr.run(self.con, self.dir, vault=None, targets=[])])
 
+    def test_самопроверка_не_читает_отметки_хоста(self):
+        """Гейт 2026-10-19 на doctor: носители отмечены, учение ещё ни разу
+        не проходило — и `--self-check` падал на настоящей находке
+        `учение-не-проходит`, хотя `targets` он подменяет. Отметки
+        самопроверка обязана уводить во временный каталог сама."""
+        cb.отметка(mi.ОТМЕТКА_НОСИТЕЛЕЙ, ["/mnt/a"], когда=time.time() - 3600)
+        for имя in ("ROOT", "STATE"):
+            п = mock.patch.object(mi, имя, getattr(mi, имя))
+            п.start()
+            self.addCleanup(п.stop)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cr.self_check(), 0)
+        self.assertNotEqual(mi.STATE, self.состояние, "самопроверка увела отметки к себе")
+
 
 if __name__ == "__main__":
     unittest.main()
