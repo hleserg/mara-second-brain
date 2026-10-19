@@ -370,8 +370,8 @@ class Шаг(unittest.TestCase):
                          "схема ответа тоже под происхождением")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(
             ce.transcript_text(self.segs).encode("utf-8")).hexdigest())
-        self.assertEqual(ce.конфигурация()["options"], {"temperature": 0, "num_ctx": 8192},
-                         "параметры запроса — те же, что уходят в ollama")
+        self.assertEqual(ce.конфигурация()["options"], {"temperature": 0},
+                         "параметры запроса — те же, что уходят в модель")
 
     def test_каждый_прогон_новая_ревизия_в_реестре(self):
         """Т5.0, ТЗ §9.1: переобработка — новая строка `extractions` с
@@ -530,6 +530,45 @@ class Промпт(unittest.TestCase):
                     "open_questions", "changed_instructions", "people_mentioned",
                     "projects_mentioned", "followups"):
             self.assertIn(key, props)
+
+
+class ОтветМодели(unittest.TestCase):
+    """Разбор ответа OpenRouter: пустой ответ — ошибка, а не пустой звонок."""
+
+    def спросить(self, ответ):
+        class Ф:
+            def __init__(s): s.тело = json.dumps(ответ).encode()
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+            def read(s): return s.тело
+        было_url, было_ключ = ce.urllib.request.urlopen, os.environ.get("OPENROUTER_API_KEY")
+        ce.urllib.request.urlopen = lambda req, timeout=None: Ф()
+        os.environ["OPENROUTER_API_KEY"] = "test-key"
+        try:
+            return ce.ask_model("текст")
+        finally:
+            ce.urllib.request.urlopen = было_url
+            if было_ключ is None:
+                os.environ.pop("OPENROUTER_API_KEY", None)
+            else:
+                os.environ["OPENROUTER_API_KEY"] = было_ключ
+
+    def test_ответ_разбирается(self):
+        out = self.спросить({"choices": [{"message": {"content": '{"requests": []}'},
+                                          "finish_reason": "stop"}]})
+        self.assertEqual(out, {"requests": []})
+
+    def test_пустой_отказ_и_обрыв_падают(self):
+        for выбор in ({"message": {"content": None}, "finish_reason": "stop"},
+                      {"message": {"content": "", "refusal": "нет"}, "finish_reason": "stop"},
+                      {"message": {"content": '{"requests": ['}, "finish_reason": "length"},
+                      {"message": {"content": "{}"}, "finish_reason": "content_filter"}):
+            with self.subTest(выбор=выбор), self.assertRaises(RuntimeError):
+                self.спросить({"choices": [выбор]})
+
+    def test_ошибка_в_теле_падает_понятно(self):
+        with self.assertRaisesRegex(RuntimeError, "лимит"):
+            self.спросить({"error": {"message": "лимит"}})
 
 
 if __name__ == "__main__":
