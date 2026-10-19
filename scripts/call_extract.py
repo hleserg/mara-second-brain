@@ -353,7 +353,18 @@ def ask_model(text, base_url=None, model=None):
         "X-Title": "mara-second-brain"})
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
         d = json.loads(r.read())
-    return json.loads(strip_fence(d["choices"][0]["message"].get("content") or "{}"))
+    if "error" in d or not d.get("choices"):
+        raise RuntimeError("call_extract: ошибка OpenRouter: %s"
+                           % (d.get("error") or {}).get("message", "нет choices"))
+    выбор = d["choices"][0]
+    сообщение = выбор.get("message") or {}
+    # Отказ, фильтр или обрыв по длине — не «пустой звонок»: пустая ревизия
+    # молча потеряла бы обязательства, а исключение уводит работу в ретраи.
+    if сообщение.get("refusal") or выбор.get("finish_reason") in ("length", "content_filter") \
+            or not (сообщение.get("content") or "").strip():
+        raise RuntimeError("call_extract: модель не дала ответа (finish_reason=%s)"
+                           % выбор.get("finish_reason"))
+    return json.loads(strip_fence(сообщение["content"]))
 
 
 def записать_ревизию(con, xid, data):
