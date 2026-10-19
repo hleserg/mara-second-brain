@@ -370,8 +370,9 @@ class Шаг(unittest.TestCase):
                          "схема ответа тоже под происхождением")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(
             ce.transcript_text(self.segs).encode("utf-8")).hexdigest())
-        self.assertEqual(ce.конфигурация()["options"], {"temperature": 0},
-                         "параметры запроса — те же, что уходят в модель")
+        self.assertEqual(ce.конфигурация()["options"], {},
+                         "параметры запроса — те же, что уходят в модель; "
+                         "temperature модели OpenAI не принимают")
 
     def test_каждый_прогон_новая_ревизия_в_реестре(self):
         """Т5.0, ТЗ §9.1: переобработка — новая строка `extractions` с
@@ -536,13 +537,17 @@ class ОтветМодели(unittest.TestCase):
     """Разбор ответа OpenRouter: пустой ответ — ошибка, а не пустой звонок."""
 
     def спросить(self, ответ):
+        self.запрос = None
         class Ф:
             def __init__(s): s.тело = json.dumps(ответ).encode()
             def __enter__(s): return s
             def __exit__(s, *a): return False
             def read(s): return s.тело
         было_url, было_ключ = ce.urllib.request.urlopen, os.environ.get("OPENROUTER_API_KEY")
-        ce.urllib.request.urlopen = lambda req, timeout=None: Ф()
+        def открыть(req, timeout=None):
+            self.запрос = json.loads(req.data)
+            return Ф()
+        ce.urllib.request.urlopen = открыть
         os.environ["OPENROUTER_API_KEY"] = "test-key"
         try:
             return ce.ask_model("текст")
@@ -565,6 +570,48 @@ class ОтветМодели(unittest.TestCase):
                       {"message": {"content": "{}"}, "finish_reason": "content_filter"}):
             with self.subTest(выбор=выбор), self.assertRaises(RuntimeError):
                 self.спросить({"choices": [выбор]})
+
+    def test_запрос_строгий_и_без_temperature(self):
+        """Живой прогон после выката ADR-0013: с `temperature` OpenRouter
+        отвечал 404, без `additionalProperties: false` и полного `required`
+        — 400. Запрос обязан быть строгим, иначе ни один звонок не разберётся."""
+        self.спросить({"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+        self.assertNotIn("temperature", self.запрос)
+        self.assertEqual(self.запрос["provider"], {"require_parameters": True})
+        js = self.запрос["response_format"]["json_schema"]
+        self.assertIs(js["strict"], True)
+
+        def проверить(схема, путь):
+            if схема.get("type") == "object" or "object" in схема.get("type", []):
+                with self.subTest(путь=путь):
+                    self.assertIs(схема["additionalProperties"], False)
+                    self.assertEqual(sorted(схема["required"]), sorted(схема["properties"]))
+                for k, v in схема["properties"].items():
+                    проверить(v, путь + "." + k)
+            if "items" in схема:
+                проверить(схема["items"], путь + "[]")
+        проверить(js["schema"], "$")
+
+    def test_необязательное_допускает_null_обязательное_нет(self):
+        пункт = ce.строгая(ce.SCHEMA)["properties"]["requests"]["items"]
+        self.assertEqual(пункт["properties"]["owner"]["type"], ["string", "null"])
+        self.assertEqual(пункт["properties"]["supersedes"]["type"], ["string", "null"])
+        self.assertEqual(пункт["properties"]["action"]["type"], "string")
+        self.assertEqual(пункт["properties"]["evidence"]["type"], "array")
+        self.assertNotIn("additionalProperties", ce.ITEM, "исходная схема не тронута")
+
+    def test_null_из_ответа_вычищается(self):
+        """`null` строгой схемы значит «не было» — дальше пункт выглядит так же,
+        как без ключа, и нормализация его не видит."""
+        out = self.спросить({"choices": [{"message": {"content": json.dumps({
+            "requests": [{"action": "прислать смету", "owner": None, "explicit": True,
+                          "deadline_phrase": "", "confidence": 0.9,
+                          "evidence": [{"segment": "s0001"}]}],
+            "decisions": None, "people_mentioned": ["Пётр"]})}, "finish_reason": "stop"}]})
+        self.assertEqual(out, {"requests": [{"action": "прислать смету", "explicit": True,
+                                             "deadline_phrase": "", "confidence": 0.9,
+                                             "evidence": [{"segment": "s0001"}]}],
+                               "people_mentioned": ["Пётр"]})
 
     def test_ошибка_в_теле_падает_понятно(self):
         with self.assertRaisesRegex(RuntimeError, "лимит"):
