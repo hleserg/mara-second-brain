@@ -41,10 +41,11 @@ MODEL = os.environ.get("MARA_EXTRACT_MODEL", vault_common.МОДЕЛЬ_ИЗВЛ�
 TASK_MIN = float(os.environ.get("MARA_TASK_MIN", 0.85))
 REVIEW_MIN = float(os.environ.get("MARA_REVIEW_MIN", 0.60))
 HTTP_TIMEOUT = 300
-# Параметры запроса к модели. Температура ноль — ответ воспроизводим, насколько
-# облако это позволяет; окна контекста больше нет — у облачной модели оно
-# больше любого звонка.
-OPTIONS = {"temperature": 0}
+# Параметры запроса к модели. Пусто нарочно: `temperature` модели OpenAI
+# через OpenRouter не принимают, и с `require_parameters` запрос с ней
+# получает 404 «No endpoints found» (живой прогон после выката ADR-0013);
+# окна контекста тоже нет — у облачной модели оно больше любого звонка.
+OPTIONS = {}
 # Версия правил после модели (Т5.0, ТЗ §9.3 «versioned prompts/rules»):
 # `normalize`, `сверить_evidence`, `parse_deadline`, пороги `disposition`.
 # Поднимать при любой правке их поведения, как `PROMPT_VERSION` — при правке
@@ -65,7 +66,7 @@ def конфигурация():
             # имя владельца меняет текст промпта; само имя сюда не пишется
             "owner_named": bool(vault_common.имя_владельца()),
             "schema_sha256": hashlib.sha256(json.dumps(
-                SCHEMA, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()}
+                строгая(SCHEMA), sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()}
 
 LISTS = ("requests", "commitments", "decisions", "constraints",
          "open_questions", "changed_instructions", "followups")
@@ -115,13 +116,46 @@ SCHEMA = {"type": "object",
                              [(k, {"type": "array", "items": {"type": "string"}})
                               for k in NAMES])}
 
+
+def строгая(схема):
+    """`SCHEMA` → схема строгого режима OpenAI, который провайдеры модели
+    включают всегда: у каждого объекта `additionalProperties: false` и все
+    ключи в `required`. Необязательный ключ становится обязательным, но
+    допускает `null` — так модель может честно сказать «не было», а не
+    выдумывать `owner` или `supersedes`. `null` из ответа вычищает
+    `без_null`, и дальше пункт выглядит так же, как без ключа."""
+    схема = dict(схема)
+    if схема.get("type") == "object":
+        обязательные = set(схема.get("required", []))
+        свойства = {}
+        for ключ, под in схема["properties"].items():
+            под = строгая(под)
+            if ключ not in обязательные:
+                под = dict(под, type=[под["type"], "null"])
+            свойства[ключ] = под
+        схема.update(properties=свойства, required=list(свойства),
+                     additionalProperties=False)
+    elif схема.get("type") == "array":
+        схема["items"] = строгая(схема["items"])
+    return схема
+
+
+def без_null(x):
+    """Ответ строгой схемы без ключей со значением `null` — рекурсивно."""
+    if isinstance(x, dict):
+        return {k: без_null(v) for k, v in x.items() if v is not None}
+    if isinstance(x, list):
+        return [без_null(v) for v in x]
+    return x
+
 # ADR-0004 п.4: версия промпта поднимается при любой правке его текста и
 # схемы ответа `SCHEMA`/`ITEM` (она уходит в запрос как `response_format` и
 # меняет выход так же) — иначе регрессионный корпус (Т5.5) сравнивает
 # несравнимое. Ложится в извлечение и в карточку рядом с именем модели;
 # хеш схемы — в `config` извлечения (`конфигурация`).
-PROMPT_VERSION = 4       # 3: «владелец» вместо имени, имя — из `MARA_OWNER_NAME` (Г7);
-                         # 4: промпт — системным сообщением, расшифровка — пользовательским (ADR-0013)
+PROMPT_VERSION = 5       # 3: «владелец» вместо имени, имя — из `MARA_OWNER_NAME` (Г7);
+                         # 4: промпт — системным сообщением, расшифровка — пользовательским (ADR-0013);
+                         # 5: строгая схема (`строгая`), «не было — null», без temperature
 PROMPT = """Ты разбираешь расшифровку телефонного разговора владельца.{кто}
 
 Куда что класть:
@@ -147,6 +181,8 @@ PROMPT = """Ты разбираешь расшифровку телефонно�
   нужен;
 - если новое указание отменяет прежнее, положи его в changed_instructions с
   supersedes (что отменено) и new_state (как теперь);
+- чего в разговоре не было (owner, promised_to, supersedes и прочее) — null,
+  не додумывай;
 - confidence — твоя честная уверенность от 0 до 1;
 - пиши по-русски, коротко, инфинитивом: «прислать смету», не «владелец должен».
 
@@ -328,11 +364,11 @@ def strip_fence(text):
 def ask_model(text, base_url=None, model=None):
     """Один запрос к облачной модели через OpenRouter со схемой ответа.
 
-    Схема — `response_format: json_schema` без `strict`: строгий режим OpenAI
-    требует все ключи обязательными, и модель заполняла бы `owner` и
-    `supersedes` там, где их не было. `require_parameters` — чтобы OpenRouter
-    не отдал запрос провайдеру, который схему молча проигнорирует. Ключ —
-    `OPENROUTER_API_KEY`, тот же, что у `queue-worker.py`.
+    Схема — `response_format: json_schema` в строгом режиме (`строгая`):
+    провайдеры моделей OpenAI другого не принимают и отвечают 400.
+    `require_parameters` — чтобы OpenRouter не отдал запрос провайдеру,
+    который схему молча проигнорирует. Ключ — `OPENROUTER_API_KEY`, тот же,
+    что у `queue-worker.py`.
     """
     ключ = os.environ.get("OPENROUTER_API_KEY")
     if not ключ:
@@ -343,7 +379,8 @@ def ask_model(text, base_url=None, model=None):
         messages=[{"role": "system", "content": промпт()},
                   {"role": "user", "content": text}],
         response_format={"type": "json_schema",
-                         "json_schema": {"name": "call_extraction", "schema": SCHEMA}},
+                         "json_schema": {"name": "call_extraction", "strict": True,
+                                         "schema": строгая(SCHEMA)}},
         provider={"require_parameters": True},
     ), ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request((base_url or API).rstrip("/") + "/chat/completions",
@@ -364,7 +401,7 @@ def ask_model(text, base_url=None, model=None):
             or not (сообщение.get("content") or "").strip():
         raise RuntimeError("call_extract: модель не дала ответа (finish_reason=%s)"
                            % выбор.get("finish_reason"))
-    return json.loads(strip_fence(сообщение["content"]))
+    return без_null(json.loads(strip_fence(сообщение["content"])))
 
 
 def записать_ревизию(con, xid, data):
