@@ -788,12 +788,27 @@ def дайджест_догрузка(con, окно_ч=48):
                     count=len(rows), sample=ids)]
 
 
+# Брошенная работа, поверх которой `add_job` поставил новую (дверь починки
+# руками из его докстринга), в DLQ остаётся: строку никто не трогает, и
+# находка жила бы вечно — 11 работ `asr` 2026-10-19 были отработаны заново
+# за минуту, а сверка час за часом считала те же 11. Перекрытой считается
+# строка, у которой на то же событие и вид есть работа моложе, стоящая в
+# очереди или отработавшая: сдохла и новая — находка остаётся, но одна.
+# «Моложе» — по порядку вставки (`rowid`), не по `created`: у него секунда,
+# а починка ставит новую работу в ту же секунду, что и смотрит на старую.
+ПЕРЕКРЫТА = ("not exists (select 1 from jobs j where j.event_id=d.event_id "
+             "and j.kind=d.kind and j.state in ('ready','done') "
+             "and j.rowid > d.rowid)")
+
+
 def dlq(con):
-    n = con.execute("select count(*) from jobs where state='dlq'").fetchone()[0]
+    n = con.execute("select count(*) from jobs d where d.state='dlq' and "
+                    + ПЕРЕКРЫТА).fetchone()[0]
     if not n:
         return []
-    row = con.execute("select kind, last_error from jobs where state='dlq' "
-                      "order by %s desc limit 1" % mi.секунды("updated")).fetchone()
+    row = con.execute("select kind, last_error from jobs d where d.state='dlq' "
+                      "and %s order by %s desc limit 1"
+                      % (ПЕРЕКРЫТА, mi.секунды("updated"))).fetchone()
     # Причина — последняя строка хвоста (у трейсбека это само исключение), а
     # не срез из его середины, и обезличенная: строки, легшие до
     # `mi.обезличить` в `run_step`, ещё могут нести путь карточки (§15.1)

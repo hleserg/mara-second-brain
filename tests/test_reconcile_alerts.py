@@ -71,6 +71,32 @@ class ОчередьСтоит(База):
         self.assertIn("/metrics", f[0]["detail"])
         self.assertNotIn("/v1/jobs", f[0]["detail"], "такого пути с петли нет")
 
+    def test_dlq_перекрытая_новой_работой_молчит(self):
+        """Дверь починки руками (`add_job` поверх `dlq`) оставляет строку в
+        DLQ — без этого находка `работы-в-dlq` жила бы вечно после починки:
+        так было 2026-10-19 с одиннадцатью `asr`."""
+        eid = self.событие("a")
+        сдохла = mi.add_job(self.con, eid, "asr")
+        self.con.execute("update jobs set state='dlq', last_error='ASR: reset' "
+                         "where id=?", (сдохла,))
+        self.assertEqual(1, rc.dlq(self.con)[0]["count"])
+        новая = mi.add_job(self.con, eid, "asr")
+        self.assertEqual([], rc.dlq(self.con), "поставлена заново — не тревога")
+        self.con.execute("update jobs set state='done' where id=?", (новая,))
+        self.assertEqual([], rc.dlq(self.con), "отработала — тем более")
+        # другой вид на то же событие перекрытием не считается
+        extract = mi.add_job(self.con, eid, "extract")
+        self.con.execute("update jobs set state='dlq', last_error='x' where id=?",
+                         (extract,))
+        н, = rc.dlq(self.con)
+        self.assertEqual((1, "extract"), (н["count"], н["detail"].split()[-3]),
+                         "считается только живая беда")
+        # сдохла и новая — беда одна, а не две строки
+        ещё = mi.add_job(self.con, eid, "asr")
+        self.con.execute("update jobs set state='dlq', last_error='ASR: again' "
+                         "where id=?", (ещё,))
+        self.assertEqual(2, rc.dlq(self.con)[0]["count"])
+
     def test_длинная_очередь_при_живом_воркере(self):
         старая = self.работа("a", "asr", 10)
         self.попытка(старая, 10)
