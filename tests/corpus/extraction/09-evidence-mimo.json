@@ -59,5 +59,44 @@
    "кто_не_тот": 0,
    "срок_не_тот": 0
   }
+ },
+ "живой": {
+  "model": "qwen3.5:9b",
+  "prompt_version": 3,
+  "rules_version": 3,
+  "owner_named": true,
+  "date": "2026-10-19",
+  "response": {
+   "requests": [
+    {
+     "action": "оплатить счёт за материалы",
+     "explicit": true,
+     "deadline_phrase": "до четверга",
+     "confidence": 1.0,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ]
+    }
+   ],
+   "commitments": [],
+   "decisions": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "people_mentioned": [
+    "Анна"
+   ],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 1,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 1,
+   "срок_не_тот": 0
+  }
  }
 }

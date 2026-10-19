@@ -65,5 +65,58 @@
    "кто_не_тот": 0,
    "срок_не_тот": 0
   }
+ },
+ "живой": {
+  "model": "qwen3.5:9b",
+  "prompt_version": 3,
+  "rules_version": 3,
+  "owner_named": true,
+  "date": "2026-10-19",
+  "response": {
+   "requests": [],
+   "commitments": [
+    {
+     "action": "перезвонить",
+     "explicit": true,
+     "deadline_phrase": "в понедельник",
+     "confidence": 1.0,
+     "evidence": [
+      {
+       "segment": "s0002"
+      }
+     ]
+    }
+   ],
+   "decisions": [],
+   "open_questions": [
+    {
+     "action": "ответить по плитке",
+     "explicit": false,
+     "deadline_phrase": "",
+     "confidence": 0.9,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ]
+    }
+   ],
+   "changed_instructions": [],
+   "people_mentioned": [
+    "Олег"
+   ],
+   "projects_mentioned": [
+    "плитка"
+   ]
+  },
+  "ожидаемо": {
+   "верно": 0,
+   "перепутано": 0,
+   "лишнее": 1,
+   "на_ревью": 0,
+   "пропущено": 1,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
  }
 }
