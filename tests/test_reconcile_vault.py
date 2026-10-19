@@ -13,7 +13,7 @@
 что именно не проверено, в сводке не было. Точного числа тут нет намеренно:
 проверок прибавляется, и число протухло бы на первой же новой.
 """
-import os, shutil, sqlite3, sys, tempfile, unittest
+import os, shutil, sqlite3, sys, tempfile, time, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -317,3 +317,98 @@ class КарточкиПропали(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ЛагИндексаЛечится(unittest.TestCase):
+    """Т3б.8: сторож Basic Memory 0.22 отвечает только на события файловой
+    системы, полного обхода без перезапуска сервера нет, и карточка, которую
+    после записи никто не трогал, в индекс не попадала никогда. Сверка теперь
+    меняет таким карточкам mtime сама — это единственное событие, на которое
+    сторож реагирует, и от него не меняются ни содержимое, ни git.
+
+    Порог — `ЛАГ_ТЕРПЕНИЕ_С`: карточке моложе него сторож ещё не обязан был
+    ответить, и трогать её — мерить не то.
+    """
+
+    def setUp(self):
+        self.vault = tempfile.mkdtemp(prefix="mara-vault-")
+        for sub in rc.СКЕЛЕТ:
+            os.makedirs(os.path.join(self.vault, sub))
+        os.makedirs(os.path.join(self.vault, "kb/commitments"))
+        self.bm = os.path.join(self.vault, "memory.db")
+        c = sqlite3.connect(self.bm)
+        c.execute("create table entity(file_path text)")
+        c.commit()
+        c.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.vault, ignore_errors=True)
+
+    def карточка(self, имя, возраст_с, в_индексе=False):
+        p = os.path.join(self.vault, "kb/commitments", имя)
+        with open(p, "w") as f:
+            f.write("# " + имя + "\n")
+        os.utime(p, (time.time() - возраст_с,) * 2)
+        if в_индексе:
+            c = sqlite3.connect(self.bm)
+            c.execute("insert into entity values(?)", ("kb/commitments/" + имя,))
+            c.commit()
+            c.close()
+        return p
+
+    def находка(self, **kw):
+        f = {x["check"]: x for x in rc.лаг_индекса(self.vault, self.bm, **kw)}
+        return f.get("лаг-индекса")
+
+    def test_старая_карточка_получает_свежий_mtime(self):
+        p = self.карточка("a.md", rc.ЛАГ_ТЕРПЕНИЕ_С * 2)
+        было = os.stat(p).st_mtime
+        старт = time.time()
+        f = self.находка()
+        self.assertEqual((f["count"], f["touched"]), (1, 1), f)
+        self.assertIn("подтолкнуто сменой mtime: 1", f["detail"])
+        self.assertIn("systemctl restart basic-memory-mcp", f["detail"],
+                      "второе действие — владельцу, если сторож не ответил")
+        self.assertGreaterEqual(os.stat(p).st_mtime, старт - 1)
+        self.assertGreater(os.stat(p).st_mtime, было)
+        with open(p) as fh:
+            self.assertEqual(fh.read(), "# a.md\n", "содержимое не трогаем")
+
+    def test_молодую_карточку_не_трогает(self):
+        p = self.карточка("b.md", 60)
+        было = os.stat(p).st_mtime
+        f = self.находка()
+        self.assertEqual((f["count"], f["touched"]), (1, 0), f)
+        self.assertIn("моложе часа", f["detail"])
+        self.assertEqual(os.stat(p).st_mtime, было)
+
+    def test_проиндексированную_не_трогает(self):
+        p = self.карточка("c.md", rc.ЛАГ_ТЕРПЕНИЕ_С * 2, в_индексе=True)
+        было = os.stat(p).st_mtime
+        self.assertIsNone(self.находка())
+        self.assertEqual(os.stat(p).st_mtime, было)
+
+    def test_без_лечения_только_счёт(self):
+        p = self.карточка("d.md", rc.ЛАГ_ТЕРПЕНИЕ_С * 2)
+        было = os.stat(p).st_mtime
+        f = self.находка(лечить=False)
+        self.assertEqual((f["count"], f["touched"]), (1, 0), f)
+        self.assertNotIn("подтолкнуто", f["detail"])
+        self.assertEqual(os.stat(p).st_mtime, было)
+
+    def test_отказ_файловой_системы_называет_действие(self):
+        """Волт на чтение или чужой владелец файла: находка остаётся, и в ней
+        сказано, что сверка подтолкнуть не смогла и что делать руками."""
+        self.карточка("e.md", rc.ЛАГ_ТЕРПЕНИЕ_С * 2)
+        self.карточка("f.md", rc.ЛАГ_ТЕРПЕНИЕ_С * 2)
+
+        def отказ(path):
+            raise PermissionError(13, "Permission denied")
+        было = rc._подтолкнуть
+        rc._подтолкнуть = отказ
+        self.addCleanup(setattr, rc, "_подтолкнуть", было)
+        f = self.находка()
+        self.assertEqual((f["count"], f["touched"]), (2, 0), f)
+        self.assertIn("не удалось", f["detail"])
+        self.assertIn("Permission denied", f["detail"])
+        self.assertIn("touch", f["detail"])
