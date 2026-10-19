@@ -86,5 +86,56 @@
    "кто_не_тот": 0,
    "срок_не_тот": 0
   }
+ },
+ "живой": {
+  "model": "qwen3.5:9b",
+  "prompt_version": 3,
+  "rules_version": 3,
+  "owner_named": true,
+  "date": "2026-10-19",
+  "response": {
+   "requests": [
+    {
+     "action": "прислать договор",
+     "explicit": true,
+     "deadline_phrase": "завтра",
+     "confidence": 1.0,
+     "evidence": [
+      {
+       "segment": "s0001"
+      }
+     ]
+    },
+    {
+     "action": "узнать у бухгалтера про счёт",
+     "explicit": true,
+     "deadline_phrase": "до пятницы",
+     "confidence": 1.0,
+     "evidence": [
+      {
+       "segment": "s0002"
+      }
+     ]
+    }
+   ],
+   "commitments": [],
+   "decisions": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "people_mentioned": [
+    "Анна",
+    "бухгалтер"
+   ],
+   "projects_mentioned": []
+  },
+  "ожидаемо": {
+   "верно": 1,
+   "перепутано": 1,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 1,
+   "кто_не_тот": 1,
+   "срок_не_тот": 0
+  }
  }
 }

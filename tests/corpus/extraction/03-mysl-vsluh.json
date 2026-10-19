@@ -56,5 +56,32 @@
    "кто_не_тот": 0,
    "срок_не_тот": 0
   }
+ },
+ "живой": {
+  "model": "qwen3.5:9b",
+  "prompt_version": 3,
+  "rules_version": 3,
+  "owner_named": true,
+  "date": "2026-10-19",
+  "response": {
+   "requests": [],
+   "commitments": [],
+   "decisions": [],
+   "open_questions": [],
+   "changed_instructions": [],
+   "people_mentioned": [],
+   "projects_mentioned": [
+    "покраска стен в коридоре"
+   ]
+  },
+  "ожидаемо": {
+   "верно": 0,
+   "перепутано": 0,
+   "лишнее": 0,
+   "на_ревью": 0,
+   "пропущено": 0,
+   "кто_не_тот": 0,
+   "срок_не_тот": 0
+  }
  }
 }
