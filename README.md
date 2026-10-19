@@ -67,7 +67,7 @@ git clone git@github.com:hleserg/mara-second-brain.git ~/mara-second-brain
 | Транскрипты Мары | крон `25 * * * *`, `scripts/hermes-ingest.py` (`state.db` с мака по ssh) |
 | Сторож тикера Мары | крон `*/10`, `scripts/mara-watchdog.sh` |
 | Сводка сущностей для Мары | крон `20 4 * * *`, `scripts/mara-brief.py` — блок «Что ты уже знаешь о владельце» в `_system/mara-brief.md` и в `SOUL.md` на маке |
-| Туннель к Маре | systemd `mara-mac-tunnel.service` — обратный форвард 8787 на мак |
+| Туннель к Маре | один из двух, не оба: launchd `ru.mara.mcp-tunnel` на маке (`install/client.sh`, прямой `-L`, адрес мака ему не нужен) **или** systemd `mara-mac-tunnel.service` на doctor (`install/mara-mac.sh`, обратный `-R` на адрес мака). Порт один, второй туннель бьётся в занятый порт |
 | Приём звонков и сообщений | systemd `contextd.service`, порт 8788 — очередь, ASR на bigpc, извлечение, карточки в `kb/conversations` и `kb/commitments`, дайджест в телеграм |
 | Связь телефона | напрямую на contextd (`MARA_BIND` в `/etc/mara/contextd.env`); вне дома — поддомен KeenDNS по https или VPN роутера |
 | Телефон `Mara Capture` | `android/`, sideload-APK на doctor `~/dist/`. Не записывает звук: подбирает файлы стороннего рекордера — на целевом Huawei системного нет, рабочий ACR Phone + APH (ТЗ §7.1–7.2); провайдеры `RecorderProvider`: медиатека и папка через SAF, сверка раз в 15 минут и через минуту после отбоя, шлёт в contextd по домашней локалке. Собирается только на doctor (`install/android-sdk.sh`): aapt2 под aarch64 нет |
@@ -187,7 +187,7 @@ Cloudflare их отпустил. Вместе с бакетом удалены 
 ## Мара (этап 3)
 
 ```
-мак: Hermes gateway ──MCP──► 127.0.0.1:8787 ──обратный ssh-туннель──► doctor
+мак: Hermes gateway ──MCP──► 127.0.0.1:8787 ──ssh-туннель (-L с мака или -R с doctor)──► doctor
                                                      Basic Memory (проект vault)
 doctor: hermes-ingest ──ssh──► ~/.hermes/state.db ──► raw/hermes/ + kb/sessions/
         mara-watchdog ──ssh──► ticker_last_success ──► gateway restart, если молчит

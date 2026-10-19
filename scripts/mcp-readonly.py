@@ -23,7 +23,14 @@
   python3 scripts/mcp-readonly.py --check      # только сказать, чего нет
   python3 scripts/mcp-readonly.py --self-check
 """
-import argparse, json, os, sys, tomllib
+import argparse, json, os, sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    # Системный python3 на маке — 3.9, tomllib появился в 3.11. Без него
+    # правку Codex не проверить, а править непроверенное — хуже, чем сказать.
+    sys.exit("нужен python3 >= 3.11 (tomllib); на маке: "
+             "uv run --python 3.12 --no-project python scripts/mcp-readonly.py")
 
 SERVER = "basic-memory"
 # Всё, что пишет в волт. `canvas` тут не по недосмотру: он создаёт .canvas
