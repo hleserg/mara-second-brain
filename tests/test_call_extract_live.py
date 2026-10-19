@@ -1,7 +1,7 @@
-"""Медленный тест с живой моделью на bigpc.
+"""Медленный тест с живой облачной моделью (ADR-0013).
 
-В обычный прогон не входит: коробка не круглосуточная, а тест ходит по сети и
-греет видеокарту. Включается явно:
+В обычный прогон не входит: тест ходит по сети и тратит деньги OpenRouter.
+Включается явно (нужен OPENROUTER_API_KEY):
 
     MARA_LIVE=1 python3 -m unittest tests.test_call_extract_live -v
 
@@ -27,7 +27,7 @@ OCC = "2026-09-02T14:05:00+03:00"
 
 
 @unittest.skipUnless(os.environ.get("MARA_LIVE") == "1",
-                     "нужен MARA_LIVE=1 и включённая GPU-коробка")
+                     "нужен MARA_LIVE=1 и OPENROUTER_API_KEY")
 class Живая(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

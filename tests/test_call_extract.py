@@ -370,8 +370,8 @@ class Шаг(unittest.TestCase):
                          "схема ответа тоже под происхождением")
         self.assertEqual(extr["input_sha256"], hashlib.sha256(
             ce.transcript_text(self.segs).encode("utf-8")).hexdigest())
-        self.assertEqual(ce.конфигурация()["options"], {"temperature": 0, "num_ctx": 8192},
-                         "параметры запроса — те же, что уходят в ollama")
+        self.assertEqual(ce.конфигурация()["options"], {"temperature": 0},
+                         "параметры запроса — те же, что уходят в модель")
 
     def test_каждый_прогон_новая_ревизия_в_реестре(self):
         """Т5.0, ТЗ §9.1: переобработка — новая строка `extractions` с

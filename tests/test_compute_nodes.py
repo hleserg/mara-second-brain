@@ -99,7 +99,6 @@ class Такт(unittest.TestCase):
 
     def test_молчащий_узел_ждёт_без_попыток(self):
         os.environ["MARA_ASR_URL"] = мёртвый_адрес(self)
-        os.environ["MARA_LLM_URL"] = мёртвый_адрес(self)
         for _ in range(3):
             self.assertIsNone(self.такт())
         self.assertEqual(self.работа(self.asr),
@@ -135,7 +134,6 @@ class Такт(unittest.TestCase):
         self.assertEqual(self.работа(self.asr)["queued_reason"], "node_offline:bigpc")
         contextd._пробы.clear()
         os.environ["MARA_ASR_URL"] = живой_адрес(self)
-        os.environ["MARA_LLM_URL"] = живой_адрес(self)
         взята = self.такт(отмечено)
         self.assertEqual(взята["id"], self.asr)
         self.assertEqual(self.работа(self.asr)["state"], "done")
@@ -227,15 +225,6 @@ class Такт(unittest.TestCase):
             contextd.worker(stop, self.dir)
         self.assertEqual(len(звали), 2, "поток жив после первой беды")
         self.assertIn("RuntimeError", out.getvalue())
-
-    def test_полуживой_узел_не_свежий(self):
-        """Ответил ASR, молчит LLM: `last_seen` узла не пишется — узел жив,
-        когда отвечает всё, что ему поручено."""
-        os.environ["MARA_ASR_URL"] = живой_адрес(self)
-        os.environ["MARA_LLM_URL"] = мёртвый_адрес(self)
-        self.assertEqual(contextd.недоступные(self.con),
-                         {"asr": None, "extract": "node_offline:bigpc"})
-        self.assertIsNone(self.con.execute("select last_seen from compute_nodes").fetchone())
 
 
 class Метрики(unittest.TestCase):

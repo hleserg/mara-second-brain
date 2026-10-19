@@ -1,7 +1,7 @@
 """Сквозной прогон: файл записи на диске превращается в карточку разговора.
 
-Настоящие whisper и ollama живут на bigpc и в тестах недоступны, поэтому оба
-поднимаются рядом заглушками. Проверяется не качество расшифровки, а то, что
+Настоящие whisper на bigpc и облачная модель извлечения в тестах недоступны,
+поэтому обе поднимаются рядом заглушками. Проверяется не качество расшифровки, а то, что
 приём, нарезка, извлечение, проекция и дайджест соединены и переживают повтор.
 
 Отдельно проверяется граница: аудио остаётся вне волта, вне git и вне
@@ -43,8 +43,9 @@ class Заглушка(BaseHTTPRequestHandler):
             body = {"ok": True}
         elif self.path == "/transcribe":
             body = {"text": РАСШИФРОВКА}
-        else:                                  # ollama /api/generate
-            body = {"response": json.dumps(ИЗВЛЕЧЕНИЕ, ensure_ascii=False)}
+        else:                                  # /chat/completions модели извлечения
+            body = {"choices": [{"message": {
+                "content": json.dumps(ИЗВЛЕЧЕНИЕ, ensure_ascii=False)}}]}
         out = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -79,7 +80,8 @@ class Сквозной(unittest.TestCase):
         cls.env0 = dict(os.environ)
         os.environ.update({
             "MARA_BLOBS": cls.blobs, "VAULT": cls.vault,
-            "MARA_ASR_URL": base, "MARA_LLM_URL": base,
+            "MARA_ASR_URL": base, "MARA_EXTRACT_API": base,
+            "OPENROUTER_API_KEY": "test-key",
             "MARA_ENV_FILE": os.path.join(cls.blobs, "нет-такого.env"),
             # два разных файла — два разных имени, см. call_digest.py
             "MARA_CONTEXTD_ENV": os.path.join(cls.blobs, "нет-такого.env"),
