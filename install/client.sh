@@ -75,9 +75,14 @@ command -v codex >/dev/null && { codex mcp add basic-memory --url http://127.0.0
 say "read-only для Basic Memory (ADR-0009 решение 3)"
 # Сервер прав не различает, отказ живёт в конфиге клиента — и у Claude Code
 # с Codex он разный. Правит только эти два файла, чужие правила не трогает.
-# Нужен python3 >= 3.11 (tomllib). Если не вышло — установка не обязана
-# падать целиком: скажем вслух и идём дальше, запись закроют руками.
-python3 "$REPO/scripts/mcp-readonly.py" \
+# Нужен python3 >= 3.11 (tomllib); системный python3 на маке — 3.9, поэтому
+# берём первый подходящий, а без него — uv. Если не вышло — установка не
+# обязана падать целиком: скажем вслух и идём дальше, запись закроют руками.
+PY=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || true)
+if [ -n "$PY" ]; then "$PY" "$REPO/scripts/mcp-readonly.py"
+elif command -v uv >/dev/null; then
+  uv run --python 3.12 --no-project python "$REPO/scripts/mcp-readonly.py"
+else python3 "$REPO/scripts/mcp-readonly.py"; fi \
   || echo "read-only не применён — доделайте руками, см. README" >&2
 
 say "зеркалка Codex по расписанию (у Codex хуков нет, §6.2)"
