@@ -5,7 +5,7 @@
 словами. Пустой каталог восстанавливается из реестра. В живой волт
 пересборка не пишет (Г4/Т2.8).
 """
-import os, sys, json, tempfile, unittest, subprocess
+import os, re, sys, json, tempfile, unittest, subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -128,6 +128,24 @@ class Пересборка(unittest.TestCase):
         состояние, _, диф = карточки[self.card]
         self.assertEqual(состояние, "разошлось")
         self.assertIn("-заметка владельца", диф)
+
+    def test_пересохранённая_basic_memory_шапка_совпадает(self):
+        # Basic Memory переписывает файл по-своему; это не правка рукой
+        text = self.читать(self.card)
+        text = re.sub(r'^title: "(.*)"$', r"title: \1", text, flags=re.M)
+        text = re.sub(r"^(\w+: \d{4}-\d\d-\d\d)T", r"\1 ", text, flags=re.M)
+        text = re.sub(r"^  - ", "- ", text, flags=re.M)
+        text = text.replace("confidence: 0.93", "confidence: 0.930")
+        text = text.replace("\n---\n", "\npermalink: vault/x\n---\n", 1).rstrip("\n")
+        self.assertNotEqual(text, self.читать(self.card))
+        with open(os.path.join(self.vault, self.card), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        итог, _ = self.пересборка()
+        self.assertEqual((итог["совпало"], итог["разошлось"]), (3, 0), dict(итог))
+        with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:
+            fh.write("\nзаметка владельца\n")
+        итог, _ = self.пересборка()
+        self.assertEqual((итог["совпало"], итог["разошлось"]), (2, 1), dict(итог))
 
     def test_реестр_авторитет_для_шапки_и_evidence(self):
         """Статус в реестре и ссылки `evidence_refs` — источник; извлечение,
