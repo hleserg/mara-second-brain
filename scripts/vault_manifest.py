@@ -195,10 +195,12 @@ def проверить(con, vault):
         заметить("строк без контрольной точки",
                  "%d проекций в реестре без контрольной точки текущего манифеста — "
                  "прогон проектора прерван между записью и точкой (§5.2)" % строк)
+    import ledger_import as li            # он импортирует нас — только здесь
     for rel, з in sorted(в_файле.items()):
         try:
-            with open(os.path.join(vault, rel), "rb") as fh:
-                sha = hashlib.sha256(fh.read()).hexdigest()
+            # BOM и CRLF — как в `ledger_import._карточка`, иначе отпечатки разные
+            with open(os.path.join(vault, rel), encoding="utf-8-sig", errors="replace") as fh:
+                sha = li.отпечаток(fh.read())
         except OSError:
             заметить("файлов нет", "%s: в манифесте есть, на диске нет" % rel)
             continue
@@ -238,7 +240,8 @@ def self_check():
         текст = "---\ntitle: прислать смету\n---\n"
         with open(os.path.join(vault, rel), "w", encoding="utf-8") as fh:
             fh.write(текст)
-        sha = hashlib.sha256(текст.encode()).hexdigest()
+        import ledger_import as li
+        sha = li.отпечаток(текст)
         con.execute("insert into projections(path, object_kind, object_id, content_sha256, "
                     "written) values(?,?,?,?,?)", (rel, "commitment", "c1", sha, mi.now_iso()))
         h = записать(con, vault)

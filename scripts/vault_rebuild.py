@@ -21,15 +21,18 @@
 `vault_drift.py`.
 
 Что в проекции **не** воспроизводится из реестра и потому даёт «разошлось»:
-правка рукой, не перенесённая `ledger_import.py`; чужие ключи шапки (Basic
-Memory); извлечение, переделанное после проекции; строка журнала,
+правка рукой, не перенесённая `ledger_import.py`; извлечение,
+переделанное после проекции; строка журнала,
 поправленная рукой после переноса (в `corrections` остаются обе — прежняя
 и новая, пересборка рисует две строки); сущность, заведённая после проекции
 (индекс `_system/entity-index.json` — не реестр: «Люди:» линкуется иначе, а
 `content_sha256` разговора — хеш тела на момент проекции); поднятый
 `PIPELINE_VERSION` (строка `pipeline_version:` у всех карточек; какой
 версией нарисована — `projections.projector_version`). Это не ошибки
-пересборки, а сведения о волте — их и печатает сухой прогон.
+пересборки, а сведения о волте — их и печатает сухой прогон. Сравнение —
+по отпечатку `ledger_import.отпечаток` (шапка по значениям без ключей Basic
+Memory, тело без крайних пустых строк): пересохранение Basic Memory не
+«разошлось», дифф при «разошлось» — байтовый.
 
 Для `--into` живой волт не обязателен: нет его — сравнивать не с чем
 («не сравнивалось»), а имена в «Люди:» остаются без ссылок, пока
@@ -38,7 +41,7 @@ Memory); извлечение, переделанное после проекц�
     python3 scripts/vault_rebuild.py --check [--diff] [--vault V --root R]
     python3 scripts/vault_rebuild.py --into /tmp/vault-rebuilt [--vault V --root R]
 """
-import os, re, sys, json, argparse, difflib, sqlite3
+import os, sys, json, argparse, difflib, sqlite3
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -270,32 +273,6 @@ def _строка(con, вид, oid):
     return con.execute("select * from %s where id=?" % таблица, (oid,)).fetchone()
 
 
-ЧУЖИЕ_КЛЮЧИ = ("permalink",)            # Basic Memory дописывает в шапку
-
-
-def _знач(v):
-    if isinstance(v, list):
-        return [_знач(x) for x in v]
-    v = re.sub(r"^(\d{4}-\d\d-\d\d)T(\d\d:\d\d)", r"\1 \2", v or "")
-    try:
-        return float(v)                   # 0.90 и 0.9 — одно число
-    except ValueError:
-        return v
-
-
-def то_же(было, text):
-    """Basic Memory пересохраняет каждую карточку по-своему: кавычки у
-    заголовка, «T» в датах, отступ списков, `permalink`, пустая строка после
-    шапки (на doctor 78 из 78 проекций «разошлись» только этим). Сравниваем
-    шапку по значениям без чужих ключей, тело — без крайних пустых строк."""
-    fa, ba = cp.context_pack.mb.frontmatter(было)
-    fb, bb = cp.context_pack.mb.frontmatter(text)
-    for k in ЧУЖИЕ_КЛЮЧИ:
-        fa.pop(k, None); fb.pop(k, None)
-    return ba.strip() == bb.strip() and \
-        {k: _знач(v) for k, v in fa.items()} == {k: _знач(v) for k, v in fb.items()}
-
-
 def пересобрать(con, root, vault, сравнивать=True):
     """→ (счётчики, `{rel: (состояние, текст или None, причина)}`). Ничего
     не пишет; волт только читается — ради сравнения и карты сущностей.
@@ -348,7 +325,7 @@ def пересобрать(con, root, vault, сравнивать=True):
             итог["без файла"] += 1
             карточки[rel] = ("без файла", text, "реестр помнит карточку, файла нет")
             continue
-        if было == text or то_же(было, text):
+        if li.отпечаток(было) == li.отпечаток(text):   # по смыслу: пересохранение Basic Memory не «разошлось»
             итог["совпало"] += 1
             карточки[rel] = ("совпало", text, "")
         else:

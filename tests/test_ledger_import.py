@@ -9,7 +9,7 @@
 второй запуск (ТЗ §4.3: id не меняется никогда), иначе первый же откат
 разъедется с волтом.
 """
-import os, sys, io, json, hashlib, contextlib, sqlite3, tempfile, unittest
+import os, sys, io, json, contextlib, sqlite3, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -68,9 +68,8 @@ class Перенос(_СтендПереноса):
         пр, = self.строки("projections")
         self.assertEqual(пр["path"], "kb/commitments/2026-09-03-smeta.md")
         self.assertEqual(пр["object_id"], r["id"])
-        with open(p, "rb") as fh:
-            self.assertEqual(пр["content_sha256"],
-                             hashlib.sha256(fh.read()).hexdigest())
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(пр["content_sha256"], li.отпечаток(fh.read()))
 
     def test_разговор_переносится_в_свою_таблицу(self):
         карточка(self.vault, "kb/conversations/2026-09-02-1405-anna.md",
@@ -102,9 +101,8 @@ class Перенос(_СтендПереноса):
         r, = self.строки("commitments")
         self.assertEqual((r["id"], r["status"]), (было, "done"))
         пр, = self.строки("projections")
-        with open(p, "rb") as fh:
-            self.assertEqual(пр["content_sha256"],
-                             hashlib.sha256(fh.read()).hexdigest(),
+        with open(p, encoding="utf-8") as fh:
+            self.assertEqual(пр["content_sha256"], li.отпечаток(fh.read()),
                              "отпечаток обязан догнать файл, иначе сторож соврёт")
 
     def test_переименованный_файл_не_заводит_второе_обязательство(self):
@@ -190,8 +188,8 @@ class Перенос(_СтендПереноса):
         p = карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
         self.перенести()
         было = self.строки("commitments")[0]["id"]
-        with open(p, "rb") as fh:
-            отпечаток = hashlib.sha256(fh.read()).hexdigest()
+        with open(p, encoding="utf-8") as fh:
+            отпечаток = li.отпечаток(fh.read())
         карточка(self.vault, "kb/commitments/2026-09-03-smeta.md", status="done")
         итог = self.перенести(dry_run=True)
         self.assertEqual((итог["обновлено"], итог["обязательств"]), (1, 0))
@@ -784,8 +782,7 @@ class Запись(unittest.TestCase):
         self.assertEqual(r["manifest_hash"], vm.хеш(vm.собрать(self.con)),
                          "контрольная точка манифеста, записанного переносом")
         self.assertEqual(r["content_sha256"],
-                         hashlib.sha256(текст.replace("status: proposed", "status: open")
-                                        .encode("utf-8")).hexdigest(),
+                         li.отпечаток(текст.replace("status: proposed", "status: open")),
                          "а отпечаток — свежий")
 
     def test_удалённая_карточка_это_строка_без_карточки(self):
@@ -950,7 +947,7 @@ class Идентичность(unittest.TestCase):
         self.assertRegex(текст, r"^---\ntitle: [^\n]+\nid: %s\n" % oid)
         self.assertEqual(self.con.execute(
             "select content_sha256 from projections where path='kb/commitments/a.md'"
-        ).fetchone()[0], hashlib.sha256(текст.encode("utf-8")).hexdigest(),
+        ).fetchone()[0], li.отпечаток(текст),
             "отпечаток проекции не обновлён — сверка сочтёт правку чужой")
         self.assertEqual(li.вписать_id(self.con, self.vault), (0, 0))
         # и перенос после этого верит шапке: id тот же
