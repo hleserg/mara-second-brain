@@ -4,7 +4,7 @@
 волтом и реестром названо строкой, а сверка (`contextd_reconcile`) выносит
 его в находку. Ничего не пишется.
 """
-import os, sys, json, tempfile, unittest, subprocess
+import os, re, sys, json, tempfile, unittest, subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -68,6 +68,26 @@ class Дрейф(unittest.TestCase):
         # перенос забрал правку — дрейфа нет
         li.run(self.con, self.vault)
         self.assertFalse(vd.расхождение(self.дрейф()[0], strict=True))
+
+    def test_пересохранённая_basic_memory_не_изменена_после_переноса(self):
+        # Basic Memory переписывает файл по-своему: отпечаток по смыслу тот же,
+        # и шапка с evidence у такой карточки сравниваются с реестром, а не
+        # пропускаются как «правка рукой»
+        with open(self.card, encoding="utf-8") as fh:
+            text = было = fh.read()
+        text = re.sub(r'^title: "(.*)"$', r"title: \1", text, flags=re.M)
+        text = re.sub(r"^(\w+: \d{4}-\d\d-\d\d)T", r"\1 ", text, flags=re.M)
+        text = re.sub(r"^  - ", "- ", text, flags=re.M)
+        text = text.replace("confidence: 0.93", "confidence: 0.930")
+        text = text.replace("\n---\n", "\npermalink: vault/x\n---\n", 1).rstrip("\n")
+        self.assertNotEqual(text, было)
+        with open(self.card, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        итог, зам = self.дрейф()
+        self.assertEqual((зам, итог["изменены после переноса"]), ([], 0))
+        with open(self.card, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("status: proposed", "status: done"))
+        self.assertEqual(self.дрейф()[0]["изменены после переноса"], 1, "а правка статуса — изменение")
 
     def test_правка_статуса_рукой_не_расхождение_шапки(self):
         """Ревью: самый частый случай — статус закрыт рукой в Obsidian до

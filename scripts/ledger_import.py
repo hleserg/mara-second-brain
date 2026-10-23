@@ -146,8 +146,33 @@ def _строка(v):
     return str(v)
 
 
+ЧУЖИЕ_КЛЮЧИ = ("permalink",)            # Basic Memory дописывает в шапку
+
+
+def _знач(v):
+    if isinstance(v, list):
+        return [_знач(x) for x in v]
+    v = re.sub(r"^(\d{4}-\d\d-\d\d)T(\d\d:\d\d)", r"\1 \2", v or "")
+    try:
+        return float(v)                   # 0.90 и 0.9 — одно число
+    except ValueError:
+        return v
+
+
+def отпечаток(текст):
+    """`content_sha256` карточки — по смыслу, не по байтам: Basic Memory
+    пересохраняет каждую карточку по-своему (кавычки у заголовка, «T» в
+    датах, отступ списков, `permalink`, пустая строка после шапки), и хеш
+    байтов звал «изменёнными после переноса» 76 из 78 проекций на doctor.
+    Шапка — по значениям без чужих ключей, тело — без крайних пустых строк."""
+    fm, тело = mb.frontmatter(текст)
+    шапка = {k: _знач(v) for k, v in fm.items() if k not in ЧУЖИЕ_КЛЮЧИ}
+    return hashlib.sha256((json.dumps(шапка, sort_keys=True, ensure_ascii=False)
+                           + "\n" + тело.strip()).encode("utf-8")).hexdigest()
+
+
 def _карточка(vault, p):
-    """(rel, fm, sha256 файла, текст) одной карточки; None — не читается."""
+    """(rel, fm, отпечаток, текст) одной карточки; None — не читается."""
     try:
         with open(p, "rb") as fh:
             raw = fh.read()
@@ -162,7 +187,7 @@ def _карточка(vault, p):
     # всеми полями NULL и ключом по пути
     текст = raw.decode("utf-8", "replace").lstrip("\ufeff").replace("\r\n", "\n")
     fm, _ = mb.frontmatter(текст)
-    return (os.path.relpath(p, vault), fm, hashlib.sha256(raw).hexdigest(), текст)
+    return (os.path.relpath(p, vault), fm, отпечаток(текст), текст)
 
 
 def карточки(vault, подкаталог):
@@ -635,12 +660,11 @@ def вписать_id(con, vault, dry_run=False):
                 # прерванный между ними прогон при повторе видит карточку ещё
                 # без id и переписывает её, а обратный порядок оставлял бы
                 # окно, которое повтор не чинит — id на месте, отпечаток
-                # старый (Codex по #138, круг 4). Байты те же, что пишет
-                # `fh.write(новый)` в utf-8. По объекту, не по пути:
+                # старый (Codex по #138, круг 4). По объекту, не по пути:
                 # переименованная до ночного переноса карточка держит проекцию
                 # под старым путём, и обновление по пути не нашло бы ни строки
                 # (ревью P3-6)
-                sha = hashlib.sha256(новый.encode("utf-8")).hexdigest()
+                sha = отпечаток(новый)
                 con.execute("update projections set content_sha256=?, path=? "
                             "where object_id=? and object_kind=?",
                             (sha, rel, row["id"], вид))

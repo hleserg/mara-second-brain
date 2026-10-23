@@ -5,7 +5,7 @@
 контрольная точка — `projections.manifest_hash`. Пересборка в пустой каталог
 кладёт манифест рядом с карточками. Сверка выносит расхождение в находку.
 """
-import os, sys, json, hashlib, tempfile, unittest, subprocess
+import os, re, sys, json, tempfile, unittest, subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import mara_ingest as mi
@@ -68,8 +68,8 @@ class Манифест(unittest.TestCase):
         self.assertEqual(док["hash"], vm.хеш(док["projections"]))
         self.assertEqual(док["pipeline_version"], mi.PIPELINE_VERSION)
         for rel, з in док["projections"].items():
-            with open(os.path.join(self.vault, rel), "rb") as fh:
-                self.assertEqual(з["sha256"], hashlib.sha256(fh.read()).hexdigest(), rel)
+            with open(os.path.join(self.vault, rel), encoding="utf-8") as fh:
+                self.assertEqual(з["sha256"], li.отпечаток(fh.read()), rel)
             self.assertEqual(з["projector_version"], mi.PIPELINE_VERSION)
         хеши = {r[0] for r in self.con.execute("select manifest_hash from projections")}
         self.assertEqual(хеши, {док["hash"]}, "§5.2: у всех строк контрольная точка манифеста")
@@ -119,6 +119,20 @@ class Манифест(unittest.TestCase):
         self.assertIn("count=0", зам[0][1])
         vm.записать(self.con, self.vault)
         self.assertEqual(vm.проверить(self.con, self.vault)[1], [], "count починен")
+
+    def test_пересохранённая_basic_memory_как_в_манифесте(self):
+        p = os.path.join(self.vault, self.card)
+        with open(p, encoding="utf-8") as fh:
+            text = было = fh.read()
+        text = re.sub(r'^title: "(.*)"$', r"title: \1", text, flags=re.M)
+        text = re.sub(r"^(\w+: \d{4}-\d\d-\d\d)T", r"\1 ", text, flags=re.M)
+        text = re.sub(r"^  - ", "- ", text, flags=re.M)
+        text = text.replace("confidence: 0.93", "confidence: 0.930")
+        text = text.replace("\n---\n", "\npermalink: vault/x\n---\n", 1).rstrip("\n")
+        self.assertNotEqual(text, было)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        self.assertEqual(self.проверка()[1], [], "пересохранение Basic Memory — не правка")
 
     def test_правка_рукой_видна_только_строго(self):
         with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:
