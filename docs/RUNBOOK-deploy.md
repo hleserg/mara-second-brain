@@ -958,7 +958,7 @@ PR #98: прямой выкат этот шаг делает, а откат ег
 | База | `версия 9 → 9, integrity_check: ok, foreign_key_check: ok` | шаг 5а |
 | Подъём | `active`, `/metrics` → `200` (`curl --retry 5 --retry-connrefused`), `cmdline` — тот же путь | шаг 6 |
 | Канон | `канон: True в индексе: True имя: True` | §4а |
-| Венв | `pip install --require-hashes -r requirements-venv.txt -r requirements-venv-models.txt` — 17 мин (модели spaCy с GitHub шли медленно); после — `certifi 2026.10.19`, `spacy 3.8.16`, обе модели импортируются | `venv/bin/python -c "import certifi, spacy"` |
+| Венв | `pip install --require-hashes -r requirements-venv.txt -r requirements-venv-models.txt` в фоне (модели spaCy с GitHub шли медленно, время не засекал); после — `certifi 2026.10.19`, `spacy 3.8.16`, обе модели импортируются | `venv/bin/python -c "import certifi, spacy"` |
 
 Затем на выкаченном дереве:
 
