@@ -54,6 +54,18 @@ class _СтендПереноса(unittest.TestCase):
         return [dict(r) for r in self.con.execute("select * from " + table)]
 
 
+class Отпечаток(unittest.TestCase):
+    def test_пустые_строки_и_байтовый_хеш_тела_не_меняют_отпечаток(self):
+        # пересохранение Basic Memory на doctor убирало пустую строку перед
+        # «Правки:» и меняло байты тела, а с ними content_sha256 разговора
+        a = ("---\ntitle: x\ncontent_sha256: aa\n---\n\n- Обещание: x\nЛюди: y\n\n"
+             "Правки:\n- 2026-09-21T18:30, Мара: закрыто\n")
+        b = ("---\ntitle: \"x\"\ncontent_sha256: bb\n---\n- Обещание: x\nЛюди: y\n"
+             "Правки:\n- 2026-09-21T18:30, Мара: закрыто")
+        self.assertEqual(li.отпечаток(a), li.отпечаток(b))
+        self.assertNotEqual(li.отпечаток(a), li.отпечаток(a.replace("Люди: y", "Люди: z")))
+
+
 class Перенос(_СтендПереноса):
     def test_обязательство_переносится_с_полями_и_отпечатком(self):
         p = карточка(self.vault, "kb/commitments/2026-09-03-smeta.md")
