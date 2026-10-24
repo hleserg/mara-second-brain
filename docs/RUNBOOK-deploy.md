@@ -975,6 +975,32 @@ PR #98: прямой выкат этот шаг делает, а откат ег
   Т2.2; проверки Т2.6 после — в карточке Т2.6. `/metrics` → `200`, крон — 97
   строк на месте.
 
+## 7и. Прогон 10 — 2026-10-24, 13:41 MSK
+
+Выкат #194 (только документы) и #195 (`filelock` 4.2.1, `setuptools` 84.1.0 —
+семь GHSA, `osv` красный у всех PR с утра 2026-10-24), агентом с мака по слову
+владельца; следом — переустановка венва. Шаги 1–6 собраны в один скрипт в
+скретчпаде сессии, действия — те же, что в §1–§6.
+
+| Что | Значение | Чем доказано |
+|---|---|---|
+| До выката | `main`, `763bafe`; неотслеживаемые те же два файла; демон `active`; `--no-merged` — те же две старые ветки | шаг 1 |
+| Цель | `23f1bef` — голова `main`; у головы PR #195 (`8e26595`) `kotlin`, `python`, `osv` — `pass`; у самого сквош-коммита в момент выката `osv` — `success`, `python` и `kotlin` ещё бежали | шаг 2, `gh pr checks 195`, `gh api …/commits/<sha>/check-runs` |
+| Миграция в диапазоне | нет: грэп по `scripts/` пуст (`grep rc=1`); в `install/` менялся только `requirements-venv.txt` (+4/−4) | шаг 2, `git diff 763bafe 23f1bef --stat -- install/` |
+| `MARA_OWNER` / `MARA_OWNER_NAME` в env | 1 / 1; `usage-hosts` есть; `OPENROUTER_API_KEY` есть | шаг 2, шаг 4 |
+| Точка возврата | тег `deploy-before-20261024-134121` на `763bafe` | шаг 3 |
+| Демон погашен / поднят / слушает | 13:41:21 / 13:41:24 / 13:41:26 | `journalctl -u contextd` |
+| Простой по `date +%s` между `stop` и `start` | 3 с (1792838481 → 1792838484) | шаг 3, шаг 6 |
+| Крон | `--check` — совпадает | шаг 4 |
+| Дерево | путь юнита тот же, `HEAD == цель`, импорт ок (3.12.3) | шаг 5 |
+| База | `версия 9 → 9, integrity_check: ok, foreign_key_check: ok` | шаг 5а |
+| Подъём | `active`, `/metrics` → `200` (`curl --retry 5 --retry-connrefused`), `cmdline` — тот же путь | шаг 6 |
+| Канон | `канон: True в индексе: True имя: True` | §4а |
+| Венв | `pip install --require-hashes -r requirements-venv.txt -r requirements-venv-models.txt` в фоне: rc 0, 778 с (`сек=` из обёртки; одно прерывание скачивания модели, pip докачал сам); после — `filelock 4.2.1`, `setuptools 84.1.0`, `certifi 2026.10.19`, модели `ru_core_news_sm`/`en_core_web_sm` 3.8.0 импортируются | `venv/bin/python -c "import filelock, setuptools, certifi, ru_core_news_sm, en_core_web_sm"` |
+
+Урок прогона: проверка «pip уже бежит» через `pgrep -af "venv/bin/pip"`
+ловит собственную командную строку ssh-шелла — искать `"[p]ip install"`. Проверка моделей после pip должна называть то, что пришпилено в `requirements-venv-models.txt` (`ru_core_news_sm`, `en_core_web_sm`): обёртка спросила `ru_core_news_md`/`lg` и упала при целом венве.
+
 ## 8. Что нашлось при выкате 2026-09-11 04:19 — прогон 1 (не чинить здесь, вынести в issue)
 
 - `~/.hermes` на doctor **нет вовсе** — плагин `mara-context` там не
