@@ -381,9 +381,16 @@ def pair(con, name):
 def _pair(con, name):
     token = secrets.token_urlsafe(32)
     dev = "dev_" + secrets.token_hex(8)
-    con.execute("insert into devices(id,name,token_sha256,created) values(?,?,?,?)",
-                (dev, name, hashlib.sha256(token.encode()).hexdigest(), mi.now_iso()))
+    now = mi.now_iso()
+    con.execute("insert into devices(id,name,token_sha256,created,expires) values(?,?,?,?,?)",
+                (dev, name, hashlib.sha256(token.encode()).hexdigest(), now, mi.срок_токена(now)))
     return dev, token
+
+
+def годен_до(con, device_id):
+    """Конец срока токена (ISO) или None у базы до миграции 10."""
+    row = con.execute("select expires from devices where id=?", (device_id,)).fetchone()
+    return row["expires"] if row else None
 
 
 def revoke(con, device_id):
@@ -429,16 +436,27 @@ def узел_устройства(con, device_id):
 
 
 def device_of(con, header):
-    """Устройство по заголовку Authorization или None. Отозванное — тоже None."""
+    """Устройство по заголовку Authorization или None. Отозванное и
+    просроченное (`expires`, Т0.9 п.1) — тоже None: для клиента это тот же
+    401, продление — `--pair` тем же именем. Срок и `now_iso` — строки
+    одного формата и пояса, сравниваются как строки."""
     if not header or not header.startswith("Bearer "):
         return None
     h = hashlib.sha256(header[7:].strip().encode()).hexdigest()
-    row = con.execute("select id from devices where token_sha256=? and revoked_at is null",
-                      (h,)).fetchone()
+    row = con.execute("select id from devices where token_sha256=? and revoked_at is null "
+                      "and (expires is null or expires > ?)", (h, mi.now_iso())).fetchone()
     if not row:
         return None
     con.execute("update devices set last_seen=? where id=?", (mi.now_iso(), row["id"]))
     return row["id"]
+
+
+def дней_токену(con, device_id):
+    """Целых суток до конца срока токена; None, если срока нет."""
+    до = годен_до(con, device_id)
+    if not до:
+        return None
+    return int((datetime.fromisoformat(до) - datetime.now(mi.TZ)).total_seconds() // 86400)
 
 
 def scope_ok(con, device_id, kind):
@@ -1366,9 +1384,12 @@ class Handler(BaseHTTPRequestHandler):
             здоровье, беда = разобрать_здоровье(data)
             if беда:
                 return self.say(400, {"error": беда})
+            # сколько суток токену осталось — приложению для предупреждения
+            # на экране здоровья за 14 суток (Т0.9 п.1); None до миграции 10
+            ответ = {"ok": True, "token_days_left": дней_токену(con, dev)}
             if not принять_здоровье(con, dev, здоровье):
-                return self.say(200, {"ok": True, "stale": True})
-            return self.say(200, {"ok": True})
+                ответ["stale"] = True
+            return self.say(200, ответ)
         if p.path in (ПУТЬ_ПРАВКИ, "/v1/ingest/event", "/v1/ingest/message",
                       "/v1/ingest/email"):
             команда = p.path == ПУТЬ_ПРАВКИ
@@ -3143,7 +3164,8 @@ def main(argv=None):
             dev, token = pair(con, a.pair)
         except ValueError as e:
             print("не завёл: %s" % e); return 1
-        print("устройство: %s\nтокен (показывается один раз): %s" % (dev, token))
+        print("устройство: %s\nтокен (показывается один раз): %s\nгоден до: %s"
+              % (dev, token, годен_до(con, dev)))
         return 0
     if a.pair_node:
         con = mi.connect(a.root)
@@ -3151,9 +3173,9 @@ def main(argv=None):
             dev, token = pair_node(con, a.pair_node)
         except ValueError as e:
             print("не завёл: %s" % e); return 1
-        print("узел: %s (%s)\nтокен (показывается один раз): %s\n"
+        print("узел: %s (%s)\nтокен (показывается один раз): %s\nгоден до: %s\n"
               "на узле: MARA_NODE_TOKEN=<токен> в окружении node_agent.py"
-              % (a.pair_node, dev, token))
+              % (a.pair_node, dev, token, годен_до(con, dev)))
         return 0
     if a.cancel:
         con = mi.connect(a.root)
