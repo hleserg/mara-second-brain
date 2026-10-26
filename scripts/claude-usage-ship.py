@@ -297,6 +297,7 @@ def self_check():
         open(os.path.join(tr, name), "w").write("{}\n")
     os.utime(os.path.join(tr, "old.jsonl"), (0, 0))
     os.environ["CLAUDE_PROJECTS"] = os.path.dirname(tr)
+    os.makedirs(os.path.join(dest, "raw", "claude-code"))  # GNU rsync не создаёт два уровня
     assert push(os.path.join(d, "нет"), dest), "локальный rsync должен пройти"
     got = sorted(os.path.relpath(f, dest) for f in glob.glob(os.path.join(dest, "**", "*.jsonl"), recursive=True))
     assert got == ["raw/claude-code/p/s1.jsonl", "raw/claude-code/p/s1/subagents/agent-1.jsonl"], got
