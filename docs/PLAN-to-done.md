@@ -1455,6 +1455,17 @@ Gmail в той части, где не нужен его браузер. **Ге
   (б) переписать историю; (в) снести бандл 12.10 первым; (г) шару убрать
   из `fstab` и `TARGETS`, offsite — по SSH (Т3б.5); (д) 30 суток после
   последнего mtime для файлов, уже проглоченных ingest'ом.
+  *Ход 2026-10-26 (агент):* (в) сделано — `vault-2026-10-12.bundle.gpg`
+  снесён, `df -h /mnt/backup` 93 % → 75 %, свободно 57 ГБ; (б) готово в
+  коде — `purge-from-vault.sh` берёт каталог, уже выведенный из git
+  (`.gitignore` + `git rm -r --cached`, иначе отказ: сброс рабочей копии
+  после filter-repo снёс бы зеркала с диска), в R2 — `rclone purge`;
+  (а) те же два каталога в `.gitignore` волта в `stage0-doctor.sh`.
+  Живой прогон на doctor — после выката: дописать `.gitignore` волта,
+  `git rm -r --cached raw/claude-code raw/codex`,
+  `purge-from-vault.sh raw/claude-code raw/codex` под nohup (pack 46 ГБ,
+  `pack.threads=1` — часы), бандл 19.10 (48 ГБ) при этом сносится и
+  собирается заново.
   Что сделать, по порядку: (а) ~~**решение владельца**~~ — зеркала сессий
   не версионировать: `raw/claude-code/` и `raw/codex/` в `.gitignore` волта
   и `git rm -r --cached` (рабочая копия, Basic Memory и панель `claude-usage`

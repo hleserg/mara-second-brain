@@ -31,6 +31,10 @@ cat > .gitignore <<'IGN'
 # data-v3-credentials-backup-*.json — секреты в облако не уезжают (ТЗ §11)
 .obsidian/plugins/copilot/data*
 .obsidian/plugins/remotely-save/data*
+# зеркала сессий агентов — растущие jsonl, в истории им не место (Т3б.7):
+# один файл на 889 МБ лёг в историю 351 раз, .git — 70 ГБ при kb/ 14 МБ
+/raw/claude-code/
+/raw/codex/
 *.tmp
 .DS_Store
 IGN
