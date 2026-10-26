@@ -1461,11 +1461,25 @@ Gmail в той части, где не нужен его браузер. **Ге
   (`.gitignore` + `git rm -r --cached`, иначе отказ: сброс рабочей копии
   после filter-repo снёс бы зеркала с диска), в R2 — `rclone purge`;
   (а) те же два каталога в `.gitignore` волта в `stage0-doctor.sh`.
-  Живой прогон на doctor — после выката: дописать `.gitignore` волта,
-  `git rm -r --cached raw/claude-code raw/codex`,
-  `purge-from-vault.sh raw/claude-code raw/codex` под nohup (pack 46 ГБ,
-  `pack.threads=1` — часы), бандл 19.10 (48 ГБ) при этом сносится и
-  собирается заново.
+  *Живой прогон 2026-10-26 13:4x–13:51 MSK (агент, после выката `1ae6058`,
+  прогон 12):* коммит волта «raw/claude-code, raw/codex выведены из git»
+  (`.gitignore` + `git rm -r --cached`), страховочный клон
+  `git clone --mirror /srv/vault /srv/backup/vault-before-t3b7.git` (та же
+  ФС, 71 ГБ, HEAD совпал), затем `purge-from-vault.sh raw/claude-code
+  raw/codex` под `setsid nohup`, `__EXIT 0`. filter-repo: история
+  переписана за 14,66 с, repack за 54,91 с (лог прогона) — не часы;
+  `du -sh .git` 71 ГБ → 40 МБ, `git count-objects -vH` pack 45,45 GiB →
+  38,05 MiB, россыпь 0; `git rev-list --count --all` 2454 → 2390 (коммиты,
+  трогавшие только зеркала, опустели и выпали); `git log --all
+  --full-history -- raw/claude-code raw/codex` пуст, в R2 обоих нет. Зеркало
+  пересоздано, HEAD тот же; семь бандлов на `/mnt/backup/mara` снесены,
+  новый `vault-2026-10-26.bundle.gpg` — 34 МБ (`vault-backup.sh`, `bundle
+  verify` ok); `df -h /mnt/backup` 75 % → 52 %, свободно 108 ГБ;
+  `/mnt/win-backups/mara` пропущен (не смонтирован). Файлы на диске целы
+  (`ls raw/claude-code` — 36 каталогов проектов). Страховочный клон
+  **оставлен** — снести владельцу (`rm -rf
+  /srv/backup/vault-before-t3b7.git`), когда убедится, что волт жив.
+  Галочка ещё не ставится: остались (г) и (д).
   Что сделать, по порядку: (а) ~~**решение владельца**~~ — зеркала сессий
   не версионировать: `raw/claude-code/` и `raw/codex/` в `.gitignore` волта
   и `git rm -r --cached` (рабочая копия, Basic Memory и панель `claude-usage`
