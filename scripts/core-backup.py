@@ -35,7 +35,7 @@ denylisted из Git, R2 и бэкапов. Восстановление ядра
 то есть и на чистой машине посреди восстановления (§17.3 п.4).
 """
 import os, sys, json, glob, time, shutil, hashlib, sqlite3, tarfile
-import argparse, tempfile, subprocess, io, contextlib, socket, fcntl
+import argparse, tempfile, subprocess, io, contextlib, socket, fcntl, fnmatch
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
@@ -853,6 +853,56 @@ def сверить_копию(путь, ожидаемый):
         raise OSError("копия прочиталась не тем, чем писалась")
 
 
+def _sftp(цель):
+    """`sftp://user@host/C:/mara` → (`user@host`, `/C:/mara`). Слэш после хоста
+    остаётся в пути: так Windows OpenSSH видит диск."""
+    хост, _, путь = цель[len("sftp://"):].partition("/")
+    return хост, "/" + путь
+
+
+def sftp_батч(цель, команды):
+    """Одна сессия sftp на пачку команд (Т3б.5 п.8). Ключ — у doctor в
+    `~/.ssh`, пароля нет (`BatchMode`): крон спросить некого. Отказ любой
+    команды без `-` рвёт пачку кодом 1 — это и есть «не записан»."""
+    хост, _ = _sftp(цель)
+    r = subprocess.run(["sftp", "-q", "-o", "BatchMode=yes", "-o",
+                        "ConnectTimeout=20", "-b", "-", хост],
+                       input="\n".join(команды) + "\n", capture_output=True,
+                       text=True)
+    if r.returncode:
+        хвост = (r.stderr.strip().splitlines() or ["код %d" % r.returncode])[-1]
+        raise OSError("sftp %s: %s" % (хост, хвост))
+    return r.stdout
+
+
+def sftp_запись(цель, enc, имя, сводка, stage):
+    """Архив и сайдкар на удалённую цель — тем же порядком, что и на
+    носитель: временное имя, чтение обратно и сверка хеша, переименование.
+    `get` возит архив назад целиком (десятки МБ по локалке — секунды): иного
+    способа узнать, что легло то, что писали, у sftp нет. `-rm` перед
+    `rename`: Windows OpenSSH не переименовывает поверх существующего."""
+    _, каталог = _sftp(цель)
+    сайдкар = имя.replace(".tar.gz.gpg", ".manifest.json")
+    местный_сайдкар = os.path.join(stage, сайдкар)
+    with open(местный_сайдкар, "w", encoding="utf-8") as fh:
+        json.dump(сводка, fh, ensure_ascii=False, indent=1, sort_keys=True)
+    врем = "%s/.%s.tmp" % (каталог, имя)
+    обратно = os.path.join(stage, "обратно")
+    try:
+        sftp_батч(цель, ["-mkdir %s" % каталог, "put %s %s" % (enc, врем),
+                         "get %s %s" % (врем, обратно)])
+        сверить_копию(обратно, сводка["sha256"])
+        sftp_батч(цель, ["-rm %s/%s" % (каталог, имя),
+                         "rename %s %s/%s" % (врем, каталог, имя),
+                         "put %s %s/%s" % (местный_сайдкар, каталог, сайдкар)])
+    except OSError:
+        try:
+            sftp_батч(цель, ["-rm %s" % врем])
+        except OSError:
+            pass
+        raise
+
+
 def прогон(root, targets, пароль, keep, work, аудио=True, drill=True, weekly=0,
            monthly=0):
     начало = time.time()
@@ -893,6 +943,14 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
 
         записано = []
         for t in targets:
+            if mi.удалённый(t):
+                try:
+                    sftp_запись(t, enc, имя, сводка, stage)
+                    записано.append(t)
+                except OSError as e:
+                    print("core-backup: %s не записан (%s)" % (t, e),
+                          file=sys.stderr)
+                continue
             if not mi.смонтирован(t, root):
                 # Не «недоступен»: каталог как раз доступен, в том и беда.
                 print("core-backup: %s на одном устройстве с %s — носитель не "
@@ -957,6 +1015,11 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
             # `проверить_аудио` прочитало бы его оттуда же и зазеленело. Дыра
             # узкая — отвалиться надо внутри одного прогона, — но зелёная
             # сверка на потерянном диске хуже красной на живом.
+            if mi.удалённый(t):
+                # shortcut: по sftp уезжает только архив, зеркало аудио —
+                # нет; добавить, когда появится цель без локального зеркала
+                зв[t] = {"пропущен": "sftp: зеркало аудио не поддерживается"}
+                continue
             if not mi.смонтирован(t, root):
                 print("core-backup: %s отвалился между архивом и зеркалом — "
                       "аудио не зеркалю" % t, file=sys.stderr)
@@ -1004,6 +1067,11 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
         # осталось ни одной читаемой копии, обязана быть красной.
         цель = next((t for t in записано
                      if os.path.exists(os.path.join(t, имя))), записано[0])
+        if mi.удалённый(цель):
+            # Удалённая цель разворачиванию не поддаётся: ночь, где уцелела
+            # только она, красная — как и ночь без единой читаемой копии.
+            raise RuntimeError("учение: ни одного носителя с архивом %s, "
+                               "с %s разворачивать не умею" % (имя, цель))
         # Учение сверяет то, что зеркалили (#63). Требовать аудио, которого
         # не зеркалили, — падение ночи из-за работы, которой не просили:
         # прежде каждая причина кончалась `RuntimeError: аудио … нет в
@@ -1110,7 +1178,29 @@ def поколения(даты, keep, weekly=0, monthly=0):
     return остаются
 
 
+def sftp_ротация(target, keep, weekly=0, monthly=0):
+    """Та же ротация поколениями на удалённой цели: список — `ls -1a`,
+    уборка — `rm` одной пачкой. Огрызки `.core-*.tmp` — с `-`, как и
+    локальные: не убрался — полежит ещё сутки."""
+    _, каталог = _sftp(target)
+    имена = [os.path.basename(x.strip())
+             for x in sftp_батч(target, ["ls -1a %s" % каталог]).splitlines()
+             if x.strip() and not x.startswith("sftp>")]
+    даты = [d for d in map(_дата_архива, fnmatch.filter(имена, "core-*.tar.gz.gpg")) if d]
+    остаются = поколения(даты, keep, weekly, monthly)
+    убрать = ["-rm %s/%s" % (каталог, x) for x in fnmatch.filter(имена, ".core-*.tmp")]
+    for шаблон in ("core-*.tar.gz.gpg", "core-*.manifest.json"):
+        for x in sorted(fnmatch.filter(имена, шаблон)):
+            d = _дата_архива(x)
+            if d is not None and d not in остаются:
+                убрать.append("rm %s/%s" % (каталог, x))
+    if убрать:
+        sftp_батч(target, убрать)
+
+
 def ротация(target, keep, weekly=0, monthly=0):
+    if mi.удалённый(target):
+        return sftp_ротация(target, keep, weekly, monthly)
     for огрызок in glob.glob(os.path.join(target, ".core-*.tmp")):
         # Огрызок неудачной ночи, который не удалось убрать тогда же (носитель
         # ушёл в read-only). Имя с датой — следующая ночь его не перезапишет, а
@@ -2534,6 +2624,12 @@ def main():
         # Бэкапу, в отличие от сверки, продолжать нечем: писать некуда.
         raise SystemExit(str(e))
     if a.drill_only:
+        # Учение идёт с носителя: с удалённой цели архив не разворачивается,
+        # а на восстановлении (RUNBOOK-restore.md) его сперва забирают `sftp get`.
+        targets = [t for t in targets if not mi.удалённый(t)]
+        if not targets:
+            raise SystemExit("core-backup: среди носителей нет локального — "
+                             "с sftp:// учение не идёт")
         # Развернуть архив с каталога-обманки значит доложить «восстановление
         # проверено» ровно про ту копию, которой на самом деле нет.
         if not mi.смонтирован(targets[0], a.root):

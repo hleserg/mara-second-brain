@@ -1485,8 +1485,21 @@ def write_json(path, data):
     return path
 
 
+def удалённый(target):
+    """Цель бэкапа ядра вне doctor (Т3б.5 п.8): `sftp://user@host/abs/path`.
+    Не каталог — её не монтируют, по ней не ходит glob, и каждый, кто
+    перебирает носители, обязан спросить это первым."""
+    return target.startswith("sftp://")
+
+
+def _sftp_цел(target):
+    хост, _, путь = target[len("sftp://"):].partition("/")
+    return удалённый(target) and bool(хост) and bool(путь)
+
+
 def носители(строка):
-    """Разбор списка носителей из env: пути через пробел.
+    """Разбор списка носителей из env: пути через пробел; цель `sftp://` —
+    как есть, `normpath` ей бы сломал двойной слэш.
 
     Пробел внутри пути не поддерживается и поддержан быть не может — тем же
     пробелом разделяется список. Молча такой путь распадается на два
@@ -1502,8 +1515,8 @@ def носители(строка):
     переменной она унесла бы все остальные находки. Кто как реагирует, решает
     вызывающий: бэкап отказывается писать, сверка докладывает находкой.
     """
-    пути = [os.path.normpath(p) for p in строка.split()]
-    кривые = [p for p in пути if not p.startswith("/")]
+    пути = [p if удалённый(p) else os.path.normpath(p) for p in строка.split()]
+    кривые = [p for p in пути if not (p.startswith("/") or _sftp_цел(p))]
     if кривые:
         raise ValueError("носители: %s — путь не абсолютный; список носителей "
                          "разделяется пробелами, пробел внутри пути не "
@@ -1599,6 +1612,14 @@ def self_check():
     assert next_delay(0) == 0 and 48 <= next_delay(1) <= 72, "расписание ретраев"
     assert носители(" /mnt/a  /mnt/b ") == ["/mnt/a", "/mnt/b"]
     assert носители("/mnt/a/") == ["/mnt/a"], "хвостовой слэш даёт второй ключ"
+    assert носители("/mnt/a sftp://user@host/C:/mara") == ["/mnt/a", "sftp://user@host/C:/mara"]
+    assert удалённый("sftp://user@host/x") and not удалённый("/mnt/a")
+    for кривой in ("sftp://host", "sftp:///x", "sftp://host/"):
+        try:
+            носители(кривой)
+            raise AssertionError("%s прошёл" % кривой)
+        except ValueError:
+            pass
     try:
         носители("/mnt/мой диск")
         raise AssertionError("пробел в пути прошёл молча")

@@ -195,6 +195,32 @@ class Прогон(unittest.TestCase):
         лежит = os.path.join(цель, r["архив"])
         self.assertEqual(os.stat(лежит).st_mode & 0o777, 0o600)
 
+    def test_sftp_цель_в_прогоне_последняя_и_без_учения(self):
+        """Т3б.5 п.8: цель `sftp://` рядом с носителем — архив уезжает,
+        отметка носителей её знает, аудио на неё не зеркалится, учение
+        идёт по носителю. Одна лишь удалённая цель — ночь красная: с неё
+        разворачивать нечем."""
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        root, пароль = self.стенд()
+        bin_, удалённо = поддельный_sftp(self.tmp)
+        with unittest.mock.patch.dict(os.environ, {
+                "PATH": bin_ + os.pathsep + os.environ["PATH"],
+                "FAKE_SFTP_ROOT": удалённо}):
+            цель = os.path.join(self.tmp, "target")
+            url = "sftp://user@host/mara"
+            r = self.cb.прогон(root, [цель, url], пароль, keep=2,
+                               work=os.path.join(self.tmp, "work"))
+            self.assertEqual(r["носители"], [цель, url])
+            self.assertEqual(r["аудио"][url], {"пропущен": "sftp: зеркало аудио не поддерживается"})
+            self.assertEqual(sorted(json.load(open(self.отметка, encoding="utf-8"))),
+                             sorted([цель, url]))
+            self.assertEqual(json.load(open(self.учение, encoding="utf-8"))["target"], цель)
+            self.assertEqual(sorted(os.listdir(os.path.join(удалённо, "mara"))),
+                             [r["архив"].replace(".tar.gz.gpg", ".manifest.json"), r["архив"]])
+            with self.assertRaisesRegex(RuntimeError, "учение"):
+                self.cb.прогон(root, [url], пароль, keep=2,
+                               work=os.path.join(self.tmp, "work"))
+
     def test_отметка_учения_только_за_удачным_учением(self):
         """Т9.1, ревью P2-1: отметка учения — след удачного учения, и ничего
         больше. Без учения и при упавшем учении её нет; сбой её записи ночь
@@ -320,6 +346,131 @@ class Прогон(unittest.TestCase):
             env={**os.environ, "MARA_BACKUP_ALLOW_SAME_DEV": ""})
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("носитель не смонтирован", r.stderr)
+
+ПОДДЕЛЬНЫЙ_SFTP = r"""import os, shutil, sys
+root = os.environ["FAKE_SFTP_ROOT"]
+host = sys.argv[-1]
+if host.endswith("dead"):
+    sys.stderr.write("ssh: connect to host dead: Connection refused\n")
+    sys.exit(1)
+def loc(p):
+    return os.path.join(root, p.lstrip("/"))
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    sys.stdout.write("sftp> " + line + "\n")
+    soft = line.startswith("-")
+    parts = line.lstrip("-").split()
+    cmd, args = parts[0], parts[1:]
+    try:
+        if cmd == "mkdir":
+            os.mkdir(loc(args[0]))
+        elif cmd == "put":
+            data = open(args[0], "rb").read()
+            if host.endswith("corrupt"):
+                data += b"\0"
+            open(loc(args[1]), "wb").write(data)
+        elif cmd == "get":
+            shutil.copyfile(loc(args[0]), args[1])
+        elif cmd == "rename":
+            if os.path.exists(loc(args[1])):
+                raise OSError("Failure")
+            os.rename(loc(args[0]), loc(args[1]))
+        elif cmd == "rm":
+            os.remove(loc(args[0]))
+        elif cmd == "ls":
+            for n in sorted(os.listdir(loc(args[-1]))):
+                sys.stdout.write(n + "\n")
+        else:
+            raise OSError("unknown " + cmd)
+    except OSError as e:
+        if soft:
+            continue
+        sys.stderr.write("%s: %s\n" % (cmd, e))
+        sys.exit(1)
+"""
+
+
+def поддельный_sftp(tmp):
+    """`sftp` на PATH, который кладёт «удалённые» файлы под `FAKE_SFTP_ROOT`
+    (Т3б.5 п.8). Хост `…corrupt` портит каждый `put` байтом, `…dead` не
+    отвечает, `rename` поверх существующего отказывает — как Windows OpenSSH.
+    Эхо `sftp> …` — как у настоящего с `-b`."""
+    bin_ = os.path.join(tmp, "bin")
+    os.makedirs(bin_, exist_ok=True)
+    шим = os.path.join(bin_, "sftp")
+    with open(шим, "w") as fh:
+        fh.write("#!%s\n%s" % (sys.executable, ПОДДЕЛЬНЫЙ_SFTP))
+    os.chmod(шим, 0o755)
+    удалённо = os.path.join(tmp, "remote")
+    os.makedirs(удалённо)
+    return bin_, удалённо
+
+
+class Sftp(unittest.TestCase):
+    """Запись и ротация на цель `sftp://` (Т3б.5 п.8) — без gpg, напрямую."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cb = load("core-backup.py")
+        bin_, self.удалённо = поддельный_sftp(self.tmp)
+        self.окружение = dict(os.environ)
+        os.environ["PATH"] = bin_ + os.pathsep + os.environ["PATH"]
+        os.environ["FAKE_SFTP_ROOT"] = self.удалённо
+        self.stage = os.path.join(self.tmp, "stage")
+        os.makedirs(self.stage)
+        self.enc = os.path.join(self.stage, "core-2026-10-26.tar.gz.gpg")
+        with open(self.enc, "wb") as fh:
+            fh.write(b"gpg-bytes" * 100)
+        self.сводка = {"sha256": self.cb.sha(self.enc), "байт": os.path.getsize(self.enc)}
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.окружение)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def на_цели(self):
+        return sorted(os.listdir(os.path.join(self.удалённо, "mara")))
+
+    def test_запись_кладёт_архив_и_сайдкар_без_огрызка(self):
+        self.cb.sftp_запись("sftp://user@host/mara", self.enc,
+                            "core-2026-10-26.tar.gz.gpg", self.сводка, self.stage)
+        self.assertEqual(self.на_цели(), ["core-2026-10-26.manifest.json",
+                                          "core-2026-10-26.tar.gz.gpg"])
+        лёг = os.path.join(self.удалённо, "mara", "core-2026-10-26.tar.gz.gpg")
+        self.assertEqual(self.cb.sha(лёг), self.сводка["sha256"])
+        # повторная запись тем же именем: `rename` поверх существующего на
+        # Windows OpenSSH отказывает, потому перед ним `-rm`
+        self.cb.sftp_запись("sftp://user@host/mara", self.enc,
+                            "core-2026-10-26.tar.gz.gpg", self.сводка, self.stage)
+        self.assertEqual(len(self.на_цели()), 2)
+
+    def test_битая_копия_не_остаётся_на_цели(self):
+        with self.assertRaises(OSError):
+            self.cb.sftp_запись("sftp://user@corrupt/mara", self.enc,
+                                "core-2026-10-26.tar.gz.gpg", self.сводка, self.stage)
+        self.assertEqual(self.на_цели(), [], "битый архив или огрызок остались")
+
+    def test_мёртвый_хост_это_oserror_с_хвостом_stderr(self):
+        with self.assertRaises(OSError) as cm:
+            self.cb.sftp_запись("sftp://user@dead/mara", self.enc,
+                                "core-2026-10-26.tar.gz.gpg", self.сводка, self.stage)
+        self.assertIn("Connection refused", str(cm.exception))
+
+    def test_ротация_оставляет_поколения_и_убирает_огрызки(self):
+        каталог = os.path.join(self.удалённо, "mara")
+        os.makedirs(каталог)
+        for д in ("2026-10-20", "2026-10-21", "2026-10-22"):
+            for суффикс in (".tar.gz.gpg", ".manifest.json"):
+                open(os.path.join(каталог, "core-%s%s" % (д, суффикс)), "w").close()
+        open(os.path.join(каталог, ".core-2026-10-19.tar.gz.gpg.tmp"), "w").close()
+        open(os.path.join(каталог, "чужое.txt"), "w").close()
+        self.cb.ротация("sftp://user@host/mara", keep=2)
+        self.assertEqual(self.на_цели(), ["core-2026-10-21.manifest.json",
+                                          "core-2026-10-21.tar.gz.gpg",
+                                          "core-2026-10-22.manifest.json",
+                                          "core-2026-10-22.tar.gz.gpg",
+                                          "чужое.txt"])
 
 
 if __name__ == "__main__":
