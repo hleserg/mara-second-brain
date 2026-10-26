@@ -209,8 +209,13 @@ def push(spool=SPOOL, dest=DEST):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     tr = os.path.expanduser(os.environ.get("CLAUDE_PROJECTS", "~/.claude/projects"))
     if os.path.isdir(tr):
-        ok &= subprocess.run(["rsync", "-a", "--include=*/", "--include=*.jsonl", "--exclude=*",
-                              tr + "/", dest + "/raw/claude-code/"],
+        # Старше MARA_RAW_DAYS не возим: волт такие уже убрал (`blob_retention.py`,
+        # план Т3б.7 д), иначе rsync возвращал бы их каждые пять минут.
+        порог = datetime.now().timestamp() - 86400 * float(os.environ.get("MARA_RAW_DAYS", 30))
+        свежие = [os.path.relpath(os.path.join(d, f), tr) for d, _, fs in os.walk(tr)
+                  for f in fs if f.endswith(".jsonl") and os.path.getmtime(os.path.join(d, f)) >= порог]
+        ok &= subprocess.run(["rsync", "-a", "--files-from=-", tr + "/", dest + "/raw/claude-code/"],
+                             input="\n".join(свежие).encode(),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     return ok
 
@@ -285,6 +290,16 @@ def self_check():
     # тулсет пишется один раз на одинаковую конфигурацию
     a = toolset(spool)
     assert toolset(spool) == 0, "одинаковый тулсет должен писаться один раз"
+    # транскрипты старше MARA_RAW_DAYS не возим (волт их уже убрал — Т3б.7 д)
+    tr, dest = os.path.join(d, "projects", "p"), os.path.join(d, "vault")
+    os.makedirs(os.path.join(tr, "s1", "subagents"))
+    for name in ("s1.jsonl", "s1/subagents/agent-1.jsonl", "old.jsonl"):
+        open(os.path.join(tr, name), "w").write("{}\n")
+    os.utime(os.path.join(tr, "old.jsonl"), (0, 0))
+    os.environ["CLAUDE_PROJECTS"] = os.path.dirname(tr)
+    assert push(os.path.join(d, "нет"), dest), "локальный rsync должен пройти"
+    got = sorted(os.path.relpath(f, dest) for f in glob.glob(os.path.join(dest, "**", "*.jsonl"), recursive=True))
+    assert got == ["raw/claude-code/p/s1.jsonl", "raw/claude-code/p/s1/subagents/agent-1.jsonl"], got
     print("claude-usage-ship: самопроверка ок")
     return 0
 
