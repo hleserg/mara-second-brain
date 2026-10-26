@@ -130,6 +130,17 @@ def _число(s):
         return None
 
 
+# Волт пишет `completed` там, где реестр говорит `done` (Т2.1б, решение
+# владельца 2026-10-26); перенос переводит на язык реестра и шапку, и журнал.
+СТАТУС_ВОЛТА = {"completed": "done"}
+
+
+def _статус(v):
+    """Статус из шапки или журнала на языке реестра; пусто — None."""
+    v = _строка(v) or None
+    return СТАТУС_ВОЛТА.get(v, v)
+
+
 def _строка(v):
     """Значение фронтматтера строкой. Список — через запятую.
 
@@ -403,6 +414,8 @@ def _перенести(con, rel, fm, sha, текст, вид, таблица, �
         return новый, 0, ссылок
     oid = прежний or в_шапке or mi.uuid7()
     значения = {k: (_строка(fm.get(k)) or None) for k in поля}
+    if "status" in значения:
+        значения["status"] = _статус(значения["status"])
     if "confidence" in значения:
         сырое = значения["confidence"]
         значения["confidence"] = _число(сырое)
@@ -719,8 +732,10 @@ def журнал(текст):
              "status": None, "due": None, "notes": [], "raw": l}
         for часть in filter(None, (x.strip() for x in m.group(4).split(";"))):
             п = ПЕРЕХОД.match(часть)
-            if п:
-                з["status" if п.group(1) == "статус" else "due"] = п.group(2, 3)
+            if п and п.group(1) == "статус":
+                з["status"] = tuple(map(_статус, п.group(2, 3)))
+            elif п:
+                з["due"] = п.group(2, 3)
             else:
                 з["notes"].append(часть)
         записи.append(з)
@@ -736,7 +751,7 @@ def история(vault):
     """
     итог, замечания = Counter(), []
     for rel, fm, _, текст in карточки(vault, "kb/commitments"):
-        статус = _строка(fm.get("status")) or "proposed"
+        статус = _статус(fm.get("status")) or "proposed"
         записи, мусор = журнал(текст)
         итог["неразобрано строк"] += len(мусор)
         for l in мусор:
@@ -806,7 +821,7 @@ def правки_из_карточки(oid, fm, текст):
     история, а запись факта: на момент переноса шапка говорила так, и
     объяснения этому в волте не было.
     """
-    статус = _строка(fm.get("status")) or "proposed"
+    статус = _статус(fm.get("status")) or "proposed"
     записи, _ = журнал(текст)
     строки = []
     for n, з in enumerate(записи):
@@ -936,7 +951,7 @@ def сверка(con, vault):
                           (row["id"],)).fetchone()
         сошлись.add(row["id"])
         итог["строк"] += 1
-        статус = _строка(fm.get("status")) or "proposed"
+        статус = _статус(fm.get("status")) or "proposed"
         if (row["status"] or "proposed") != статус:
             итог["статус разошёлся"] += 1
             замечания.append("%s: в шапке %s, в базе %s"
