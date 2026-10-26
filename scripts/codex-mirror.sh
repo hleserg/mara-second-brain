@@ -12,8 +12,10 @@ TAG="${MARA_TAG:-$(hostname -s)}"
 
 mirror() {  # <каталог sessions> <метка>
   [ -d "$1" ] || return 0
-  rsync -a --include='*/' --include='*.jsonl' --exclude='*' \
-    "$1/" "$DEST/raw/codex/$2/"
+  # Старше MARA_RAW_DAYS не возим: волт такие уже убрал (`blob_retention.py`,
+  # план Т3б.7 д), иначе rsync возвращал бы их каждый час.
+  (cd "$1" && find . -name '*.jsonl' -mtime "-${MARA_RAW_DAYS:-30}") |
+    rsync -a --files-from=- "$1/" "$DEST/raw/codex/$2/"
 }
 
 mirror "$HOME/.codex/sessions" "$TAG"

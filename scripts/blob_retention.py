@@ -13,6 +13,12 @@
 Срок — `MARA_RAW_DAYS`, по умолчанию тридцать дней; в ТЗ этого числа
 нет, месяц выбран здесь и по причине выше.
 
+Транскрипты агентов (`raw/claude-code/`, `raw/codex/` волта) — тот же срок от
+последнего изменения, но только у сессий, которые ingest уже проглотил:
+есть карточка `kb/sessions/<sid>.md` и нет заявки в `_system/queue/`
+(решение владельца 2026-10-26, план Т3б.7 д). Сессия без карточки лежит
+бессрочно.
+
     python3 scripts/blob_retention.py            # прогон
     python3 scripts/blob_retention.py --dry-run  # только показать
     python3 scripts/blob_retention.py --self-check
@@ -115,6 +121,8 @@ else:
         ОШИБКА_КОНФИГА = ("MARA_RAW_DAYS=%r — дробный срок, беру %d"
                           % (os.environ["MARA_RAW_DAYS"], RAW_DAYS))
 СЫРЬЁ = ("tdlib", "gmail")
+ВОЛТ = os.environ.get("MARA_VAULT", os.environ.get("VAULT", "/srv/vault"))
+ТРАНСКРИПТЫ = ("claude-code", "codex")
 
 
 def сегодня():
@@ -129,6 +137,33 @@ def raw_sweep(root=None, days=RAW_DAYS, dry=False, day=None):
     for name in СЫРЬЁ:
         for p in sorted(glob.glob(os.path.join(root, name, "raw", "????-??-??.jsonl"))):
             if os.path.basename(p)[:10] >= порог:
+                continue
+            отчёт["files"] += 1
+            отчёт["bytes"] += os.path.getsize(p)
+            if not dry:
+                os.unlink(p)
+    return отчёт
+
+
+def sessions_sweep(vault=None, days=RAW_DAYS, dry=False, day=None):
+    """Транскрипты агентов старше срока по mtime, у которых есть карточка и
+    нет заявки на дистилляцию (её `queue-worker` читает по `raw`)."""
+    vault = vault or ВОЛТ
+    порог = (datetime.fromisoformat(day or сегодня()) - timedelta(days=days)).timestamp()
+    отчёт = {"files": 0, "bytes": 0}
+    for name in ТРАНСКРИПТЫ:
+        корень = os.path.join(vault, "raw", name)
+        for p in sorted(glob.glob(os.path.join(корень, "**", "*.jsonl"), recursive=True)):
+            # shortcut: sid — либо последние 36 знаков имени (`<sid>.jsonl` у
+            # Claude Code, `rollout-<дата>-<sid>.jsonl` у Codex), либо второй
+            # каталог пути (`<проект>/<sid>/subagents/…`); иное имя карточки
+            # не найдёт и файл останется — менять, когда появится третья раскладка.
+            части = os.path.relpath(p, корень).split(os.sep)
+            sids = {os.path.basename(p)[:-6][-36:], части[1] if len(части) > 2 else ""}
+            if os.path.getmtime(p) >= порог or not any(
+                    os.path.exists(os.path.join(vault, "kb", "sessions", s + ".md")) and
+                    not os.path.exists(os.path.join(vault, "_system", "queue", s + ".json"))
+                    for s in sids if s):
                 continue
             отчёт["files"] += 1
             отчёт["bytes"] += os.path.getsize(p)
@@ -199,9 +234,11 @@ def main():
     mi.ROOT = a.root
     r = sweep(mi.connect(a.root), a.root, a.dry)
     rr = raw_sweep(a.root, dry=a.dry)
-    print("%s ретеншен: убрано %d записей, %.1f МБ; сырых логов %d, %.1f МБ%s" % (
+    ss = sessions_sweep(dry=a.dry)
+    print("%s ретеншен: убрано %d записей, %.1f МБ; сырых логов %d, %.1f МБ; "
+          "транскриптов %d, %.1f МБ%s" % (
         mi.now_iso(), r["purged"], r["bytes"] / 1e6, rr["files"], rr["bytes"] / 1e6,
-        ", вхолостую" if a.dry else ""))
+        ss["files"], ss["bytes"] / 1e6, ", вхолостую" if a.dry else ""))
     for e in r["errors"]:
         print("  сбой: " + e)
     return 1 if r["errors"] else 0
@@ -240,6 +277,19 @@ def self_check():
     assert raw_sweep(root) == {"files": 2, "bytes": 2}
     assert len(glob.glob(os.path.join(root, "*", "raw", "*.jsonl"))) == 1, "свежее сырьё убрано"
     assert raw_sweep(root)["files"] == 0, "повтор нашёл что убирать"
+    vault = os.path.join(root, "vault")
+    for rel in ("raw/claude-code/p/" + "a" * 36 + ".jsonl",
+                "raw/claude-code/p/" + "a" * 36 + "/subagents/agent-1.jsonl",
+                "raw/codex/h/2026/09/01/rollout-2026-09-01T00-00-00-" + "b" * 36 + ".jsonl",
+                "raw/claude-code/p/" + "c" * 36 + ".jsonl",
+                "kb/sessions/" + "a" * 36 + ".md", "kb/sessions/" + "b" * 36 + ".md"):
+        os.makedirs(os.path.dirname(os.path.join(vault, rel)), exist_ok=True)
+        open(os.path.join(vault, rel), "w").write("x")
+        os.utime(os.path.join(vault, rel), (0, 0))
+    assert sessions_sweep(vault, dry=True) == {"files": 3, "bytes": 3}, "холостой прогон транскриптов"
+    assert sessions_sweep(vault) == {"files": 3, "bytes": 3}
+    assert glob.glob(os.path.join(vault, "raw", "**", "*.jsonl"), recursive=True) == [
+        os.path.join(vault, "raw/claude-code/p/" + "c" * 36 + ".jsonl")], "сессия без карточки убрана"
     print("blob_retention self-check: ок")
     return 0
 

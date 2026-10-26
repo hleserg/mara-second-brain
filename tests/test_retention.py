@@ -332,6 +332,38 @@ class Сырьё(unittest.TestCase):
         self.assertEqual(все(), [день(-30) + ".jsonl"])
         self.assertEqual(br.raw_sweep(root)["files"], 0, "повтор нашёл что убирать")
 
+    def test_транскрипт_с_карточкой_старше_срока_убирается(self):
+        """Все три раскладки имени: `<sid>.jsonl` Claude Code, вложенный
+        `<sid>/subagents/…`, `rollout-…-<sid>.jsonl` Codex в `год/мес/день`.
+        Без карточки или с заявкой в очереди — лежит; граница по mtime, не по
+        имени: сутки −30 минус минута уходят, плюс минута остаются."""
+        v = tempfile.mkdtemp(prefix="mara-ses-")
+        a, b, c, d = "a" * 36, "b" * 36, "c" * 36, "d" * 36
+        порог = datetime.fromisoformat(день(0)) - timedelta(days=30)
+        файлы = {"raw/claude-code/p/%s.jsonl" % a: -60,
+                 "raw/claude-code/p/%s/subagents/agent-1.jsonl" % a: -60,
+                 "raw/codex/h/2026/09/01/rollout-2026-09-01T00-00-00-%s.jsonl" % b: -60,
+                 "raw/claude-code/p/%s.jsonl" % c: -60,       # без карточки
+                 "raw/claude-code/p/%s.jsonl" % d: -60,       # в очереди
+                 "raw/claude-code/p/%s.jsonl" % ("e" * 36): +60}  # свежий
+        for rel, сдвиг in файлы.items():
+            os.makedirs(os.path.dirname(os.path.join(v, rel)), exist_ok=True)
+            open(os.path.join(v, rel), "w").write("xx")
+            os.utime(os.path.join(v, rel), ((порог + timedelta(seconds=сдвиг)).timestamp(),) * 2)
+        for rel in ("kb/sessions/%s.md" % a, "kb/sessions/%s.md" % b, "kb/sessions/%s.md" % d,
+                    "kb/sessions/%s.md" % ("e" * 36), "_system/queue/%s.json" % d):
+            os.makedirs(os.path.dirname(os.path.join(v, rel)), exist_ok=True)
+            open(os.path.join(v, rel), "w").write("x")
+        все = lambda: sorted(os.path.relpath(p, v) for p in
+                            glob.glob(os.path.join(v, "raw", "**", "*.jsonl"), recursive=True))
+        self.assertEqual(br.sessions_sweep(v, dry=True), {"files": 3, "bytes": 6})
+        self.assertEqual(len(все()), 6, "холостой прогон удалил")
+        self.assertEqual(br.sessions_sweep(v), {"files": 3, "bytes": 6})
+        self.assertEqual(все(), sorted(k for k, s in файлы.items() if c in k or d in k or "e" * 36 in k))
+        self.assertEqual(br.sessions_sweep(v)["files"], 0, "повтор нашёл что убирать")
+        self.assertEqual(br.sessions_sweep(v, day=(порог + timedelta(days=31)).date().isoformat())["files"],
+                         1, "день прогона не сдвигает порог")
+
     def test_плохой_MARA_RAW_DAYS_не_роняет_уборку_в_4_40(self):
         """Крон в 4:40 — отдельная единица со своим отказом.
 
