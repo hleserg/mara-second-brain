@@ -95,6 +95,12 @@ class Settings(ctx: Context) {
         get() = prefs.getLong("health_at", 0)
         set(v) = prefs.edit().putLong("health_at", v).apply()
 
+    /** Суток токену осталось по последнему ответу сервера на здоровье; null — не отвечал. */
+    var tokenDaysLeft: Int?
+        get() = if (prefs.contains("token_days_left")) prefs.getInt("token_days_left", 0) else null
+        set(v) = (if (v == null) prefs.edit().remove("token_days_left")
+                  else prefs.edit().putInt("token_days_left", v)).apply()
+
     /** Вердикт — «Захват сломан» (`Здоровье.сломан`): разрешение или папка,
      *  а не звонок без записи. Сервер судит о поломке по нему, а не по
      *  открытой тревоге: тревога по старому звонку и отозванное разрешение

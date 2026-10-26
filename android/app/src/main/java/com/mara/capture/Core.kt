@@ -379,7 +379,9 @@ object HealthJson {
 enum class JobState { NEW, HASHED, POSTED, DONE, FAILED }
 
 /** Ответ сервера в том виде, в каком он влияет на решение. */
-data class ServerReply(val code: Int, val eventId: String? = null, val needBlob: Boolean = false)
+/** `tokenDaysLeft` — сколько суток токену осталось, отвечает только путь здоровья (Т0.9 п.1). */
+data class ServerReply(val code: Int, val eventId: String? = null, val needBlob: Boolean = false,
+                       val tokenDaysLeft: Int? = null)
 
 object JobFlow {
     /**
@@ -992,4 +994,14 @@ object Здоровье {
     }
 
     fun словами(о: Оценка): String = "${о.состояние}: ${о.причина}"
+
+    /** Срок токена — за 14 суток предупредить, продление — `--pair` тем же именем (Т0.9 п.1). */
+    const val ТОКЕН_ПРЕДУПРЕДИТЬ_СУТ = 14
+
+    fun токенСловами(дней: Int?): String = when {
+        дней == null -> "срок неизвестен (сервер ещё не отвечал на здоровье)"
+        дней < 0 -> "кончился — спарить заново: --pair тем же именем"
+        дней <= ТОКЕН_ПРЕДУПРЕДИТЬ_СУТ -> "кончается через $дней сут — продлить: --pair тем же именем"
+        else -> "годен ещё $дней сут"
+    }
 }

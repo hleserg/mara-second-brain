@@ -134,6 +134,7 @@ class MainActivity : AppCompatActivity() {
                 ", последняя закрыта: " + когда(s.alertRecoveredMs),
             "проверка здоровья по расписанию: " + расписание(HealthWorker.ПЕРИОД),
             "спарено: " + if (s.paired) "да, " + s.baseUrl else "нет",
+            "токен: " + Здоровье.токенСловами(s.tokenDaysLeft),
             "папка: " + (s.folderUri.ifEmpty { "не выбрана, смотрю медиатеку" }),
             "последняя запись: " + (последняя?.let { "${it.name} · ${когда(it.modifiedMs)}" }
                 ?: "не вижу ни одной"),
