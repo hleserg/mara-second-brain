@@ -19,15 +19,31 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 STATE="${STATE:-$HOME/.local/state/mara}"
 VENV="${VENV:-$HOME/.local/share/mara/venv/bin/python}"
 TPL="${TPL:-$REPO/install/mara.cron}"
+ENVF="${ENVF:-$HOME/.config/mara/env}"
 BEGIN="# >>> mara-second-brain: install/mara.cron, правки руками затрёт >>>"
 END="# <<< mara-second-brain <<<"
 
+# Носители бэкапа ядра (Т3б.5 п.8) — из env-файла, не из репозитория (Г7).
+# Файл не source-им: значение с пробелом без кавычек исполнило бы `sftp://…`
+# как команду. Переменная окружения главнее файла; кавычки снимаем.
+цели() {
+  if [ -n "${MARA_CORE_TARGETS:-}" ]; then printf '%s' "$MARA_CORE_TARGETS"; return; fi
+  [ -r "$ENVF" ] || return 0
+  sed -n 's/^MARA_CORE_TARGETS=//p' "$ENVF" | tail -n 1 \
+    | sed -e "s/^[\"']//" -e "s/[\"']\$//"
+}
+
 рендер() {
+  local t
+  t=$(цели)
   printf '%s\n' "$BEGIN"
   # ${x//&/\\&}: в правой части `s|…|…|` амперсанд означает «весь матч», и
-  # путь с ним подставился бы искажённым — молча, в живой crontab
+  # путь с ним подставился бы искажённым — молча, в живой crontab.
+  # Пустой список носителей — строку плейсхолдера убираем целиком.
   sed -e "s|@REPO@|${REPO//&/\\&}|g" -e "s|@STATE@|${STATE//&/\\&}|g" \
-      -e "s|@VENV@|${VENV//&/\\&}|g" "$TPL"
+      -e "s|@VENV@|${VENV//&/\\&}|g" \
+      -e "s|^@CORE_TARGETS@\$|MARA_CORE_TARGETS=${t//&/\\&}|" \
+      -e '/^MARA_CORE_TARGETS=$/d' "$TPL"
   printf '%s\n' "$END"
 }
 

@@ -28,7 +28,9 @@ class Установщик(unittest.TestCase):
         os.chmod(шим, os.stat(шим).st_mode | stat.S_IEXEC)
         self.env = dict(os.environ, PATH=bin_ + os.pathsep + os.environ["PATH"],
                         REPO=КОРЕНЬ, STATE=os.path.join(self.tmp, "state"),
-                        VENV="/usr/bin/python3")
+                        VENV="/usr/bin/python3",
+                        ENVF=os.path.join(self.tmp, "env"))
+        self.env.pop("MARA_CORE_TARGETS", None)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -180,6 +182,30 @@ class Установщик(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("откат не удался", r.stderr,
                       "отказ отката проглочен молча")
+
+    def test_носители_ядра_берутся_из_env_файла(self):
+        """Т3б.5 п.8, Г7: список носителей с `sftp://` — логин и адрес
+        домашней машины, в репозитории ему не место. Установщик берёт его
+        из ~/.config/mara/env, не исполняя файл."""
+        self.таблицу("")
+        with open(self.env["ENVF"], "w") as fh:
+            fh.write("MARA_CONTEXT_URL=http://x\n"
+                     "MARA_CORE_TARGETS=\"/mnt/a sftp://user@host/C:/mara\"\n")
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        стало = self.прочесть()
+        self.assertIn("\nMARA_CORE_TARGETS=/mnt/a sftp://user@host/C:/mara\n", стало)
+        self.assertNotIn("@CORE_TARGETS@", стало)
+
+    def test_без_env_файла_строки_носителей_нет(self):
+        """Нет строки — скрипт бэкапа идёт по дефолту кода, а плейсхолдер
+        в живом crontab был бы мусорной командой."""
+        self.таблицу("")
+        r = self.запуск("--apply")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        стало = self.прочесть()
+        self.assertNotIn("\nMARA_CORE_TARGETS=", стало)
+        self.assertNotIn("@CORE_TARGETS@", стало)
 
 
 if __name__ == "__main__":
