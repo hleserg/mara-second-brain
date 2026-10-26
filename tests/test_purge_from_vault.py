@@ -21,6 +21,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 # отвечать на lsf отсутствующего пути (по умолчанию 0 и пусто, как S3);
 # $FAKE_R2_DELETE_FAILS=1 — deletefile отказывает, файл остаётся;
 # $FAKE_R2_DELETE_LIES=1 — deletefile отчитывается нулём, файл остаётся.
+# purge (каталог) подчиняется тем же двум флагам.
 # Флаги вида --x и --x=y пропускаются, путь — последний аргумент без тире.
 RCLONE = r'''#!/usr/bin/env bash
 echo "$*" >>"$FAKE_R2_LOG"
@@ -41,13 +42,18 @@ case $cmd in
     [ -z "${FAKE_R2_DELETE_FAILS:-}" ] || { echo "AccessDenied" >&2; exit 2; }
     [ -z "${FAKE_R2_DELETE_LIES:-}" ] || exit 0
     rm -f "${FAKE_R2:?}/$path" ;;
+  purge)
+    [ -d "$FAKE_R2/$path" ] || { echo "directory not found" >&2; exit 3; }
+    [ -z "${FAKE_R2_DELETE_FAILS:-}" ] || { echo "AccessDenied" >&2; exit 2; }
+    [ -z "${FAKE_R2_DELETE_LIES:-}" ] || exit 0
+    rm -rf "${FAKE_R2:?}/$path" ;;
   *) echo "подделка rclone: $cmd" >&2; exit 1 ;;
 esac
 '''
 
 # Подделка git-filter-repo: те же `--invert-paths --path X ... --force`.
-# Пути квотируются (`%q`), каталоги не поддерживаются (`git rm` без `-r`) —
-# скрипт их и не пропускает. $FAKE_FR_NOOP=1 — ничего не переписывать:
+# Пути квотируются (`%q`); `--path` у filter-repo берёт и каталог целиком,
+# здесь это `git rm -r`. $FAKE_FR_NOOP=1 — ничего не переписывать:
 # так проверяется, что финальная проверка истории не врёт.
 FR = r'''#!/usr/bin/env bash
 set -e
@@ -57,7 +63,7 @@ while [ $# -gt 0 ]; do
   case $1 in --path) paths="$paths $(printf '%q' "$2")"; shift 2;; *) shift;; esac
 done
 FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f \
-  --index-filter "git rm -q --cached --ignore-unmatch -- $paths" -- --all >/dev/null 2>&1
+  --index-filter "git rm -r -q --cached --ignore-unmatch -- $paths" -- --all >/dev/null 2>&1
 rm -rf .git/refs/original
 '''
 
@@ -233,7 +239,37 @@ class Вычистка(unittest.TestCase):
         self.assertIn("deletefile", self._вызовы())
         self.assertIn("  R2:       -secret.md\n", r.stdout)
 
-    def test_каталог_и_чужие_пути_отвергаются_до_изменений(self):
+    def test_каталог_вне_git_уходит_из_истории_и_остаётся_на_диске(self):
+        # Т3б.7: зеркала сессий выведены из git (.gitignore + rm --cached),
+        # история, зеркало и R2 без каталога, файлы на диске целы, бандл новый.
+        self._пишу(".gitignore", "/secret/\n")
+        _git(self.vault, "rm", "-r", "-q", "--cached", "secret")
+        self._коммит("secret вне git")
+        self._в_r2("secret/key.md")
+        r = self._прогон("secret/")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.vault, "secret/key.md")))
+        self.assertFalse(self._в_истории("secret"))
+        self.assertFalse(self._в_истории("secret", self.mirror))
+        self.assertFalse(self._есть_в_r2("secret"))
+        self.assertIn("purge", self._вызовы())
+        self.assertIn("остаётся на диске", r.stdout)
+        self.assertIn("чисто в git: secret", r.stdout)
+        self.assertIn("чисто в R2:  secret", r.stdout)
+        self.assertEqual(len(self._бандлы()), 1)
+        self.assertEqual(_git(self.vault, "status", "--porcelain"), "")
+
+    def test_каталог_не_в_gitignore_отвергается(self):
+        # Снят с индекса, но не исключён: `git add -A` вернул бы его в git,
+        # а сброс после filter-repo — снёс бы с диска. Отказ до изменений.
+        _git(self.vault, "rm", "-r", "-q", "--cached", "secret")
+        r = self._прогон("secret")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(".gitignore", r.stderr)
+        self.assertEqual(self._вызовы(), [])
+        self.assertTrue(os.path.exists(os.path.join(self.vault, "secret/key.md")))
+
+    def test_каталог_в_git_и_чужие_пути_отвергаются_до_изменений(self):
         self._в_r2("secret/key.md")
         for путь in ("secret", "secret/", "/srv/vault/secret/key.md",
                      "../x", "secret/../a.md", ""):
