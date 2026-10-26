@@ -23,7 +23,8 @@ class _База(unittest.TestCase):
         self.addCleanup(self.con.close)
         self.состояние = tempfile.mkdtemp()
         for имя, файл in (("ОТМЕТКА_НОСИТЕЛЕЙ", "core-targets.json"),
-                          ("ОТМЕТКА_УЧЕНИЯ", "core-drill.json")):
+                          ("ОТМЕТКА_УЧЕНИЯ", "core-drill.json"),
+                          ("ОТМЕТКА_СЕКРЕТОВ", "core-secrets.json")):
             п = mock.patch.object(mi, имя, os.path.join(self.состояние, файл))
             п.start()
             self.addCleanup(п.stop)
@@ -121,6 +122,37 @@ class Бэкап(_База):
         self.assertIn("отметка учения не записана", err.getvalue())
 
 
+class Секреты(_База):
+    """Т3б.5 п.5: бандл секретов идёт после ядра и ночь не роняет — о его
+    отсутствии говорит только отметка `core-secrets.json`."""
+
+    def test_архивы_ложатся_а_бандла_нет(self):
+        cb.отметка(mi.ОТМЕТКА_НОСИТЕЛЕЙ, ["/mnt/a"], когда=time.time() - 3600)
+        self.assertEqual([(x["check"], x["level"]) for x in cr.бэкап_секретов()],
+                         [("бэкап-секретов", "warn")], "отметки нет вовсе")
+        cb.отметить_секреты(["/mnt/a"], 0, "secrets-x",
+                            когда=time.time() - (cr.БЭКАП_СУТКИ + 1) * 86400)
+        self.assertEqual([(x["check"], x["level"]) for x in cr.бэкап_секретов()],
+                         [("бэкап-секретов", "error")])
+        cb.отметить_секреты(["/mnt/a"], 1, "secrets-x", когда=time.time() - 3600)
+        н = cr.бэкап_секретов()
+        self.assertEqual([(x["check"], x["level"], x["unreadable"]) for x in н],
+                         [("бэкап-секретов", "warn", 1)], "нечитаемое — предупреждение")
+        cb.отметить_секреты(["/mnt/a"], 0, "secrets-x", когда=time.time() - 3600)
+        self.assertEqual(cr.бэкап_секретов(), [])
+
+    def test_архивы_не_ложатся_судит_бэкап(self):
+        self.assertEqual(cr.бэкап_секретов(), [])
+        cb.отметка(mi.ОТМЕТКА_НОСИТЕЛЕЙ, ["/mnt/a"],
+                   когда=time.time() - (cr.БЭКАП_СУТКИ + 1) * 86400)
+        self.assertEqual(cr.бэкап_секретов(), [], "носители молчат — об этом бэкап_ядра")
+
+    def test_в_общей_сверке(self):
+        cb.отметка(mi.ОТМЕТКА_НОСИТЕЛЕЙ, ["/mnt/a"], когда=time.time() - 3600)
+        self.assertIn("бэкап-секретов",
+                      [x["check"] for x in cr.run(self.con, self.dir, vault=None, targets=[])])
+
+
 class Учение(_База):
     """Ревью Т9.1, P2-2: учение падает после того, как архив лёг и отметка
     носителей обновлена, — находки бэкапа молчат, а копия не доказана."""
@@ -150,6 +182,7 @@ class Учение(_База):
         cb.отметка(mi.ОТМЕТКА_НОСИТЕЛЕЙ, ["/mnt/a"], когда=time.time() - 3600)
         self.assertIn("учение-не-проходит",
                       [x["check"] for x in cr.run(self.con, self.dir, vault=None, targets=[])])
+
 
     def test_самопроверка_не_читает_отметки_хоста(self):
         """Гейт 2026-10-19 на doctor: носители отмечены, учение ещё ни разу
