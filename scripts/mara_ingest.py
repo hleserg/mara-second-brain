@@ -167,6 +167,14 @@ def now_iso():
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
+СРОК_ТОКЕНА = 180   # суток с выдачи (Т0.9 п.1, решение владельца 2026-10-26)
+
+
+def срок_токена(с):
+    """Когда кончается токен, выданный в момент `с` (ISO `now_iso`)."""
+    return (datetime.fromisoformat(с) + timedelta(days=СРОК_ТОКЕНА)).isoformat(timespec="seconds")
+
+
 def секунды(поле):
     """SQL-выражение: метка `поле` в секундах эпохи, сдвиг учтён (Т2.1б).
 
@@ -775,14 +783,30 @@ def _откат_9(con):
     con.execute("alter table jobs drop column cancel_requested")
 
 
+# Миграция 10 (Т0.9 п.1): `devices.expires` — конец срока токена, `СРОК_ТОКЕНА`
+# суток с выдачи. Живым токенам срок считается от `created`; отозванным не
+# нужен. Старый код колонку не читает, старые базы без неё `device_of`
+# пускает (`expires is null`) — только до этой миграции.
+def _миграция_10(con):
+    con.execute("alter table devices add column expires text")
+    for id_, created in con.execute("select id, created from devices "
+                                    "where revoked_at is null and created is not null").fetchall():
+        con.execute("update devices set expires=? where id=?", (срок_токена(created), id_))
+
+
+def _откат_10(con):
+    """Назад к 9: старый код срока не знает, токены снова бессрочные."""
+    con.execute("alter table devices drop column expires")
+
+
 # Номер миграции — её место здесь плюс один: `user_version` N значит, что
 # прошли первые N. Дописывать только в конец (migration-plan.md §2).
 МИГРАЦИИ = (_миграция_1, _миграция_2, _миграция_3, _миграция_4, _миграция_5,
-            _миграция_6, _миграция_7, _миграция_8, _миграция_9)
+            _миграция_6, _миграция_7, _миграция_8, _миграция_9, _миграция_10)
 # Путь вниз: `ОТКАТЫ[N-1]` возвращает версию N к N-1. Базлайн назад не идёт —
 # ниже него только пустая база.
 ОТКАТЫ = (None, _откат_2, _откат_3, _откат_4, _откат_5, _откат_6, _откат_7,
-          _откат_8, _откат_9)
+          _откат_8, _откат_9, _откат_10)
 ВЕРСИЯ = len(МИГРАЦИИ)
 КОМАНДА = "python3 scripts/mara_ingest.py --migrate"
 

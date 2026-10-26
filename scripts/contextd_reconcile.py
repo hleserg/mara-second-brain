@@ -16,7 +16,7 @@
     python3 scripts/contextd_reconcile.py --self-check
 """
 import os, sys, json, glob, math, time, sqlite3, argparse, http.client, tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -645,6 +645,25 @@ def сердцебиение(root):
         age = int(time.time() - os.stat(p).st_mtime)
         if age > 3600:
             out.append(находка(check, "warn", "%s молчит %d мин" % (кто, age // 60)))
+    return out
+
+
+def токен_истекает(con, days=14):
+    """Последний живой токен имени кончается раньше чем через `days` суток
+    (Т0.9 п.1: warn) или уже кончился (error — устройство получает 401).
+    Продление — `--pair`/`--pair-node` тем же именем; старые живые токены
+    того же имени (#47) не считаются: их сменил новый."""
+    now = mi.now_iso()
+    порог = (datetime.now(mi.TZ) + timedelta(days=days)).isoformat(timespec="seconds")
+    out = []
+    for r in con.execute("select name, max(expires) as expires from devices "
+                         "where revoked_at is null and expires is not null "
+                         "group by name having max(expires) < ? order by name", (порог,)):
+        кончился = r["expires"] <= now
+        out.append(находка("токен-истекает", "error" if кончился else "warn",
+                           "токен «%s» %s %s — продлить --pair тем же именем"
+                           % (r["name"], "кончился" if кончился else "кончается",
+                              r["expires"][:10]), name=r["name"], expires=r["expires"]))
     return out
 
 
@@ -1721,6 +1740,7 @@ def run(con, root=None, vault=VAULT, bm_db=BM_DB, targets=None):
     out += _застава("узел", узел_молчит, con)
     out += _застава("попытки", шаги_брошены, con)
     out += _застава("телефон", телефон_молчит, con)
+    out += _застава("токен", токен_истекает, con)
     out += _застава("захват", захват_телефона, con)
     out += _застава("бэкап", бэкап_ядра, targets, root=root)
     out += _застава("учение", учение_бэкапа)
@@ -1941,6 +1961,20 @@ def self_check():
     assert [f["source"] for f in источник_замолчал(con)] == ["whatsapp"], "тишина не найдена"
     con.execute("update devices set last_seen=? where id='dev_t'", (давно,))
     assert источник_замолчал(con) == [], "телефон не на связи — не наша находка"
+    # срок токена (Т0.9 п.1)
+    assert токен_истекает(con) == [], "токен без срока (до миграции 10) — не находка"
+    через = lambda d: (datetime.now(mi.TZ) + timedelta(days=d)).isoformat(timespec="seconds")
+    con.execute("update devices set expires=? where id='dev_t'", (через(3),))
+    assert [(f["level"], f["name"]) for f in токен_истекает(con)] == [("warn", "тел")], "три дня — warn"
+    con.execute("update devices set expires=? where id='dev_t'", (через(-1),))
+    assert [f["level"] for f in токен_истекает(con)] == ["error"], "кончился — error"
+    con.execute("insert into devices(id,name,token_sha256,created,expires) values(?,?,?,?,?)",
+                ("dev_t2", "тел", "h2", mi.now_iso(), через(100)))
+    assert токен_истекает(con) == [], "новый токен того же имени продлевает, старый не звенит"
+    con.execute("update devices set expires=? where id='dev_t2'", (через(13),))
+    assert len(токен_истекает(con)) == 1, "одно имя — одна находка"
+    con.execute("delete from devices where id='dev_t2'")
+    con.execute("update devices set expires=null where id='dev_t'")
     # запись обещана, но не долита
     assert запись_не_долита(con) == [], "свежий звонок ещё может долиться"
     con.execute("update events set received=? where id=?", (давно, eid))

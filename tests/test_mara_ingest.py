@@ -877,6 +877,31 @@ class Сущности(unittest.TestCase):
         con.close()
         mi.migrate(self.dir).close()
 
+    def test_миграция_10_срок_токена_и_путь_вниз(self):
+        """Т0.9 п.1: `devices.expires`. Живому токену срок считается от
+        `created` (180 суток), отозванному не ставится. Откат 10 → 9 уносит
+        колонку, версия 9."""
+        self.база_v1()
+        con = mi.migrate(self.dir, 9)
+        выдан = "2026-09-02T12:06:09+03:00"
+        con.execute("insert into devices(id,name,token_sha256,created) values(?,?,?,?)",
+                    ("dev_a", "тел", "ha", выдан))
+        con.execute("insert into devices(id,name,token_sha256,created,revoked_at) "
+                    "values(?,?,?,?,?)", ("dev_b", "тел", "hb", выдан, выдан))
+        con.close()
+        con = mi.migrate(self.dir)
+        срок = lambda d: con.execute("select expires from devices where id=?",
+                                     (d,)).fetchone()[0]
+        self.assertEqual(срок("dev_a"), "2027-03-01T12:06:09+03:00")
+        self.assertIsNone(срок("dev_b"))
+        self.assertEqual(mi.срок_токена(выдан), срок("dev_a"))
+        con.close()
+        con = mi.migrate(self.dir, 9)
+        self.assertNotIn("expires", {r[1] for r in con.execute("pragma table_info(devices)")})
+        self.assertEqual(self.версия(), 9)
+        con.close()
+        mi.migrate(self.dir).close()
+
     def test_состояние_сообщения_по_времени_а_не_по_строке(self):
         """Правка позже оригинала по времени, но раньше по строке: оригинал
         со сдвигом +14, правка в UTC. Порядок по строке `occurred` отдал бы

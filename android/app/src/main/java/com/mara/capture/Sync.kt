@@ -215,7 +215,7 @@ class SyncWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             api.postHealth(HealthJson.build(s.healthState, s.healthBroken, s.healthReason,
                 s.alertCallMs, s.alertCount, s.alertClosedCallMs, s.alertClosedAs,
                 Рекордеры.вЗдоровье(Device.рекордеры(ctx)).map { it.id }, s.healthAtMs,
-                System.currentTimeMillis()))
+                System.currentTimeMillis())).tokenDaysLeft?.let { s.tokenDaysLeft = it }
         }
     }
 

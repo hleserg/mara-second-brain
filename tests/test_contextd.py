@@ -65,6 +65,22 @@ class Api(unittest.TestCase):
         code, _ = self.post("/v1/ingest/event", {"kind": "call"}, token="no-such-token")
         self.assertEqual(code, 401)
 
+    def test_просроченный_токен_401_а_здоровье_знает_срок(self):
+        """Т0.9 п.1: `--pair` ставит срок 180 суток, после него — 401, как у
+        отозванного. Ответ `/v1/device/health` несёт `token_days_left` —
+        приложению для предупреждения за 14 суток."""
+        dev, token = contextd.pair(self.con, "старый телефон")
+        self.assertTrue(contextd.годен_до(self.con, dev) > mi.now_iso())
+        code, r = self.post("/v1/device/health", {"state": "healthy"}, token=token)
+        self.assertEqual((code, r.get("ok")), (200, True))
+        self.assertIn(r["token_days_left"], (179, 180))
+        self.assertEqual(contextd.дней_токену(self.con, self.dev) in (179, 180), True)
+        self.con.execute("update devices set expires=? where id=?",
+                         ("2026-01-01T00:00:00+03:00", dev))
+        self.con.commit()
+        self.assertEqual(self.get("/v1/jobs/no-such-job", token=token)[0], 401)
+        self.assertEqual(self.get("/v1/jobs/no-such-job")[0], 404)
+
     def test_событие_создаёт_работу_и_просит_блоб(self):
         sha = hashlib.sha256(b"audio-1").hexdigest()
         code, r = self.post("/v1/ingest/event", {

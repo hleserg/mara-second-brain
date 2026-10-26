@@ -100,7 +100,8 @@ class Api(private val base: String, private val token: String, pin: String = "")
             val code = code(c)
             if (code != 200) return ServerReply(code)
             val j = JSONObject(c.inputStream.bufferedReader().readText())
-            ServerReply(200, j.optString("event_id", null), j.optBoolean("need_blob"))
+            ServerReply(200, j.optString("event_id", null), j.optBoolean("need_blob"),
+                if (j.isNull("token_days_left")) null else j.getInt("token_days_left"))
         } catch (e: Exception) {
             ServerReply(0)
         } finally {
