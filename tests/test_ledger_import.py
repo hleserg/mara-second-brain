@@ -83,6 +83,12 @@ class Перенос(_СтендПереноса):
         with open(p, encoding="utf-8") as fh:
             self.assertEqual(пр["content_sha256"], li.отпечаток(fh.read()))
 
+    def test_completed_из_волта_ложится_как_done(self):
+        карточка(self.vault, "kb/commitments/a.md", status="completed")
+        self.перенести()
+        r, = self.строки("commitments")
+        self.assertEqual(r["status"], "done", "язык реестра — done (Т2.1б)")
+
     def test_разговор_переносится_в_свою_таблицу(self):
         карточка(self.vault, "kb/conversations/2026-09-02-1405-anna.md",
                  type="conversation", title="Звонок · Анна · 14:05",
@@ -828,6 +834,14 @@ class Запись(unittest.TestCase):
         self.assertIn("журнал говорит open", отметки[0]["reason"])
         self.assertEqual(json.loads(отметки[0]["new_json"]), "done",
                          "в базе статус шапки — она сегодня авторитет")
+
+    def test_completed_в_шапке_и_журнале_не_расходится(self):
+        с_журналом(карточка(self.vault, "kb/commitments/a.md", status="completed"),
+                   "- 2026-09-21T15:08, Мара, correction/correction_1: статус open → completed; ")
+        self.assertEqual(li.run(self.con, self.vault)["правок"], 1)
+        п, = self.правки()
+        self.assertEqual((п["field"], json.loads(п["new_json"])), ("status", "done"))
+        self.assertEqual(self.правки(actor_type="import"), [], "шапка и журнал об одном")
 
     def test_proposed_и_заведённая_правкой_отметки_не_получают(self):
         карточка(self.vault, "kb/commitments/a.md")
