@@ -16,10 +16,11 @@
   содержимого, содержимое неизменно, поэтому зеркало инкрементально само по
   себе: что уже лежит — не перешифровываем.
 
-Что НЕ уезжает: `tdlib/` и `gmail/`. ТЗ §11: credentials и session-файлы
-denylisted из Git, R2 и бэкапов. Восстановление ядра означает повторный вход
-в Telegram и повторный OAuth Gmail — это дешевле, чем возить ключи по
-сетевым шарам. Раздел «Восстановление» в docs/backup-core.md.
+Что НЕ уезжает в архив ядра: `tdlib/` и `gmail/`. Ключи и сессии едут
+отдельно — зашифрованным бандлом секретов (`бандл_секретов`, Т3б.5 п.5,
+ADR-0005 «Обязательный состав»): `/etc/mara`, `~/.config/mara` без
+парольной фразы, ключ и binlog TDLib, токен Gmail. Раздел «Бандл
+секретов» в docs/backup-core.md.
 
 Бэкап, который ни разу не разворачивали, — не бэкап: после каждой удачной
 записи прогон сам расшифровывает архив с носителя, проверяет целостность
@@ -42,7 +43,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 import mara_ingest as mi
 
 МЕЛОЧЬ = ("manifests", "transcripts", "extractions")   # allowlist, не exclude
-СЕКРЕТЫ = ("tdlib", "gmail")                           # ТЗ §11 — не бэкапим
+СЕКРЕТЫ = ("tdlib", "gmail")              # не в архив ядра — в бандл секретов
+# Бандл секретов (Т3б.5 п.5, ADR-0005 «Обязательный состав»): allowlist
+# каталогов — `/etc/mara`, `~/.config/mara`, `<root>/tdlib`, `<root>/gmail`.
+# Не берём: `backup-pass` — им бандл и зашифрован, внутри ему не место;
+# `raw/` и `db.sqlite*` — кеши, пересоздаются; `heartbeat`, `lock` — живое.
+ЭТЦ_СЕКРЕТОВ = os.environ.get("MARA_SECRETS_ETC", "/etc/mara")
+КОНФИГ_СЕКРЕТОВ = os.environ.get("MARA_SECRETS_CONFIG", "~/.config/mara")
+НЕ_В_БАНДЛ = ("backup-pass", "raw", "heartbeat", "lock", "db.sqlite*")
 # Список жёсткий, и он же кормит сверку восстановления: таблица, которой тут
 # нет, в проверку не попадёт молча. Добавлять сюда каждую новую (ADR-0001).
 ТАБЛИЦЫ = ("devices", "events", "jobs", "blobs", "digests",
@@ -903,6 +911,133 @@ def sftp_запись(цель, enc, имя, сводка, stage):
         raise
 
 
+def отметить_секреты(носители, нечитаемо, архив, путь=None, когда=None):
+    """Бандл секретов лёг — отметка для сверки (`бэкап-секретов`): когда,
+    куда и сколько файлов состава прочитать не удалось. Сбой записи прогон
+    не роняет."""
+    try:
+        mi.write_json(путь or mi.ОТМЕТКА_СЕКРЕТОВ,
+                      {"at": time.time() if когда is None else когда,
+                       "archive": архив, "носители": носители,
+                       "нечитаемо": нечитаемо})
+    except OSError as e:
+        print("core-backup: отметка секретов не записана (%s)" % type(e).__name__,
+              file=sys.stderr)
+
+
+def _в_бандл_нельзя(имя):
+    return any(fnmatch.fnmatch(имя, ш) for ш in НЕ_В_БАНДЛ)
+
+
+def состав_секретов(root):
+    """Файлы бандла секретов: пары (имя в архиве, путь) по allowlist каталогов
+    и число нечитаемых — их в бандле не будет, об этом скажет сверка
+    (`бэкап-секретов`), а не падение ночи. Нет каталога — пусто."""
+    файлы, нечитаемо = [], 0
+    for префикс, каталог in (("etc/mara", ЭТЦ_СЕКРЕТОВ),
+                             ("config/mara", os.path.expanduser(КОНФИГ_СЕКРЕТОВ)),
+                             ("blobs/tdlib", os.path.join(root, "tdlib")),
+                             ("blobs/gmail", os.path.join(root, "gmail"))):
+        for d, dirs, names in os.walk(каталог):
+            dirs[:] = sorted(x for x in dirs if not _в_бандл_нельзя(x))
+            for n in sorted(names):
+                p = os.path.join(d, n)
+                if _в_бандл_нельзя(n) or not os.path.isfile(p):
+                    continue
+                if not os.access(p, os.R_OK):
+                    нечитаемо += 1
+                    continue
+                файлы.append((os.path.join(префикс, os.path.relpath(p, каталог)), p))
+    return файлы, нечитаемо
+
+
+def запись(t, enc, имя, сводка, stage, root):
+    """Архив и сайдкар сводки на один носитель — путь или `sftp://`.
+    Не легло — `OSError`, прогон идёт к следующему носителю."""
+    if mi.удалённый(t):
+        return sftp_запись(t, enc, имя, сводка, stage)
+    if not mi.смонтирован(t, root):
+        # Не «недоступен»: каталог как раз доступен, в том и беда.
+        raise OSError("на одном устройстве с %s — носитель не смонтирован" % root)
+    # Имя связываем до `try`: чистка временного файла живёт в
+    # `except`, а до неё долетает и падение `makedirs`.
+    врем = os.path.join(t, "." + имя + ".tmp")
+    try:
+        os.makedirs(t, mode=0o700, exist_ok=True)
+        # временный файл на том же носителе: переименование между
+        # монтированиями не атомарно, а на CIFS ещё и не всегда работает
+        shutil.copy2(enc, врем)
+        os.chmod(врем, 0o600)
+        # Сверяем до переименования: под боевым именем битая копия не
+        # появляется ни на секунду, и §10 `TZ.md` не зачтёт её за
+        # третью.
+        сверить_копию(врем, сводка["sha256"])
+        os.replace(врем, os.path.join(t, имя))
+        with open(os.path.join(t, имя.replace(".tar.gz.gpg",
+                                              ".manifest.json")),
+                  "w", encoding="utf-8") as fh:
+            # рядом с архивом только сводка: имена файлов это id событий,
+            # им на сетевой шаре в открытом виде делать нечего
+            json.dump(сводка, fh, ensure_ascii=False, indent=1,
+                      sort_keys=True)
+        os.chmod(os.path.join(t, имя.replace(".tar.gz.gpg",
+                                             ".manifest.json")), 0o600)
+    except OSError:
+        try:
+            # Огрызок убираем, иначе на носителе, куда перестало
+            # писаться, за год накопится триста скрытых файлов:
+            # ротация ходит по `core-*` и этих имён не видит.
+            os.unlink(врем)
+        except OSError:
+            # Убраться не обязано: огрызка может не быть вовсе (упал
+            # `makedirs`), а носитель мог уйти в read-only ровно той
+            # же бедой. Падение здесь унесло бы прогон мимо остальных
+            # носителей, отметки, учения и ротации — то есть отказ
+            # одного носителя стоил бы всей ночной работы.
+            pass
+        raise
+
+
+def бандл_секретов(root, targets, пароль, stage, keep, weekly=0, monthly=0):
+    """Зашифрованный бандл секретов на те же носители (Т3б.5 п.5, ADR-0005
+    «Обязательный состав»): состав — `состав_секретов`, имена файлов — в
+    manifest внутри tar, в сайдкаре снаружи только числа. Без него ядро
+    восстанавливается через повторный вход в Telegram и OAuth Gmail;
+    раздел «Бандл секретов» в docs/backup-core.md."""
+    файлы, нечитаемо = состав_секретов(root)
+    if not файлы:
+        return {"пропущен": "состав пуст"}
+    имя = "secrets-%s.tar.gz.gpg" % datetime.now(mi.TZ).strftime("%F")
+    манифест = os.path.join(stage, "secrets-manifest.json")
+    mi.write_json(манифест, {"created": mi.now_iso(), "unreadable": нечитаемо,
+                             "files": [a for a, _ in файлы]})
+    tar = os.path.join(stage, "secrets.tar.gz")
+    with tarfile.open(tar, "w:gz") as tf:
+        tf.add(манифест, arcname="manifest.json")
+        for arc, p in файлы:
+            tf.add(p, arcname=arc)
+    enc = os.path.join(stage, имя)
+    шифр(tar, enc, пароль)
+    сводка = {"архив": имя, "байт": os.path.getsize(enc), "sha256": sha(enc),
+              "created": mi.now_iso(), "файлов": len(файлы),
+              "нечитаемо": нечитаемо}
+    записано = []
+    for t in targets:
+        try:
+            запись(t, enc, имя, сводка, stage, root)
+            записано.append(t)
+        except OSError as e:
+            print("core-backup: секреты на %s не записаны (%s)" % (t, e),
+                  file=sys.stderr)
+    if not записано:
+        raise RuntimeError("бандл секретов: ни один носитель не записан")
+    отметить_секреты(записано, нечитаемо, имя)
+    for t in записано:
+        ротация(t, keep, weekly, monthly, префикс="secrets")
+    return {"архив": имя, "байт": сводка["байт"], "носители": записано,
+            "файлов": len(файлы), "нечитаемо": нечитаемо}
+
+
 def прогон(root, targets, пароль, keep, work, аудио=True, drill=True, weekly=0,
            monthly=0):
     начало = time.time()
@@ -943,60 +1078,23 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
 
         записано = []
         for t in targets:
-            if mi.удалённый(t):
-                try:
-                    sftp_запись(t, enc, имя, сводка, stage)
-                    записано.append(t)
-                except OSError as e:
-                    print("core-backup: %s не записан (%s)" % (t, e),
-                          file=sys.stderr)
-                continue
-            if not mi.смонтирован(t, root):
-                # Не «недоступен»: каталог как раз доступен, в том и беда.
-                print("core-backup: %s на одном устройстве с %s — носитель не "
-                      "смонтирован, пропускаю" % (t, root), file=sys.stderr)
-                continue
-            # Имя связываем до `try`: чистка временного файла живёт в
-            # `except`, а до неё долетает и падение `makedirs`.
-            врем = os.path.join(t, "." + имя + ".tmp")
             try:
-                os.makedirs(t, mode=0o700, exist_ok=True)
-                # временный файл на том же носителе: переименование между
-                # монтированиями не атомарно, а на CIFS ещё и не всегда работает
-                shutil.copy2(enc, врем)
-                os.chmod(врем, 0o600)
-                # Сверяем до переименования: под боевым именем битая копия не
-                # появляется ни на секунду, и §10 `TZ.md` не зачтёт её за
-                # третью.
-                сверить_копию(врем, сводка["sha256"])
-                os.replace(врем, os.path.join(t, имя))
-                with open(os.path.join(t, имя.replace(".tar.gz.gpg",
-                                                      ".manifest.json")),
-                          "w", encoding="utf-8") as fh:
-                    # рядом с архивом только сводка: имена файлов это id событий,
-                    # им на сетевой шаре в открытом виде делать нечего
-                    json.dump(сводка, fh, ensure_ascii=False, indent=1,
-                              sort_keys=True)
-                os.chmod(os.path.join(t, имя.replace(".tar.gz.gpg",
-                                                     ".manifest.json")), 0o600)
+                запись(t, enc, имя, сводка, stage, root)
                 записано.append(t)
             except OSError as e:
                 print("core-backup: %s не записан (%s)" % (t, e),
                       file=sys.stderr)
-                try:
-                    # Огрызок убираем, иначе на носителе, куда перестало
-                    # писаться, за год накопится триста скрытых файлов:
-                    # ротация ходит по `core-*` и этих имён не видит.
-                    os.unlink(врем)
-                except OSError:
-                    # Убраться не обязано: огрызка может не быть вовсе (упал
-                    # `makedirs`), а носитель мог уйти в read-only ровно той
-                    # же бедой. Падение здесь унесло бы прогон мимо остальных
-                    # носителей, отметки, учения и ротации — то есть отказ
-                    # одного носителя стоил бы всей ночной работы.
-                    pass
         if not записано:
             raise RuntimeError("ни один носитель не записан")
+        try:
+            # Секреты — после ядра и только на носители, принявшие ядро; их
+            # сбой ночь не роняет: о нём скажут итог и сверка (`бэкап-секретов`).
+            секреты = бандл_секретов(root, записано, пароль, stage, keep,
+                                     weekly, monthly)
+        except Exception as e:
+            print("core-backup: бандл секретов не записан (%s)" % e,
+                  file=sys.stderr)
+            секреты = {"ошибка": str(e)}
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
@@ -1046,7 +1144,8 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
                                               строки=строки_снимка)
     бэкап_сек = round(time.time() - начало, 1)
     итог = {"архив": имя, "байт": сводка["байт"], "носители": записано,
-            "счётчики": сч, "аудио": зв, "секунд": бэкап_сек}
+            "счётчики": сч, "аудио": зв, "секунд": бэкап_сек,
+            "секреты": секреты}
     if перепись:
         итог["перепись"] = перепись
     if drill:
@@ -1141,11 +1240,13 @@ def прогон(root, targets, пароль, keep, work, аудио=True, drill
     return итог
 
 
-def _дата_архива(path):
-    """`core-ГГГГ-ММ-ДД.*` → дата; чужое имя — None."""
+def _дата_архива(path, префикс="core"):
+    """`core-ГГГГ-ММ-ДД.*` (или `secrets-…`) → дата; чужое имя — None."""
     имя = os.path.basename(path)
+    if not имя.startswith(префикс + "-"):
+        return None
     try:
-        return datetime.strptime(имя[5:15], "%Y-%m-%d").date() if имя.startswith("core-") else None
+        return datetime.strptime(имя[len(префикс) + 1:][:10], "%Y-%m-%d").date()
     except ValueError:
         return None
 
@@ -1178,30 +1279,33 @@ def поколения(даты, keep, weekly=0, monthly=0):
     return остаются
 
 
-def sftp_ротация(target, keep, weekly=0, monthly=0):
+def sftp_ротация(target, keep, weekly=0, monthly=0, префикс="core"):
     """Та же ротация поколениями на удалённой цели: список — `ls -1a`,
     уборка — `rm` одной пачкой. Огрызки `.core-*.tmp` — с `-`, как и
-    локальные: не убрался — полежит ещё сутки."""
+    локальные: не убрался — полежит ещё сутки. `префикс` — `core` или
+    `secrets`: поколения у каждого свои, чужие имена не трогаем."""
     _, каталог = _sftp(target)
     имена = [os.path.basename(x.strip())
              for x in sftp_батч(target, ["ls -1a %s" % каталог]).splitlines()
              if x.strip() and not x.startswith("sftp>")]
-    даты = [d for d in map(_дата_архива, fnmatch.filter(имена, "core-*.tar.gz.gpg")) if d]
+    даты = [d for d in (_дата_архива(x, префикс) for x in
+                        fnmatch.filter(имена, префикс + "-*.tar.gz.gpg")) if d]
     остаются = поколения(даты, keep, weekly, monthly)
-    убрать = ["-rm %s/%s" % (каталог, x) for x in fnmatch.filter(имена, ".core-*.tmp")]
-    for шаблон in ("core-*.tar.gz.gpg", "core-*.manifest.json"):
+    убрать = ["-rm %s/%s" % (каталог, x)
+              for x in fnmatch.filter(имена, "." + префикс + "-*.tmp")]
+    for шаблон in (префикс + "-*.tar.gz.gpg", префикс + "-*.manifest.json"):
         for x in sorted(fnmatch.filter(имена, шаблон)):
-            d = _дата_архива(x)
+            d = _дата_архива(x, префикс)
             if d is not None and d not in остаются:
                 убрать.append("rm %s/%s" % (каталог, x))
     if убрать:
         sftp_батч(target, убрать)
 
 
-def ротация(target, keep, weekly=0, monthly=0):
+def ротация(target, keep, weekly=0, monthly=0, префикс="core"):
     if mi.удалённый(target):
-        return sftp_ротация(target, keep, weekly, monthly)
-    for огрызок in glob.glob(os.path.join(target, ".core-*.tmp")):
+        return sftp_ротация(target, keep, weekly, monthly, префикс)
+    for огрызок in glob.glob(os.path.join(target, "." + префикс + "-*.tmp")):
         # Огрызок неудачной ночи, который не удалось убрать тогда же (носитель
         # ушёл в read-only). Имя с датой — следующая ночь его не перезапишет, а
         # `core-*` ниже точечных имён не видит: без этой уборки он лежал бы на
@@ -1218,12 +1322,12 @@ def ротация(target, keep, weekly=0, monthly=0):
             pass
     # поколения — по датам архивов; сайдкар манифеста живёт и умирает со
     # своим архивом, а не по собственному счёту
-    архивы = glob.glob(os.path.join(target, "core-*.tar.gz.gpg"))
-    даты = [d for d in map(_дата_архива, архивы) if d]
+    архивы = glob.glob(os.path.join(target, префикс + "-*.tar.gz.gpg"))
+    даты = [d for d in (_дата_архива(x, префикс) for x in архивы) if d]
     остаются = поколения(даты, keep, weekly, monthly)
-    for шаблон in ("core-*.tar.gz.gpg", "core-*.manifest.json"):
+    for шаблон in (префикс + "-*.tar.gz.gpg", префикс + "-*.manifest.json"):
         for файл in sorted(glob.glob(os.path.join(target, шаблон))):
-            d = _дата_архива(файл)
+            d = _дата_архива(файл, префикс)
             if d is not None and d not in остаются:
                 os.unlink(файл)
 
@@ -1352,8 +1456,10 @@ def подделка(root, work, пароль, dst, порча):
 def самопроверка():
     """Полный круг на игрушечном корне: бэкап, зеркало, разворачивание.
 
-    Отдельно проверяем, что tdlib и gmail в архив не попали: это не
-    придирка, а ТЗ §11 — ключи не должны уезжать на носители."""
+    Отдельно проверяем, что tdlib и gmail в архив ядра не попали, а в бандл
+    секретов (Т3б.5 п.5) легли вместе с `/etc/mara` и `~/.config/mara` без
+    `backup-pass` — ADR-0005 «Обязательный состав»."""
+    global ЭТЦ_СЕКРЕТОВ, КОНФИГ_СЕКРЕТОВ
     if not shutil.which("gpg"):
         print("core-backup: нет gpg, самопроверка пропущена")
         return
@@ -1361,12 +1467,23 @@ def самопроверка():
     боевая_отметка = mi.ОТМЕТКА_НОСИТЕЛЕЙ
     боевой_курсор = mi.КУРСОР_ПЕРЕЧИТКИ
     боевое_учение = mi.ОТМЕТКА_УЧЕНИЯ
+    боевые_секреты = mi.ОТМЕТКА_СЕКРЕТОВ
+    боевой_этц, боевой_конфиг = ЭТЦ_СЕКРЕТОВ, КОНФИГ_СЕКРЕТОВ
     os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"   # см. mi.смонтирован
     try:
         # Самопроверка учит по-настоящему (`drill`), и отметка учения легла бы
         # в боевой `~/.local/state/mara`: гейт на doctor молодил бы
         # `mara_backup_drill_age_seconds` при упавшем ночном учении (ревью Т9.1, P1)
         mi.ОТМЕТКА_УЧЕНИЯ = os.path.join(tmp, "state", "core-drill.json")
+        mi.ОТМЕТКА_СЕКРЕТОВ = os.path.join(tmp, "state", "core-secrets.json")
+        # состав бандла секретов — игрушечные `/etc/mara` и `~/.config/mara`
+        ЭТЦ_СЕКРЕТОВ = os.path.join(tmp, "etc")
+        КОНФИГ_СЕКРЕТОВ = os.path.join(tmp, "config")
+        os.makedirs(ЭТЦ_СЕКРЕТОВ)
+        os.makedirs(КОНФИГ_СЕКРЕТОВ)
+        open(os.path.join(ЭТЦ_СЕКРЕТОВ, "contextd.env"), "w").write("X=1\n")
+        open(os.path.join(КОНФИГ_СЕКРЕТОВ, "env"), "w").write("Y=2\n")
+        open(os.path.join(КОНФИГ_СЕКРЕТОВ, "backup-pass"), "w").write("не в бандл\n")
         root = os.path.join(tmp, "blobs")
         con = mi.connect(root)
         тело = b"audio-for-backup"
@@ -1382,7 +1499,7 @@ def самопроверка():
                                       ("extractions", "e1.json", "{}")):
             os.makedirs(os.path.join(root, каталог), exist_ok=True)
             open(os.path.join(root, каталог, имя_ф), "w").write(текст)
-        for d in СЕКРЕТЫ:                       # то, что уехать не должно
+        for d in СЕКРЕТЫ:                       # не в архив ядра — в бандл
             os.makedirs(os.path.join(root, d), exist_ok=True)
             open(os.path.join(root, d, "token.json"), "w").write("секрет")
         con.close()
@@ -1438,6 +1555,20 @@ def самопроверка():
         # содержимое архива, и манифест, так что сверка их друг с другом
         # усечения списка каталогов не видит — манифест тут не оракул.
         assert r["проверка"]["файлов"] == 4, r    # база, манифест, мелочь ×3
+        с = r["секреты"]
+        assert с["носители"] == [target, второй] and с["нечитаемо"] == 0, с
+        assert с["файлов"] == 4, с                # etc, config/env, token ×2
+        with open(os.path.join(target, с["архив"].replace(".tar.gz.gpg", ".manifest.json")),
+                  encoding="utf-8") as fh:
+            assert set(json.load(fh)) == {"архив", "байт", "sha256", "created",
+                                          "файлов", "нечитаемо"}, "в сайдкаре только числа"
+        дешифр(os.path.join(второй, с["архив"]), os.path.join(tmp, "secrets.tar.gz"), пароль)
+        with tarfile.open(os.path.join(tmp, "secrets.tar.gz")) as tf:
+            assert sorted(tf.getnames()) == [
+                "blobs/gmail/token.json", "blobs/tdlib/token.json", "config/mara/env",
+                "etc/mara/contextd.env", "manifest.json"], tf.getnames()
+        with open(mi.ОТМЕТКА_СЕКРЕТОВ, encoding="utf-8") as fh:
+            assert json.load(fh)["носители"] == [target, второй]
         assert r["носители"] == [target, второй], r
         assert r["аудио"][target]["новых"] == 1, r
         assert r["аудио"][второй]["новых"] == 1, r
@@ -2555,6 +2686,8 @@ def самопроверка():
         mi.ОТМЕТКА_НОСИТЕЛЕЙ = боевая_отметка
         mi.КУРСОР_ПЕРЕЧИТКИ = боевой_курсор
         mi.ОТМЕТКА_УЧЕНИЯ = боевое_учение
+        mi.ОТМЕТКА_СЕКРЕТОВ = боевые_секреты
+        ЭТЦ_СЕКРЕТОВ, КОНФИГ_СЕКРЕТОВ = боевой_этц, боевой_конфиг
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
         shutil.rmtree(tmp, ignore_errors=True)
 

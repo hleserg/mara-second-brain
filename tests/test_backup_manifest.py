@@ -41,6 +41,10 @@ class Манифест(unittest.TestCase):
     def setUp(self):
         self.мод = load("core-backup.py")
         self.tmp = tempfile.mkdtemp()
+        # состав бандла секретов (Т3б.5 п.5) — пустой: не везти в тест
+        # настоящие `/etc/mara` и `~/.config/mara`
+        self.мод.ЭТЦ_СЕКРЕТОВ = os.path.join(self.tmp, "нет-etc")
+        self.мод.КОНФИГ_СЕКРЕТОВ = os.path.join(self.tmp, "нет-config")
         self.root = os.path.join(self.tmp, "blobs")
         self.цель = os.path.join(self.tmp, "target")
         self.пароль = os.path.join(self.tmp, "pass")
@@ -65,7 +69,9 @@ class Манифест(unittest.TestCase):
             os.makedirs(os.path.join(self.root, каталог), exist_ok=True)
             open(os.path.join(self.root, каталог, имя_ф), "w").write(текст)
         self.env = {**os.environ, "MARA_BACKUP_ALLOW_SAME_DEV": "1",
-                    "MARA_STATE": os.path.join(self.tmp, "state")}
+                    "MARA_STATE": os.path.join(self.tmp, "state"),
+                    "MARA_SECRETS_ETC": self.мод.ЭТЦ_СЕКРЕТОВ,
+                    "MARA_SECRETS_CONFIG": self.мод.КОНФИГ_СЕКРЕТОВ}
         r = subprocess.run(
             [sys.executable, СКРИПТ, "--root", self.root,
              "--targets", self.цель, "--pass-file", self.пароль,
@@ -315,7 +321,9 @@ class Манифест(unittest.TestCase):
                 unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_НОСИТЕЛЕЙ",
                                            os.path.join(self.tmp, "state", "core-targets.json")), \
                 unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_УЧЕНИЯ",
-                                           os.path.join(self.tmp, "state", "core-drill.json")):
+                                           os.path.join(self.tmp, "state", "core-drill.json")), \
+                unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_СЕКРЕТОВ",
+                                           os.path.join(self.tmp, "state", "core-secrets.json")):
             os.makedirs(os.path.join(self.tmp, "state"), exist_ok=True)
             r = self.мод.прогон(self.root, [self.цель], self.пароль, 7,
                                 os.path.join(self.tmp, "work"), аудио=False, drill=True)
@@ -351,7 +359,9 @@ class Манифест(unittest.TestCase):
                 unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_НОСИТЕЛЕЙ",
                                            os.path.join(self.tmp, "state", "core-targets.json")), \
                 unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_УЧЕНИЯ",
-                                           os.path.join(self.tmp, "state", "core-drill.json")):
+                                           os.path.join(self.tmp, "state", "core-drill.json")), \
+                unittest.mock.patch.object(self.мод.mi, "ОТМЕТКА_СЕКРЕТОВ",
+                                           os.path.join(self.tmp, "state", "core-secrets.json")):
             os.makedirs(os.path.join(self.tmp, "state"), exist_ok=True)
             r = self.мод.прогон(self.root, [self.цель], self.пароль, 7,
                                 os.path.join(self.tmp, "work"), аудио=False, drill=True)

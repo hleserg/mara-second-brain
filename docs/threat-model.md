@@ -60,7 +60,7 @@
 |---|---|---|
 | Сырое аудио звонков | никуда с doctor, кроме шифрованного бэкапа | ASR на bigpc получает его по сети (см. п. 9 разд. 4) |
 | Сырые логи Telegram и Gmail | в волт, R2, бэкап | `blob_retention.py` чистит сырьё, манифест хранит `purged` |
-| Сессии TDLib и токен Gmail | в git, R2, бэкап | `core-backup.py:39` `СЕКРЕТЫ=("tdlib","gmail")` |
+| Сессии TDLib и токен Gmail | в git, R2, архив ядра | `core-backup.py` `СЕКРЕТЫ=("tdlib","gmail")`; едут только отдельным бандлом секретов под той же фразой (`бандл_секретов`, Т3б.5 п.5) |
 | Тело карточки обязательства | облачные LLM | пакет контекста берёт пять полей фронтматтера (`context_pack.py:68`) |
 | Карточки `sensitive: true` | облачные LLM | `queue-worker.py:54`, `daily-summary.py:62` |
 | `raw/` волта | R2 | `config/r2-filters.txt` |
@@ -195,7 +195,9 @@ ADR-0009). Hermes видит один пишущий инструмент — `m
 **7. Утечка через логи, бэкапы, виджеты.**
 Есть: `log_line` пишет имена ключей, а не значения (`contextd.py:340`);
 бэкапы шифруются (`core-backup.py:54`, `vault-backup.sh`); секреты
-источников в бэкап не попадают (`core-backup.py:39`); перед облаком
+источников в архив ядра не попадают (`core-backup.py:39`), а в бандле
+секретов имена файлов — внутри шифрованного tar, сайдкар несёт только
+числа (`бандл_секретов`); перед облаком
 работает `redact.py` (регулярки плюс Presidio). Виджетов в приложении нет.
 Дыра: соседний бот на doctor пишет токен в journald (вне Мары, владельцу
 сказано); волт в R2 открытым текстом (разд. 3).
@@ -301,7 +303,8 @@ doctor описаны файлами с версиями и sha256 каждог�
 | Ключ TLS contextd (Т0.9 п. 2) | `contextd.key` в каталоге `--tls-new` (например, `~/.config/mara/tls`), права 600; путь — `MARA_TLS_KEY` в `/etc/mara/contextd.env` | contextd |
 | Сессия TDLib | `/etc/mara/tdlib.env` и каталог `tdlib/` ядра | tdlib-ingest |
 | OAuth Gmail | `gmail/token.json` ядра (`gmail_ingest.py:484`) | gmail_ingest |
-| Парольная фраза бэкапов | `~/.config/mara/backup-pass`, права 600 | core-backup, vault-backup |
+| Парольная фраза бэкапов | `~/.config/mara/backup-pass`, права 600; в бандл секретов не входит | core-backup, vault-backup |
+| Бандл секретов (Т3б.5 п.5) | `secrets-<дата>.tar.gz.gpg` на носителях бэкапа: `/etc/mara`, `~/.config/mara` без фразы, ключ и binlog TDLib, токен Gmail | восстановление руками, `docs/backup-core.md` «Бандл секретов» |
 | Ключи R2 | конфиг rclone на doctor | vault-r2-sync |
 
 ### 5.2. Ранбук ротации

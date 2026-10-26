@@ -128,10 +128,17 @@ class Прогон(unittest.TestCase):
         self.боевое_учение = mi.ОТМЕТКА_УЧЕНИЯ
         self.учение = os.path.join(self.tmp, "state", "core-drill.json")
         mi.ОТМЕТКА_УЧЕНИЯ = self.учение
+        # и бандл секретов (Т3б.5 п.5): отметка — сюда же, состав — пустой,
+        # чтобы прогон не унёс настоящие `/etc/mara` и `~/.config/mara`
+        self.боевые_секреты = mi.ОТМЕТКА_СЕКРЕТОВ
+        mi.ОТМЕТКА_СЕКРЕТОВ = os.path.join(self.tmp, "state", "core-secrets.json")
+        self.cb.ЭТЦ_СЕКРЕТОВ = os.path.join(self.tmp, "нет-etc")
+        self.cb.КОНФИГ_СЕКРЕТОВ = os.path.join(self.tmp, "нет-config")
 
     def tearDown(self):
         mi.ОТМЕТКА_НОСИТЕЛЕЙ = self.боевая_отметка
         mi.ОТМЕТКА_УЧЕНИЯ = self.боевое_учение
+        mi.ОТМЕТКА_СЕКРЕТОВ = self.боевые_секреты
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("MARA_BACKUP_ALLOW_SAME_DEV", None)
 
@@ -215,6 +222,8 @@ class Прогон(unittest.TestCase):
             self.assertEqual(sorted(json.load(open(self.отметка, encoding="utf-8"))),
                              sorted([цель, url]))
             self.assertEqual(json.load(open(self.учение, encoding="utf-8"))["target"], цель)
+            # состав секретов пуст (setUp) — бандла на цели нет
+            self.assertEqual(r["секреты"], {"пропущен": "состав пуст"})
             self.assertEqual(sorted(os.listdir(os.path.join(удалённо, "mara"))),
                              [r["архив"].replace(".tar.gz.gpg", ".manifest.json"), r["архив"]])
             with self.assertRaisesRegex(RuntimeError, "учение"):
@@ -471,6 +480,165 @@ class Sftp(unittest.TestCase):
                                           "core-2026-10-22.manifest.json",
                                           "core-2026-10-22.tar.gz.gpg",
                                           "чужое.txt"])
+
+
+class Секреты(unittest.TestCase):
+    """Бандл секретов (Т3б.5 п.5) — без gpg: `шифр` подменён копированием."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cb = load("core-backup.py")
+        self.окружение = dict(os.environ)
+        bin_, self.удалённо = поддельный_sftp(self.tmp)
+        os.environ["PATH"] = bin_ + os.pathsep + os.environ["PATH"]
+        os.environ["FAKE_SFTP_ROOT"] = self.удалённо
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = "1"
+        self.root = os.path.join(self.tmp, "blobs")
+        self.cb.ЭТЦ_СЕКРЕТОВ = os.path.join(self.tmp, "etc")
+        self.cb.КОНФИГ_СЕКРЕТОВ = os.path.join(self.tmp, "config")
+        self.боевые_секреты = mi.ОТМЕТКА_СЕКРЕТОВ
+        mi.ОТМЕТКА_СЕКРЕТОВ = os.path.join(self.tmp, "state", "core-secrets.json")
+        self.stage = os.path.join(self.tmp, "stage")
+        os.makedirs(self.stage)
+        self.cb.шифр = lambda src, dst, пароль: shutil.copy(src, dst)
+
+    def tearDown(self):
+        mi.ОТМЕТКА_СЕКРЕТОВ = self.боевые_секреты
+        os.environ.clear()
+        os.environ.update(self.окружение)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def файл(self, *части, текст="x"):
+        p = os.path.join(self.tmp, *части)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "w").write(текст)
+        return p
+
+    def состав(self):
+        """Боевой состав doctor в миниатюре: ключи — да, кеши и живое — нет."""
+        for ч in (("etc", "contextd.env"), ("etc", "gmail.env"),
+                  ("config", "env"), ("config", "usage-hosts"), ("config", "tls", "cert.pem"),
+                  ("config", "backup-pass"),
+                  ("blobs", "tdlib", "key"), ("blobs", "tdlib", "phone"),
+                  ("blobs", "tdlib", "td.binlog"), ("blobs", "tdlib", "cursor.json"),
+                  ("blobs", "tdlib", "heartbeat"), ("blobs", "tdlib", "raw", "1.json"),
+                  ("blobs", "tdlib", "db", "database", "db.sqlite"),
+                  ("blobs", "tdlib", "db", "database", "db.sqlite-wal"),
+                  ("blobs", "gmail", "token.json"), ("blobs", "gmail", "lock"),
+                  ("blobs", "gmail", "raw", "2.json")):
+            self.файл(*ч)
+
+    ОЖИДАЕМО = ["blobs/gmail/token.json", "blobs/tdlib/cursor.json", "blobs/tdlib/key",
+                "blobs/tdlib/phone", "blobs/tdlib/td.binlog", "config/mara/env",
+                "config/mara/tls/cert.pem", "config/mara/usage-hosts",
+                "etc/mara/contextd.env", "etc/mara/gmail.env"]
+
+    def test_состав_по_allowlist_без_кешей_и_парольной_фразы(self):
+        self.состав()
+        файлы, нечитаемо = self.cb.состав_секретов(self.root)
+        self.assertEqual(sorted(a for a, _ in файлы), self.ОЖИДАЕМО)
+        self.assertEqual(нечитаемо, 0)
+        for _, p in файлы:
+            self.assertTrue(os.path.isfile(p), p)
+
+    @unittest.skipIf(os.geteuid() == 0, "root читает всё")
+    def test_нечитаемое_считается_а_не_роняет(self):
+        """`/etc/mara/tdlib.env` под root на doctor: в бандл не попадает,
+        счётчик — в отметку, об этом скажет сверка."""
+        self.состав()
+        os.chmod(self.файл("etc", "tdlib.env"), 0)
+        файлы, нечитаемо = self.cb.состав_секретов(self.root)
+        self.assertEqual(нечитаемо, 1)
+        self.assertNotIn("etc/mara/tdlib.env", [a for a, _ in файлы])
+
+    def test_нет_каталогов_состав_пуст(self):
+        self.assertEqual(self.cb.состав_секретов(self.root), ([], 0))
+        self.assertEqual(self.cb.бандл_секретов(self.root, [os.path.join(self.tmp, "t")],
+                                                "пароль", self.stage, keep=2),
+                         {"пропущен": "состав пуст"})
+        self.assertFalse(os.path.exists(mi.ОТМЕТКА_СЕКРЕТОВ), "пустой состав — без отметки")
+
+    def test_дата_архива_по_префиксу(self):
+        д = self.cb._дата_архива
+        self.assertEqual(str(д("/x/secrets-2026-10-26.tar.gz.gpg", "secrets")), "2026-10-26")
+        self.assertIsNone(д("/x/secrets-2026-10-26.tar.gz.gpg"), "ядро чужих имён не видит")
+        self.assertIsNone(д("/x/core-2026-10-26.tar.gz.gpg", "secrets"))
+        self.assertIsNone(д("/x/secrets-битое.tar.gz.gpg", "secrets"))
+
+    def test_запись_локально_сайдкар_600_и_без_огрызка_при_битой_копии(self):
+        enc = self.файл("stage", "secrets-2026-10-26.tar.gz.gpg", текст="байты")
+        имя = os.path.basename(enc)
+        сводка = {"sha256": self.cb.sha(enc), "байт": 5}
+        цель = os.path.join(self.tmp, "target")
+        self.cb.запись(цель, enc, имя, сводка, self.stage, self.root)
+        сайдкар = os.path.join(цель, "secrets-2026-10-26.manifest.json")
+        self.assertEqual(sorted(os.listdir(цель)), [os.path.basename(сайдкар), имя])
+        self.assertEqual(os.stat(сайдкар).st_mode & 0o777, 0o600)
+        with unittest.mock.patch.object(self.cb, "сверить_копию",
+                                        side_effect=OSError("копия прочиталась не тем")):
+            with self.assertRaisesRegex(OSError, "не тем"):
+                self.cb.запись(os.path.join(self.tmp, "t2"), enc, имя, сводка,
+                               self.stage, self.root)
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "t2")), [], "огрызок убран")
+        os.environ["MARA_BACKUP_ALLOW_SAME_DEV"] = ""
+        with self.assertRaisesRegex(OSError, "носитель не смонтирован"):
+            self.cb.запись(os.path.join(self.tmp, "t3"), enc, имя, сводка,
+                           self.stage, self.root)
+
+    def test_ротация_по_префиксу_не_трогает_ядро(self):
+        цель = os.path.join(self.tmp, "target")
+        for п in ("core", "secrets"):
+            for д in ("2026-10-20", "2026-10-21", "2026-10-22"):
+                for с in (".tar.gz.gpg", ".manifest.json"):
+                    self.файл("target", "%s-%s%s" % (п, д, с))
+            self.файл("target", ".%s-2026-10-19.tar.gz.gpg.tmp" % п)
+        self.cb.ротация(цель, keep=1, префикс="secrets")
+        self.assertEqual(sorted(os.listdir(цель)),
+                         [".core-2026-10-19.tar.gz.gpg.tmp"]
+                         + sorted("core-%s%s" % (д, с) for д in ("2026-10-20", "2026-10-21", "2026-10-22")
+                                  for с in (".tar.gz.gpg", ".manifest.json"))
+                         + ["secrets-2026-10-22.manifest.json", "secrets-2026-10-22.tar.gz.gpg"])
+        # и на sftp — те же шаблоны
+        каталог = os.path.join(self.удалённо, "mara")
+        for п in ("core", "secrets"):
+            for д in ("2026-10-20", "2026-10-21"):
+                self.файл("remote", "mara", "%s-%s.tar.gz.gpg" % (п, д))
+        self.файл("remote", "mara", ".secrets-2026-10-19.tar.gz.gpg.tmp")
+        self.cb.ротация("sftp://user@host/mara", keep=1, префикс="secrets")
+        self.assertEqual(sorted(os.listdir(каталог)),
+                         ["core-2026-10-20.tar.gz.gpg", "core-2026-10-21.tar.gz.gpg",
+                          "secrets-2026-10-21.tar.gz.gpg"])
+
+    def test_бандл_на_носитель_и_sftp(self):
+        self.состав()
+        цель = os.path.join(self.tmp, "target")
+        url = "sftp://user@host/mara"
+        self.файл("target", "secrets-2020-01-01.tar.gz.gpg")   # старое поколение
+        r = self.cb.бандл_секретов(self.root, [цель, url], "пароль", self.stage, keep=1)
+        имя = r["архив"]
+        self.assertTrue(имя.startswith("secrets-") and имя.endswith(".tar.gz.gpg"), имя)
+        self.assertEqual((r["носители"], r["файлов"], r["нечитаемо"]), ([цель, url], 10, 0))
+        сайдкар = имя.replace(".tar.gz.gpg", ".manifest.json")
+        self.assertEqual(sorted(os.listdir(цель)), [сайдкар, имя], "ротация убрала 2020")
+        self.assertEqual(sorted(os.listdir(os.path.join(self.удалённо, "mara"))), [сайдкар, имя])
+        with open(os.path.join(цель, сайдкар), encoding="utf-8") as fh:
+            self.assertEqual(sorted(json.load(fh)),
+                             ["created", "sha256", "архив", "байт", "нечитаемо", "файлов"],
+                             "в сайдкаре только числа, имена файлов — внутри")
+        import tarfile
+        with tarfile.open(os.path.join(цель, имя)) as tf:    # `шифр` = копия
+            self.assertEqual(sorted(tf.getnames()), sorted(self.ОЖИДАЕМО + ["manifest.json"]))
+            манифест = json.load(tf.extractfile("manifest.json"))
+        self.assertEqual((sorted(манифест["files"]), манифест["unreadable"]), (self.ОЖИДАЕМО, 0))
+        with open(mi.ОТМЕТКА_СЕКРЕТОВ, encoding="utf-8") as fh:
+            о = json.load(fh)
+        self.assertEqual((о["носители"], о["нечитаемо"], о["archive"]), ([цель, url], 0, имя))
+        # мёртвый хост — цель «не записана», носитель — записан; никого — отказ
+        r = self.cb.бандл_секретов(self.root, [цель, "sftp://user@dead/mara"], "пароль",
+                                   self.stage, keep=1)
+        self.assertEqual(r["носители"], [цель])
+        with self.assertRaisesRegex(RuntimeError, "ни один носитель"):
+            self.cb.бандл_секретов(self.root, ["sftp://user@dead/mara"], "пароль",
+                                   self.stage, keep=1)
 
 
 if __name__ == "__main__":
