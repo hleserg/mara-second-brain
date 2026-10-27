@@ -1128,8 +1128,8 @@ commit`, `stop`), три точки отката, шаги 3, 5, 5а, живой
 
 ## 7о. Прогон 15 — 2026-10-27, 16:32 MSK, миграция 10 и APK
 
-Выкат #209–#213 (`9291208` → `a4dbf24`: срок токена 180 суток с миграцией
-10, `ledger_import` «completed → done», цель `sftp://` и бандл секретов в
+Выкат #207–#213 (`9291208` → `a4dbf24`, семь коммитов, два из них только
+документы: срок токена 180 суток с миграцией 10, `ledger_import` «completed → done», цель `sftp://` и бандл секретов в
 кроне, вердикт Т2.8) агентом с мака скриптом по шагам 1–6 §5 с `--migrate`
 (Г4 — сперва на копии базы, см. таблицу), `install-cron.sh --apply` и
 пересборкой APK. Волт в диапазоне не менялся: точка отката волта и сухой
@@ -1139,7 +1139,7 @@ commit`, `stop`), три точки отката, шаги 3, 5, 5а, живой
 |---|---|---|
 | До выката | `main`, `9291208`, отстаёт на 7; неотслеживаемые те же два файла; демон `active`; `--no-merged` — те же две старые ветки | шаг 1 |
 | Цель | `a4dbf24` — голова `main`; `osv`, `python`, `kotlin` — `success` | шаг 2, `gh api …/commits/<sha>/check-runs` |
-| Миграция в диапазоне | да, миграция 10 (`alter table devices add column expires`, откат — `drop column`): грэп по `scripts/` rc 0; в `install/` — `install-cron.sh` +20, `mara.cron` +6 | шаг 2, `git diff --stat 9291208..a4dbf24 -- install/` |
+| Миграция в диапазоне | да, миграция 10 (`alter table devices add column expires`, откат — `drop column`): грэп по `scripts/` rc 0; в `scripts/`+`install/` 7 файлов (+502/−85): `core-backup.py` +345, `contextd_reconcile.py` +90, `mara_ingest.py` +59, `contextd.py` +42, `ledger_import.py` +25, `install-cron.sh` +20, `mara.cron` +6 | шаг 2, `git diff --stat 9291208..a4dbf24 -- scripts/ install/` |
 | `MARA_OWNER` / `MARA_OWNER_NAME` в env | 1 / 1 | шаг 2 |
 | Г4 на копии | копия базы через backup API в `/tmp/mig10.Fepl/` (снимок до миграции `contextd.db.pre10`, 162 738 176 байт), `MARA_BLOBS=<копия> mara_ingest.py --migrate` скриптом цели: `версия 9 → 10, integrity_check: ok, foreign_key_check: ok`; устройств 10, живых со сроком 9 (2027-03-01…03-10), отозванных без срока 1, просроченных 0 | до шага 3, `python3` + `sqlite3` ro |
 | Точки отката (§5 п.1) | код — тег `deploy-before-20261027-163241` на `9291208`; база — снимок до миграции в `/tmp` (умирает с ребутом) и `_откат_10`; крон — `~/.local/state/mara/crontab-20261027T163315.bak` | шаг 3, `--apply` |
