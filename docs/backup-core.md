@@ -727,7 +727,8 @@ MARA_BLOBS=/srv/mara-blobs python3 scripts/ledger_import.py --vault /srv/vault
 MARA_BLOBS=/srv/mara-blobs python3 scripts/restore_check.py --root /srv/mara-blobs --vault /srv/vault
 MARA_BLOBS=/srv/mara-blobs python3 scripts/vault_rebuild.py --check --diff --vault /srv/vault
 # Карточки, которые реестр умеет нарисовать сам, — в пустой каталог (Т2.6);
-# в живой волт пересборка не пишет до Т2.8. Рядом ложится манифест проекций
+# в живой волт пересборка не пишет (Г4; шапку там чинит `ledger_import.py
+# --write-ids`). Рядом ложится манифест проекций
 # реестра: `vault_manifest.py --check --vault /var/tmp/vault-rebuilt` назовёт
 # карточки, которых пересборка не нарисовала («файлов нет» — брать из git).
 # Код 1 здесь — по той же причине, что у `--check`: карточки, правленные

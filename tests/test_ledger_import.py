@@ -1004,6 +1004,33 @@ class Идентичность(unittest.TestCase):
         счёт, _ = li.сверка(self.con, self.vault)
         self.assertEqual(счёт["спорных"], 1)
 
+    def test_write_ids_пишет_статус_реестра_в_нетронутую_шапку(self):
+        """Т2.8б (ADR-0001): `completed` в шапке перенос читает как `done`,
+        и шапка отставала от реестра навсегда — `vault_drift.py` видел
+        «шапка разошлась». Статус строки вписывается в карточку, не тронутую
+        после проекции; правленная рукой — не трогается."""
+        p = карточка(self.vault, "kb/commitments/a.md", status="completed")
+        li.run(self.con, self.vault)
+        self.assertEqual(self.con.execute(
+            "select status from commitments").fetchone()[0], "done")
+        li.вписать_id(self.con, self.vault)
+        with open(p, encoding="utf-8") as fh:
+            текст = fh.read()
+        self.assertIn("\nstatus: done\n", текст)
+        self.assertNotIn("completed", текст)
+        self.assertIn("\nid: ", текст)
+        self.assertEqual(self.con.execute(
+            "select content_sha256 from projections where path='kb/commitments/a.md'"
+        ).fetchone()[0], li.отпечаток(текст))
+        self.assertEqual(li.вписать_id(self.con, self.vault), (0, 0))
+        # правка рукой после проекции: статус в шапке не перезаписывается,
+        # её заберёт следующий перенос как правку владельца
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(текст.replace("status: done", "status: completed") + "ещё строка\n")
+        self.assertEqual(li.вписать_id(self.con, self.vault), (0, 0))
+        with open(p, encoding="utf-8") as fh:
+            self.assertIn("\nstatus: completed\n", fh.read())
+
     def test_write_ids_обходит_спорную_карточку(self):
         """Ревью P3-11: карточка на пути удалённой соседки (её проекция
         осталась) — спор для переноса; `--write-ids` падал на ключе
