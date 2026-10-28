@@ -141,7 +141,7 @@ class Манифест(unittest.TestCase):
         self.assertEqual(итог["файлов не как в манифесте"], 1)
         self.assertFalse(vm.расхождение(итог))
         self.assertTrue(vm.расхождение(итог, strict=True))
-        self.assertEqual(rc.манифест_проекций(self.con, self.vault), [], "норма дня до Т2.8")
+        self.assertEqual(rc.манифест_проекций(self.con, self.vault), [], "правка рукой — норма (п.4 ADR-0001)")
 
     def test_перенос_переписывает_манифест_после_правки_рукой(self):
         with open(os.path.join(self.vault, self.card), "a", encoding="utf-8") as fh:

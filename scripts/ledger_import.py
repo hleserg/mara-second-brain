@@ -25,7 +25,7 @@ Obsidian, и это не повод завести второе обязател
 
     python3 scripts/ledger_import.py --dry-run     # посчитать, ничего не писать
     python3 scripts/ledger_import.py               # перенести
-    python3 scripts/ledger_import.py --write-ids   # Т2.2: id из реестра в шапки карточек
+    python3 scripts/ledger_import.py --write-ids   # Т2.2/Т2.8б: id и статус из реестра в шапки
     python3 scripts/ledger_import.py --self-check
 
 Идентичность (Т2.2, ADR-0002). Id объекта рождается один раз и живёт в
@@ -34,9 +34,13 @@ Obsidian, и это не повод завести второе обязател
 восстановленный без базы) → новый uuid7. Перенос и проектор зовут одну и ту
 же `перенести_карточку`, так что у карточки, которую `call_project` только
 что записал, строка в реестре появляется тем же вызовом, а не ночным кроном.
-`--write-ids` — разовый шаг на doctor с паузой писателей
+`--write-ids` — шаг после переноса на doctor под флоком волта
 (`docs/migration-plan.md` §4 шаг 4): вписывает `id:` из реестра в карточки,
-у которых его нет; откат — git волта.
+у которых его нет, и статус строки реестра в карточки, где он другой
+(Т2.8б, ADR-0001: реестр — авторитет, шапка — проекция; `completed` в шапке
+перенос читает как `done`, и без этого шага `vault_drift.py` видел бы
+«шапка разошлась»). Карточка, изменённая после проекции, не трогается:
+это правка рукой, которую заберёт следующий перенос. Откат — git волта.
 
 Evidence (ADR-0004 п.5, обратный путь). Проектор пишет строки `evidence_refs`
 из извлечения, а в шапку карточки — их копию списком `evidence`. Реестр,
@@ -626,28 +630,35 @@ def перенести_карточку(con, vault, rel, актор=ПЕРЕНО
 ШАПКА = re.compile(r"^---\n(.*?)\n---\n", re.S)
 
 
-def _с_id(текст, oid):
-    """Текст карточки с `id: <oid>` в шапке: строка заменяется на месте, а
-    новой встаёт сразу за `title:` — остальные байты не трогаются, как в
-    `call_project._шапка`: Basic Memory дописывает в карточки свои ключи."""
+def _в_шапку(текст, **поля):
+    """Текст карточки с полями `поля` в шапке: строка заменяется на месте, а
+    новый `id` встаёт сразу за `title:`, прочие — в конец шапки; остальные
+    байты не трогаются, как в `call_project._шапка`: Basic Memory
+    дописывает в карточки свои ключи."""
     m = ШАПКА.match(текст)
     if not m:
         return None
     строки = m.group(1).split("\n")
-    for i, l in enumerate(строки):
-        if l.startswith("id:"):
-            строки[i] = "id: " + oid
-            break
-    else:
-        после = next((i for i, l in enumerate(строки) if l.startswith("title:")), -1)
-        строки.insert(после + 1, "id: " + oid)
+    for k, v in поля.items():
+        for i, l in enumerate(строки):
+            if l.startswith(k + ":"):
+                строки[i] = "%s: %s" % (k, v)
+                break
+        else:
+            после = (next((i for i, l in enumerate(строки) if l.startswith("title:")), -1)
+                     if k == "id" else len(строки) - 1)
+            строки.insert(после + 1, "%s: %s" % (k, v))
     return "---\n" + "\n".join(строки) + "\n---\n" + текст[m.end():]
 
 
 def вписать_id(con, vault, dry_run=False):
     """Т2.2: id из реестра — в шапку каждой карточки, где его нет или он
-    другой. Пишет волт, поэтому только под флоком и только с паузой
-    писателей на doctor. Возвращает (вписано, пропущено без строки).
+    другой; Т2.8б: туда же статус строки реестра, если шапка с ним
+    разошлась, — но только у карточки, не тронутой после проекции
+    (`projections.content_sha256` тот же): изменённая — правка рукой,
+    её заберёт перенос, а не затрёт проекция (ADR-0001 п.3–4). Пишет
+    волт, поэтому только под флоком. Возвращает (вписано, пропущено без
+    строки).
 
     Пишется нормализованный текст: BOM снят, CRLF → LF (так читает
     `_карточка`). Для карточки из винды или синка это правка байтов сверх
@@ -665,9 +676,22 @@ def вписать_id(con, vault, dry_run=False):
                 if row is None or спор:
                     без_строки += 1
                     continue
-                if (_строка(fm.get("id")) or "").strip() == row["id"]:
+                поля = {}
+                if (_строка(fm.get("id")) or "").strip() != row["id"]:
+                    поля["id"] = row["id"]
+                if вид == "commitment":
+                    p = con.execute(
+                        "select p.content_sha256, o.status from projections p "
+                        "join commitments o on o.id = p.object_id "
+                        "where p.object_id=? and p.object_kind=?",
+                        (row["id"], вид)).fetchone()
+                    # сырое значение шапки, не `_статус`: `completed` он
+                    # и читает как `done`, а вписать надо именно `done`
+                    if p and p[0] == sha and p[1] != (_строка(fm.get("status")) or "proposed"):
+                        поля["status"] = p[1]
+                if not поля:
                     continue
-                новый = _с_id(текст, row["id"])
+                новый = _в_шапку(текст, **поля)
                 if новый is None:
                     continue
                 вписано += 1
@@ -1055,7 +1079,7 @@ def main(argv=None):
     ap.add_argument("--vault", default=VAULT)
     ap.add_argument("--dry-run", action="store_true", dest="dry_run")
     ap.add_argument("--write-ids", action="store_true", dest="write_ids",
-                    help="Т2.2: вписать id из реестра в шапки карточек")
+                    help="Т2.2/Т2.8б: вписать id и статус из реестра в шапки карточек")
     ap.add_argument("--self-check", action="store_true", dest="self_check")
     a = ap.parse_args(argv)
     if a.self_check:
